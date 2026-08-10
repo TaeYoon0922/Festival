@@ -1,0 +1,3 @@
+# Data loading dependencies.
+pandas
+openpyxl
