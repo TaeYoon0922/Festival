@@ -1,2 +1,19 @@
+# Local disclosure corpus (the raw directory may be a symlink).
 raw/
+data/corpus/raw
+data/processed/
+
+# Local configuration and archives.
+.env
+*.zip
+
+# Python.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# macOS archive metadata.
 .DS_Store
+__MACOSX/

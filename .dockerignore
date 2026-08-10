@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.venv
+venv
+__pycache__
+*.py[cod]
+*.zip
+data/corpus/raw
+data/processed
+__MACOSX/
+.DS_Store
