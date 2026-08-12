@@ -25,8 +25,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT / "data" / "processed" / "sample_20",
     )
-    parser.add_argument("--max-chars", type=int, default=1_200)
-    parser.add_argument("--overlap", type=int, default=150)
+    parser.add_argument("--max-chars", type=int, default=1_500)
+    parser.add_argument("--overlap", type=int, default=120)
     return parser.parse_args()
 
 

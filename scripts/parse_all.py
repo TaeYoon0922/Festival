@@ -19,8 +19,10 @@ from app.parsing.full_pipeline import run_full_pipeline
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parse all corpus XML/HTML sources.")
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--max-chars", type=int, default=1_200)
-    parser.add_argument("--overlap", type=int, default=150)
+    parser.add_argument("--target-chars", type=int, default=1_200)
+    parser.add_argument("--min-chars", type=int, default=700)
+    parser.add_argument("--max-chars", type=int, default=1_500)
+    parser.add_argument("--overlap", type=int, default=120)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--output",
@@ -39,6 +41,8 @@ def main() -> None:
         workers=args.workers,
         max_chars=args.max_chars,
         overlap=args.overlap,
+        target_chars=args.target_chars,
+        min_chars=args.min_chars,
         resume=not args.overwrite,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

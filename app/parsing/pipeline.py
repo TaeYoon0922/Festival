@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.parsing.chunking import build_chunks
+from app.parsing.chunking import CHUNKING_VERSION, build_chunks
 from app.parsing.dart_xml import parse_dart_document
 from app.parsing.sampling import resolve_unicode_path, select_sample_documents
 
@@ -24,8 +24,8 @@ def run_sample_pipeline(
     manifest_path: Path,
     output_dir: Path,
     per_group: int = 5,
-    max_chars: int = 1_200,
-    overlap: int = 150,
+    max_chars: int = 1_500,
+    overlap: int = 120,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     document_dir = output_dir / "documents"
@@ -43,12 +43,16 @@ def run_sample_pipeline(
                 "doc_id",
                 "doc_group",
                 "doc_subtype",
+                "corp_code",
                 "corp_name",
                 "listed_name",
+                "stock_code",
                 "report_nm",
                 "rcept_no",
                 "rcept_dt",
                 "is_correction",
+                "base_year",
+                "base_month",
                 "file_format",
                 "source_path",
                 "source_size",
@@ -71,6 +75,8 @@ def run_sample_pipeline(
             parsed=parsed,
             max_chars=max_chars,
             overlap=overlap,
+            document_metadata=row,
+            source_file=str(row["source_path"]),
         )
         section_map = parsed.section_map()
         document_metadata = {
@@ -89,6 +95,8 @@ def run_sample_pipeline(
                 "rcept_no",
                 "rcept_dt",
                 "is_correction",
+                "base_year",
+                "base_month",
                 "file_format",
                 "file_path",
                 "source_path",
@@ -96,7 +104,15 @@ def run_sample_pipeline(
             )
         }
         payload = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
+            "chunking": {
+                "version": CHUNKING_VERSION,
+                "strategy": str(row.get("doc_group") or "default"),
+                "target_chars": 1_200,
+                "min_chars": 700,
+                "max_chars": max_chars,
+                "sentence_overlap_chars": overlap,
+            },
             "document": {
                 **document_metadata,
                 "parsed_title": parsed.document_title,

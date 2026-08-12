@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from app.parsing.chunking import build_chunks
+from app.parsing.chunking import CHUNKING_VERSION, build_chunks
 from app.parsing.dart_xml import parse_dart_document
 from app.parsing.sampling import load_manifest, resolve_unicode_path
 
@@ -71,7 +71,9 @@ def _summarize_payload(
     document = payload["document"]
     part = payload["part"]
     chunks = payload["chunks"]
-    chunk_kinds = Counter(chunk["kind"] for chunk in chunks)
+    chunk_kinds = Counter(
+        chunk.get("chunk_type", chunk.get("kind")) for chunk in chunks
+    )
     return {
         "part_id": part["part_id"],
         "doc_id": document["doc_id"],
@@ -99,9 +101,25 @@ def _process_source(task: dict[str, Any]) -> dict[str, Any]:
     if task["resume"] and output_path.is_file():
         try:
             payload = _read_gzip_json(output_path)
-            return _summarize_payload(
-                payload, output_relative=task["output_relative"], status="resumed"
-            )
+            expected_chunking = {
+                "version": CHUNKING_VERSION,
+                "strategy": str(task["row"].get("doc_group") or "default"),
+                "target_chars": int(task["target_chars"]),
+                "min_chars": int(task["min_chars"]),
+                "max_chars": int(task["max_chars"]),
+                "sentence_overlap_chars": int(task["overlap"]),
+            }
+            source_size = Path(task["source_path"]).stat().st_size
+            if (
+                payload.get("schema_version") == "2.0"
+                and payload.get("chunking") == expected_chunking
+                and payload.get("part", {}).get("source_size") == source_size
+            ):
+                return _summarize_payload(
+                    payload,
+                    output_relative=task["output_relative"],
+                    status="resumed",
+                )
         except (OSError, EOFError, json.JSONDecodeError, KeyError):
             pass
 
@@ -112,14 +130,26 @@ def _process_source(task: dict[str, Any]) -> dict[str, Any]:
         fallback_title=str(row.get("report_nm") or "공시 문서"),
     )
     chunks = build_chunks(
-        doc_id=task["part_id"],
+        doc_id=str(row["doc_id"]),
         parsed=parsed,
         max_chars=int(task["max_chars"]),
         overlap=int(task["overlap"]),
+        document_metadata=row,
+        source_file=task["source_relative"],
+        target_chars=int(task["target_chars"]),
+        min_chars=int(task["min_chars"]),
     )
     section_map = parsed.section_map()
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
+        "chunking": {
+            "version": CHUNKING_VERSION,
+            "strategy": str(row.get("doc_group") or "default"),
+            "target_chars": int(task["target_chars"]),
+            "min_chars": int(task["min_chars"]),
+            "max_chars": int(task["max_chars"]),
+            "sentence_overlap_chars": int(task["overlap"]),
+        },
         "document": {
             **_document_metadata(row),
             "parsed_title": parsed.document_title,
@@ -152,6 +182,8 @@ def build_full_tasks(
     max_chars: int,
     overlap: int,
     resume: bool,
+    target_chars: int = 1_200,
+    min_chars: int = 700,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     tasks: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
@@ -207,6 +239,8 @@ def build_full_tasks(
                     "output_relative": str(output_relative),
                     "max_chars": max_chars,
                     "overlap": overlap,
+                    "target_chars": target_chars,
+                    "min_chars": min_chars,
                     "resume": resume,
                 }
             )
@@ -233,9 +267,11 @@ def run_full_pipeline(
     manifest_path: Path,
     output_dir: Path,
     workers: int = 4,
-    max_chars: int = 1_200,
-    overlap: int = 150,
+    max_chars: int = 1_500,
+    overlap: int = 120,
     resume: bool = True,
+    target_chars: int = 1_200,
+    min_chars: int = 700,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     tasks, missing = build_full_tasks(
@@ -245,6 +281,8 @@ def run_full_pipeline(
         max_chars=max_chars,
         overlap=overlap,
         resume=resume,
+        target_chars=target_chars,
+        min_chars=min_chars,
     )
     plan_rows = [
         {

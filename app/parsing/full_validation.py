@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from app.parsing.chunking import REQUIRED_CHUNK_FIELDS
 from app.parsing.sampling import resolve_unicode_path
 
 
@@ -73,6 +74,8 @@ def validate_full_output(
         section_ids = {section["section_id"] for section in sections}
         table_ids = {table["table_id"] for table in tables}
         local_chunk_ids: set[str] = set()
+        structural = payload.get("schema_version") == "2.0"
+        document = payload.get("document", {})
 
         if not sections:
             add_error(f"{part_id}: no sections")
@@ -92,7 +95,7 @@ def validate_full_output(
         for table in tables:
             if table.get("section_id") not in section_ids or not table.get("rows"):
                 add_error(f"{part_id}: invalid table {table.get('table_id')}")
-        for chunk in chunks:
+        for chunk_index, chunk in enumerate(chunks):
             chunk_id = str(chunk["chunk_id"])
             content = str(chunk["content"])
             if chunk_id in local_chunk_ids:
@@ -102,12 +105,43 @@ def validate_full_output(
                 add_error(f"{chunk_id}: empty content")
             if chunk.get("char_count") != len(content):
                 add_error(f"{chunk_id}: invalid char_count")
-            if len(content) > max_chars:
+            if not structural and len(content) > max_chars:
                 add_error(f"{chunk_id}: exceeds {max_chars} characters")
             if chunk.get("section_id") not in section_ids or not chunk.get("section_path"):
                 add_error(f"{chunk_id}: invalid section reference")
-            if chunk.get("kind") == "table" and chunk.get("table_id") not in table_ids:
+            chunk_type = chunk.get("chunk_type", chunk.get("kind"))
+            if chunk_type == "table" and chunk.get("table_id") not in table_ids:
                 add_error(f"{chunk_id}: invalid table reference")
+            if structural:
+                missing = [field for field in REQUIRED_CHUNK_FIELDS if field not in chunk]
+                if missing:
+                    add_error(f"{chunk_id}: missing metadata {missing}")
+                for field in (
+                    "doc_id",
+                    "corp_code",
+                    "corp_name",
+                    "stock_code",
+                    "doc_group",
+                    "doc_subtype",
+                    "report_nm",
+                    "rcept_no",
+                    "rcept_dt",
+                    "is_correction",
+                    "base_year",
+                    "base_month",
+                ):
+                    if chunk.get(field) != document.get(field):
+                        add_error(f"{chunk_id}: metadata mismatch for {field}")
+                expected_previous = chunks[chunk_index - 1]["chunk_id"] if chunk_index else None
+                expected_next = (
+                    chunks[chunk_index + 1]["chunk_id"]
+                    if chunk_index + 1 < len(chunks)
+                    else None
+                )
+                if chunk.get("prev_chunk_id") != expected_previous:
+                    add_error(f"{chunk_id}: invalid prev_chunk_id")
+                if chunk.get("next_chunk_id") != expected_next:
+                    add_error(f"{chunk_id}: invalid next_chunk_id")
             max_chunk_size = max(max_chunk_size, len(content))
 
         if warnings:
