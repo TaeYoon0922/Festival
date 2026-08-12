@@ -81,6 +81,7 @@ class _TableBuilder:
             is_header=self.current_cell["tag"] == "th",
             rowspan=int(self.current_cell["rowspan"]),
             colspan=int(self.current_cell["colspan"]),
+            source_tag=str(self.current_cell["tag"]),
         )
         assert self.current_row is not None
         self.current_row.append(cell)

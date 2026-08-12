@@ -38,6 +38,21 @@ python -m app
 python -m unittest discover
 ```
 
+## 구조 보존 청킹
+
+파서가 복원한 문서 계층과 표 구조를 유지한 채 검색용 chunk를 생성합니다.
+
+- 본문: `section → paragraph → sentence → chunk`
+- 표: 병합 셀을 논리 그리드로 복원한 뒤 `header → row group`
+- 공시 유형: `periodic`, `major/exchange`, `holding`별 독립 전략
+- 검색 문맥: 원문 `content`와 별도로 기업·공시·section 경로를 포함한
+  `retrieval_text` 생성
+- 추적성: 문서/section/table metadata, 결정적 chunk ID, 앞뒤 chunk 링크 보존
+
+표 행은 문자 길이 때문에 분할하지 않습니다. 작은 이벤트·key-value 표는 통째로
+유지하고, 큰 표만 행 묶음으로 나누며 모든 묶음에 동일한 header와 표 context를
+반복합니다.
+
 ## 20건 파싱 파일럿
 
 Vector DB나 외부 LLM을 사용하지 않고 다음 단계만 수행합니다.
@@ -61,6 +76,31 @@ python scripts/validate_sample.py
 - `documents/*.json`: 문서별 Section, Table, Chunk 결과
 
 생성 결과는 재생성 가능하므로 Git에서 제외합니다.
+
+기존 고정 길이 청커와 구조 청커를 동일한 20건에서 비교하려면 다음 명령을
+사용합니다.
+
+```bash
+python scripts/compare_chunking_pilot.py
+```
+
+결과는 `data/processed/chunking_pilot_20`에 생성됩니다.
+
+- `comparison.json`: 전체·공시 유형별 정량 지표와 검토 표본
+- `comparison.md`: 사람이 읽을 수 있는 비교표와 대표 chunk
+- `documents/*.json`: 구조 청커로 생성한 문서별 schema 2.0 결과
+
+20건 비교 결과를 검토하기 전에는 전체 코퍼스를 다시 처리하지 않습니다.
+
+전체 재처리 전 최종 freeze gate는 저장된 20건 pilot에 대한 길이·제외 표 audit와
+Legacy/Structural BM25 비교, 유형별 정정공시 3건씩의 추가 검증만 수행합니다.
+
+```bash
+python scripts/run_final_chunking_validation.py
+```
+
+결과는 `data/processed/chunking_final_validation`에 생성됩니다. 이 명령은 전체
+4,204개 문서를 재처리하지 않습니다.
 
 ## 전체 코퍼스 파싱
 

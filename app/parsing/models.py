@@ -55,6 +55,7 @@ class TableCell:
     is_header: bool = False
     rowspan: int = 1
     colspan: int = 1
+    source_tag: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
