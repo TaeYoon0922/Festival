@@ -1,0 +1,73 @@
+import unittest
+
+from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
+
+
+class MetadataFilterExtractionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.companies = {
+            "삼성전자": {"삼성전자"},
+            "에스엠": {"에스엠"},
+            "하이브": {"하이브"},
+            "LS ELECTRIC": {"엘에스일렉트릭"},
+            "엘에스일렉트릭": {"엘에스일렉트릭"},
+            "한미반도체": {"한미반도체"},
+        }
+
+    def test_holding_reference_year_does_not_filter_filing_year(self) -> None:
+        result = extract_metadata_filters(
+            "에스엠 국민연금 2023년 보유주식 수와 비율", self.companies
+        )
+        self.assertEqual(result["companies"], ["에스엠"])
+        self.assertEqual(result["doc_group"], "holding")
+        self.assertFalse(result["year_filter_applied"])
+
+    def test_clear_exchange_subtype_is_extracted(self) -> None:
+        result = extract_metadata_filters(
+            "LS ELECTRIC 신규 시설투자 종료일", self.companies
+        )
+        self.assertEqual(result["companies"], ["엘에스일렉트릭"])
+        self.assertEqual(result["doc_group"], "exchange")
+        self.assertEqual(result["doc_subtype"], "신규시설투자등")
+
+    def test_all_explicit_company_mentions_are_or_candidates(self) -> None:
+        result = extract_metadata_filters(
+            "에스엠 하이브 보유주식 수와 비율", self.companies
+        )
+        self.assertEqual(result["companies"], ["에스엠", "하이브"])
+        self.assertEqual(result["doc_group"], "holding")
+
+    def test_ambiguous_merger_does_not_force_a_group(self) -> None:
+        result = extract_metadata_filters(
+            "삼성전자 흡수합병 합병기일", self.companies
+        )
+        self.assertIsNone(result["doc_group"])
+
+    def test_holding_compound_language_is_extracted(self) -> None:
+        result = extract_metadata_filters(
+            "에스엠 풋옵션 행사 주식 취득일과 취득 수량", self.companies
+        )
+        self.assertEqual(result["doc_group"], "holding")
+
+    def test_clear_major_transaction_language_is_extracted(self) -> None:
+        result = extract_metadata_filters(
+            "삼성전자 합병 목적과 분할 대상", self.companies
+        )
+        self.assertEqual(result["doc_group"], "major")
+
+    def test_clear_periodic_disclosure_language_is_extracted(self) -> None:
+        result = extract_metadata_filters(
+            "삼성전자 2023년 연결대상회사와 주요종속회사 수", self.companies
+        )
+        self.assertEqual(result["doc_group"], "periodic")
+
+    def test_quarter_subtype_implies_periodic_group(self) -> None:
+        result = extract_metadata_filters(
+            "한미반도체 1분기 매출액", self.companies
+        )
+        self.assertEqual(result["doc_group"], "periodic")
+        self.assertEqual(result["doc_subtype"], "quarter")
+
+
+if __name__ == "__main__":
+    unittest.main()

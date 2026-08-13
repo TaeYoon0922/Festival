@@ -632,7 +632,7 @@ def _first_nonempty_after(row: list[str], index: int) -> str | None:
 
 
 def _holding_document_context(table_map: dict[str, Table]) -> dict[str, Any]:
-    context: dict[str, Any] = {"source_refs": []}
+    context: dict[str, Any] = {"source_refs_by_field": {}}
     labels = {
         "보유목적": "holding_purpose",
         "보고사유": "change_reason",
@@ -648,13 +648,11 @@ def _holding_document_context(table_map: dict[str, Table]) -> dict[str, Any]:
                 found = _first_nonempty_after(row, column)
                 if found:
                     context[key] = found
-                    context["source_refs"].append(
-                        {
-                            "table_id": table.table_id,
-                            "row_start": row_index,
-                            "row_end": row_index,
-                        }
-                    )
+                    context["source_refs_by_field"][key] = {
+                        "table_id": table.table_id,
+                        "row_start": row_index,
+                        "row_end": row_index,
+                    }
     return context
 
 
@@ -749,14 +747,60 @@ def _holding_report_projection(
     if not content:
         return None
     row_indexes = sorted(item[0] for item in labelled_rows.values())
-    source_refs = [
+    current_ref = {
+        "table_id": table.table_id,
+        "row_start": labelled_rows["current"][0],
+        "row_end": labelled_rows["current"][0],
+    }
+    previous_ref = (
         {
             "table_id": table.table_id,
-            "row_start": row_indexes[0],
-            "row_end": row_indexes[-1],
-        },
-        *holding_context.get("source_refs", []),
-    ]
+            "row_start": labelled_rows["previous"][0],
+            "row_end": labelled_rows["previous"][0],
+        }
+        if "previous" in labelled_rows
+        else None
+    )
+    change_ref = (
+        {
+            "table_id": table.table_id,
+            "row_start": labelled_rows["change"][0],
+            "row_end": labelled_rows["change"][0],
+        }
+        if "change" in labelled_rows
+        else None
+    )
+    context_refs = holding_context.get("source_refs_by_field", {})
+    projection_field_refs = {
+        "보고자/보유자": [current_ref],
+        "기준일/보고일": [current_ref],
+        "보유주식수": [current_ref],
+        "보유비율": [current_ref],
+        "직전 보고일": [previous_ref] if previous_ref else [],
+        "직전 보유주식수": [previous_ref] if previous_ref else [],
+        "직전 보유비율": [previous_ref] if previous_ref else [],
+        "증감주식수": [change_ref] if change_ref else [],
+        "증감비율": [change_ref] if change_ref else [],
+        "보유 목적": [context_refs["holding_purpose"]]
+        if context_refs.get("holding_purpose")
+        else [],
+        "변동 사유": [context_refs["change_reason"]]
+        if context_refs.get("change_reason")
+        else [],
+    }
+    projected_labels = {label for label, value in fields if value}
+    projection_field_refs = {
+        label: refs
+        for label, refs in projection_field_refs.items()
+        if label in projected_labels and refs
+    }
+    source_refs = list(
+        {
+            (str(ref["table_id"]), int(ref["row_start"]), int(ref["row_end"])): ref
+            for refs in projection_field_refs.values()
+            for ref in refs
+        }.values()
+    )
     return _base_chunk(
         document,
         source_file,
@@ -766,6 +810,7 @@ def _holding_report_projection(
         retrieval_text=f"{_retrieval_prefix(document, section, table_context)}\n\n{content}",
         projection_type="holding_report",
         projection_fields={label: value for label, value in fields if value},
+        projection_field_refs=projection_field_refs,
         table_id=table.table_id,
         source_table_id=table.table_id,
         source_table_ids=list(dict.fromkeys(ref["table_id"] for ref in source_refs)),
@@ -850,6 +895,28 @@ def _holding_detail_projections(
             "row_start": row_index,
             "row_end": row_index,
         }
+        context_ref = holding_context.get("source_refs_by_field", {}).get(
+            "holding_purpose"
+        )
+        projection_field_refs = {
+            label: [source_ref]
+            for label, value in fields
+            if value and label != "보유 목적"
+        }
+        if holding_context.get("holding_purpose") and context_ref:
+            projection_field_refs["보유 목적"] = [context_ref]
+        source_refs = list(
+            {
+                (str(ref["table_id"]), int(ref["row_start"]), int(ref["row_end"])): ref
+                for refs in projection_field_refs.values()
+                for ref in refs
+            }.values()
+        )
+        explicit_placeholder = all(
+            str(value).strip() == "정정 전과 동일"
+            for _, value in fields
+            if value
+        )
         projections.append(
             _base_chunk(
                 document,
@@ -860,10 +927,16 @@ def _holding_detail_projections(
                 retrieval_text=f"{_retrieval_prefix(document, section, table_context)}\n\n{content}",
                 projection_type="holding_detail_row",
                 projection_fields={label: value for label, value in fields if value},
+                projection_field_refs=projection_field_refs,
+                projection_state=(
+                    "explicit_placeholder" if explicit_placeholder else "resolved"
+                ),
                 table_id=table.table_id,
                 source_table_id=table.table_id,
-                source_table_ids=[table.table_id],
-                source_refs=[source_ref],
+                source_table_ids=list(
+                    dict.fromkeys(str(ref["table_id"]) for ref in source_refs)
+                ),
+                source_refs=source_refs,
                 row_start=row_index,
                 row_end=row_index,
                 source_row_start=row_index,
@@ -877,7 +950,11 @@ def _holding_detail_projections(
                 basis_period=table_context["basis_period"],
                 period_labels=table_context["period_labels"],
                 retrieval_priority="high",
-                quality_flags=["retrieval_projection", "holding_detail_row"],
+                quality_flags=[
+                    "retrieval_projection",
+                    "holding_detail_row",
+                    *(["explicit_placeholder"] if explicit_placeholder else []),
+                ],
                 is_indexable=True,
             )
         )
@@ -953,6 +1030,7 @@ def _extreme_table_projections(
                 continue
             header = headers[column] if column < len(headers) else f"열 {column + 1}"
             entries.extend((header, part) for part in _projection_entry_parts(header, value))
+        entries = list(dict.fromkeys(entries))
         groups: list[list[tuple[str, str]]] = []
         buffer: list[tuple[str, str]] = []
         size = 0

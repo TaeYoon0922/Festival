@@ -168,6 +168,25 @@ class StructuralChunkingTests(unittest.TestCase):
         self.assertTrue(all(chunk["char_count"] <= 1_500 for chunk in projections))
         self.assertEqual(parsed.tables[0].rows[1][1].text, long_value)
 
+    def test_extreme_projection_removes_duplicate_content_lines(self) -> None:
+        repeated = "동일한 계약 설명 " * 500
+        source = (
+            "<DOCUMENT><BODY><SECTION-1><TITLE>계약</TITLE><TABLE>"
+            "<TR><TH>구분</TH><TH>설명</TH><TH>설명</TH></TR>"
+            f"<TR><TD>A</TD><TD>{repeated}</TD><TD>{repeated}</TD></TR>"
+            "</TABLE></SECTION-1></BODY></DOCUMENT>"
+        )
+        _, chunks = build_from_xml(source)
+        projections = [
+            chunk
+            for chunk in chunks
+            if chunk.get("projection_type") == "extreme_table_row"
+        ]
+        self.assertTrue(projections)
+        for projection in projections:
+            lines = projection["content"].splitlines()
+            self.assertEqual(len(lines), len(set(lines)))
+
     def test_context_only_short_text_merges_but_short_fact_survives(self) -> None:
         source = """
         <DOCUMENT><BODY><SECTION-1><TITLE>계약 현황</TITLE>
@@ -234,6 +253,14 @@ class StructuralChunkingTests(unittest.TestCase):
         )
         self.assertEqual(projection["source_row_start"], 2)
         self.assertEqual(projection["source_row_end"], 4)
+        self.assertEqual(
+            projection["projection_field_refs"]["보유 목적"],
+            [{"table_id": parsed.tables[0].table_id, "row_start": 1, "row_end": 1}],
+        )
+        self.assertEqual(
+            projection["projection_field_refs"]["변동 사유"],
+            [{"table_id": parsed.tables[0].table_id, "row_start": 0, "row_end": 0}],
+        )
         original = next(
             chunk
             for chunk in chunks
@@ -242,6 +269,29 @@ class StructuralChunkingTests(unittest.TestCase):
         )
         self.assertIn("직전보고서", original["content"])
         self.assertIn("이번보고서", original["content"])
+
+    def test_holding_placeholder_is_explicit_and_source_backed(self) -> None:
+        source = """
+        <DOCUMENT><BODY><SECTION-1><TITLE>정정 신고</TITLE>
+          <TABLE>
+            <TR><TH rowspan="2">성명(명칭)</TH><TH rowspan="2">변동일*</TH><TH colspan="3">변동 내역</TH></TR>
+            <TR><TH>변동전</TH><TH>증감</TH><TH>변동후</TH></TR>
+            <TR><TD colspan="5">정정 전과 동일</TD></TR>
+          </TABLE>
+        </SECTION-1></BODY></DOCUMENT>
+        """
+        _, chunks = build_from_xml(source, metadata={"doc_group": "holding"})
+        projection = next(
+            chunk
+            for chunk in chunks
+            if chunk.get("projection_type") == "holding_detail_row"
+        )
+        self.assertEqual(projection["projection_state"], "explicit_placeholder")
+        self.assertIn("explicit_placeholder", projection["quality_flags"])
+        self.assertEqual(
+            projection["projection_field_refs"]["보고자/보유자"],
+            projection["source_refs"],
+        )
 
     def test_required_metadata_links_and_deterministic_ids(self) -> None:
         source = """
