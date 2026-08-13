@@ -8,6 +8,7 @@ import json
 import math
 import re
 import statistics
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -683,10 +684,34 @@ def _table_preview(table: Table) -> str:
     return " | ".join(dict.fromkeys(values))
 
 
+_EMPTY_CONTEXT_LABELS = (
+    "단위",
+    "기준",
+    "기준일",
+    "작성기준",
+    "작성기준일",
+    "보고일",
+)
+
+
+def _is_empty_context_wrapper(value: str) -> bool:
+    """Return whether a wrapper contains labels/punctuation but no evidence."""
+
+    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
+    if not normalized:
+        return True
+    normalized = re.sub(r"[\s\(\)\[\]\{\}:：|,.;·_\-/]+", "", normalized)
+    for label in sorted(_EMPTY_CONTEXT_LABELS, key=len, reverse=True):
+        normalized = normalized.replace(label.casefold(), "")
+    return not normalized
+
+
 def _exclusion_reason(table: Table, has_candidate: bool) -> tuple[str, str]:
     if has_candidate:
         return "exact_duplicate_content", "safe"
     preview = _table_preview(table)
+    if _is_empty_context_wrapper(preview):
+        return "empty_context_wrapper", "safe"
     if _find_unit(preview):
         return "unit_wrapper", "safe"
     if re.fullmatch(r"【[^】]+】", preview):
