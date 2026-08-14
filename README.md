@@ -130,3 +130,31 @@ docker run --rm \
 ```
 
 `raw/`, ZIP 파일, 로컬 환경설정은 `.gitignore` 및 `.dockerignore`에서 제외됩니다.
+
+## PostgreSQL 16 COPY export
+
+동결된 Structural v2.1 결과를 재청킹하지 않고 PostgreSQL COPY 파일로 변환합니다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_db_release.py
+.\.venv\Scripts\python.exe scripts\validate_db_export.py
+.\.venv\Scripts\python.exe scripts\load_postgres.py --dry-run
+```
+
+현재 release export 위치는 `data/db_export`입니다. 대용량 CSV는
+Git에서 제외되며 `manifest.json`, `export_report.json`, `validation_report.json`에
+count 및 무결성 결과가 남습니다.
+
+실제 적재에는 `psql`이 필요합니다. 접속정보는 코드가 아니라 `DATABASE_URL` 또는
+표준 `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` 환경변수로 전달합니다.
+
+```powershell
+$env:DATABASE_URL='postgresql://user:password@host:5432/database'
+.\.venv\Scripts\python.exe scripts\load_postgres.py --apply-schema --validate
+.\.venv\Scripts\python.exe scripts\load_postgres.py --apply-indexes --validate
+```
+
+각 테이블은 임시 staging table로 COPY한 뒤 `ON CONFLICT DO NOTHING`으로 반영되며,
+완료 상태를 `.import_state.json`에 기록해 중간 실패 후 재시작할 수 있습니다.
+초기 DDL, base load 이후 index, DB 검증 SQL은 각각 `db/001_schema.sql`,
+`db/002_indexes.sql`, `db/003_validation.sql`로 분리되어 있습니다.
