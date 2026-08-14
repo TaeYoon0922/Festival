@@ -2,6 +2,8 @@
 raw/
 data/corpus/raw
 data/processed/
+data/exports/
+data/db_export/
 
 # Local configuration and archives.
 .env
