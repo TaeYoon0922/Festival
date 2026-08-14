@@ -1,3 +1,4 @@
 # Data loading dependencies.
 pandas
 openpyxl
+psycopg[binary]
