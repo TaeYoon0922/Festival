@@ -196,6 +196,29 @@ class HttpEmbeddingSettings:
         return {self.api_key_header: value}
 
 
+@dataclass(frozen=True)
+class OpenAIEmbeddingRequestOptions:
+    """Request-shape options for explicitly selected OpenAI-compatible APIs."""
+
+    input_mode: str = "batch"
+    encoding_format: str | None = None
+    include_dimensions: bool = False
+
+    def __post_init__(self) -> None:
+        if self.input_mode not in {"batch", "sequential"}:
+            raise ValueError("OpenAI embedding input mode must be batch or sequential")
+        if self.encoding_format is not None and not self.encoding_format.strip():
+            raise ValueError("embedding encoding format must not be empty")
+
+    @classmethod
+    def clova_studio(cls) -> "OpenAIEmbeddingRequestOptions":
+        return cls(
+            input_mode="sequential",
+            encoding_format="float",
+            include_dimensions=True,
+        )
+
+
 class OpenAICompatibleEmbeddingProvider:
     """Production-ready adapter for the common ``/embeddings`` JSON contract."""
 
@@ -205,10 +228,12 @@ class OpenAICompatibleEmbeddingProvider:
         settings: HttpEmbeddingSettings,
         *,
         transport: JsonHttpTransport | None = None,
+        request_options: OpenAIEmbeddingRequestOptions | None = None,
     ) -> None:
         self.config = config
         self.settings = settings
         self.transport = transport or UrllibJsonTransport()
+        self.request_options = request_options or OpenAIEmbeddingRequestOptions()
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
@@ -216,32 +241,62 @@ class OpenAICompatibleEmbeddingProvider:
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
+        if self.request_options.input_mode == "sequential":
+            vectors: list[list[float]] = []
+            for text in texts:
+                vectors.extend(self._embed_input(text, expected_count=1))
+            return vectors
+        return self._embed_input(list(texts), expected_count=len(texts))
+
+    def _embed_input(
+        self, input_value: str | list[str], *, expected_count: int
+    ) -> list[list[float]]:
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "input": input_value,
+        }
+        if self.request_options.encoding_format is not None:
+            payload["encoding_format"] = self.request_options.encoding_format
+        if self.request_options.include_dimensions:
+            payload["dimensions"] = self.config.dimensions
         response = self.transport.post_json(
             self.settings.endpoint,
             headers=self.settings.request_headers(),
-            payload={"model": self.config.model, "input": list(texts)},
+            payload=payload,
             timeout_seconds=self.settings.timeout_seconds,
         )
-        data = response.get("data")
-        if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
-            raise ValueError("embedding response must contain a data array")
-        ordered: list[tuple[int, list[float]]] = []
-        for fallback_index, item in enumerate(data):
-            embedding = item.get("embedding") if isinstance(item, Mapping) else None
-            if not isinstance(item, Mapping) or not isinstance(
-                embedding, Sequence
-            ) or isinstance(embedding, (str, bytes)):
-                raise ValueError("embedding response item is malformed")
-            index = int(item.get("index", fallback_index))
-            vector = [float(value) for value in item["embedding"]]
-            _validate_embedding(vector, self.config.dimensions)
-            ordered.append((index, vector))
-        ordered.sort(key=lambda item: item[0])
-        if len(ordered) != len(texts):
-            raise ValueError("embedding response count does not match input count")
-        if [index for index, _ in ordered] != list(range(len(texts))):
-            raise ValueError("embedding response indexes do not match input order")
-        return [vector for _, vector in ordered]
+        return _parse_openai_embedding_response(
+            response,
+            expected_count=expected_count,
+            dimensions=self.config.dimensions,
+        )
+
+
+def _parse_openai_embedding_response(
+    response: Mapping[str, Any], *, expected_count: int, dimensions: int
+) -> list[list[float]]:
+    """Validate and restore input order for an OpenAI-compatible response."""
+
+    data = response.get("data")
+    if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+        raise ValueError("embedding response must contain a data array")
+    ordered: list[tuple[int, list[float]]] = []
+    for fallback_index, item in enumerate(data):
+        embedding = item.get("embedding") if isinstance(item, Mapping) else None
+        if not isinstance(item, Mapping) or not isinstance(
+            embedding, Sequence
+        ) or isinstance(embedding, (str, bytes)):
+            raise ValueError("embedding response item is malformed")
+        index = int(item.get("index", fallback_index))
+        vector = [float(value) for value in item["embedding"]]
+        _validate_embedding(vector, dimensions)
+        ordered.append((index, vector))
+    ordered.sort(key=lambda item: item[0])
+    if len(ordered) != expected_count:
+        raise ValueError("embedding response count does not match input count")
+    if [index for index, _ in ordered] != list(range(expected_count)):
+        raise ValueError("embedding response indexes do not match input order")
+    return [vector for _, vector in ordered]
 
 
 class DeterministicHashEmbedder:
@@ -296,6 +351,13 @@ def create_embedding_provider(
             config,
             HttpEmbeddingSettings.from_env(environment),
             transport=transport,
+        )
+    if provider in {"clova", "clova_studio", "clova_openai_compatible"}:
+        return OpenAICompatibleEmbeddingProvider(
+            config,
+            HttpEmbeddingSettings.from_env(environment),
+            transport=transport,
+            request_options=OpenAIEmbeddingRequestOptions.clova_studio(),
         )
     if provider in {"bge_m3_local", "bgem3_local"}:
         from app.retrieval.bge_m3 import BgeM3LocalEmbeddingProvider

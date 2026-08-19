@@ -68,6 +68,30 @@ The existing OpenAI-compatible provider remains available. Other providers can
 implement `EmbeddingProvider` without changing collection, batching, PostgreSQL, or
 hybrid evaluation.
 
+### CLOVA Studio OpenAI-compatible endpoint
+
+CLOVA Studio is selected explicitly and is never inferred from the endpoint hostname:
+
+```bash
+export FESTIVAL_EMBEDDING_PROVIDER=clova_studio
+export FESTIVAL_EMBEDDING_MODEL=bge-m3
+export FESTIVAL_EMBEDDING_VERSION='<deployed-model-version>'
+export FESTIVAL_EMBEDDING_DIMENSIONS=1024
+export FESTIVAL_EMBEDDING_BATCH_SIZE=1
+export FESTIVAL_EMBEDDING_API_URL='https://clovastudio.stream.ntruss.com/v1/openai/embeddings'
+export FESTIVAL_EMBEDDING_API_KEY='<secret>'
+export FESTIVAL_EMBEDDING_API_KEY_HEADER='Authorization'
+export FESTIVAL_EMBEDDING_API_KEY_PREFIX='Bearer'
+```
+
+The CLOVA request mode sends `input` as a single string together with
+`encoding_format=float` and the configured `dimensions`. When the pipeline batch size
+is greater than one, the adapter uses a deliberate sequential fallback: one
+single-string HTTP request per document, returned in the original order. A failure is
+reported to the existing pipeline retry boundary, so resume, retry, validation, and DB
+upsert contracts remain unchanged. The generic `openai_compatible` provider continues
+to send one list-valued batch request and does not infer behavior from the hostname.
+
 ## Server commands
 
 From `/srv/festival/app` on the test server:

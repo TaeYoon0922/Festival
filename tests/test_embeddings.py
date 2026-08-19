@@ -95,6 +95,128 @@ class EmbeddingTests(unittest.TestCase):
         self.assertEqual(call["headers"]["Authorization"], "Bearer secret")
         self.assertNotIn("secret", str(call["payload"]))
 
+    def test_clova_single_input_payload_and_1024_dimension_response(self) -> None:
+        vector = [0.0] * 1024
+        vector[0] = 1.0
+        transport = FakeTransport(
+            {"data": [{"index": 0, "embedding": vector}]}
+        )
+        config = EmbeddingConfig(
+            provider="clova_studio",
+            model="bge-m3",
+            version="clova-bge-m3-v1",
+            dimensions=1024,
+            batch_size=1,
+        )
+        provider = create_embedding_provider(
+            config,
+            environment={
+                "FESTIVAL_EMBEDDING_API_URL": (
+                    "https://clovastudio.stream.ntruss.com/v1/openai/embeddings"
+                ),
+                "FESTIVAL_EMBEDDING_API_KEY": "secret",
+            },
+            transport=transport,
+        )
+
+        result = provider.embed_query("단일 입력")
+
+        self.assertEqual(len(result), 1024)
+        _url, call = transport.calls[0]
+        self.assertEqual(
+            call["payload"],
+            {
+                "model": "bge-m3",
+                "input": "단일 입력",
+                "encoding_format": "float",
+                "dimensions": 1024,
+            },
+        )
+
+    def test_clova_rejects_wrong_dimension(self) -> None:
+        config = EmbeddingConfig(
+            provider="clova_studio",
+            model="bge-m3",
+            version="clova-bge-m3-v1",
+            dimensions=1024,
+            batch_size=1,
+        )
+        provider = create_embedding_provider(
+            config,
+            environment={
+                "FESTIVAL_EMBEDDING_API_URL": "https://embedding.invalid/v1",
+                "FESTIVAL_EMBEDDING_API_KEY": "secret",
+            },
+            transport=FakeTransport(
+                {"data": [{"index": 0, "embedding": [0.0] * 1023}]}
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "expected 1024, got 1023"):
+            provider.embed_query("query")
+
+    def test_clova_batch_uses_explicit_sequential_single_input_fallback(self) -> None:
+        vector = [0.0] * 1024
+        vector[0] = 1.0
+        transport = FakeTransport(
+            {"data": [{"index": 0, "embedding": vector}]}
+        )
+        config = EmbeddingConfig(
+            provider="clova_studio",
+            model="bge-m3",
+            version="clova-bge-m3-v1",
+            dimensions=1024,
+            batch_size=2,
+        )
+        provider = create_embedding_provider(
+            config,
+            environment={
+                "FESTIVAL_EMBEDDING_API_URL": "https://embedding.invalid/v1",
+                "FESTIVAL_EMBEDDING_API_KEY": "secret",
+            },
+            transport=transport,
+        )
+
+        result = provider.embed_documents(["first", "second"])
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(
+            [call[1]["payload"]["input"] for call in transport.calls],
+            ["first", "second"],
+        )
+
+    def test_clova_hostname_does_not_change_generic_batch_contract(self) -> None:
+        config = EmbeddingConfig(
+            provider="openai_compatible",
+            model="bge-m3",
+            version="v1",
+            dimensions=2,
+            batch_size=2,
+        )
+        transport = FakeTransport(
+            {
+                "data": [
+                    {"index": 0, "embedding": [1.0, 0.0]},
+                    {"index": 1, "embedding": [0.0, 1.0]},
+                ]
+            }
+        )
+        provider = OpenAICompatibleEmbeddingProvider(
+            config,
+            HttpEmbeddingSettings(
+                "https://clovastudio.stream.ntruss.com/v1/openai/embeddings",
+                "secret",
+            ),
+            transport=transport,
+        )
+
+        provider.embed_documents(["first", "second"])
+
+        self.assertEqual(
+            transport.calls[0][1]["payload"],
+            {"model": "bge-m3", "input": ["first", "second"]},
+        )
+
     def test_provider_factory_reads_secret_only_from_environment(self) -> None:
         config = EmbeddingConfig(
             provider="http", model="model", version="v1", dimensions=2
