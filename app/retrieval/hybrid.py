@@ -107,6 +107,8 @@ class HybridQueryExecution:
     routing: Mapping[str, Any]
     vector_status: str
     vector_error: str | None = None
+    vector_coverage: Mapping[str, Any] = field(default_factory=dict)
+    embedded_candidate_ids: Sequence[str] = ()
 
 
 def reciprocal_rank_fusion(
@@ -196,6 +198,7 @@ class HybridQueryExecutor:
         chunks = self._chunk_backend.get_candidate_chunks(documents)
         chunks = self.router.prepare_chunks(chunks, route)
         document_metadata = {document.doc_id: document.metadata for document in documents}
+        embedded_candidate_ids, vector_coverage = self._vector_coverage(chunks)
 
         lexical_results = self._lexical_retriever.retrieve(
             plan.lexical_query,
@@ -213,22 +216,27 @@ class HybridQueryExecutor:
         vector_results: list[VectorRetrievalResult] = []
         vector_status = "ok"
         vector_error: str | None = None
-        try:
-            query_embedding = self._embedder.embed_query(plan.lexical_query)
-            vector_results = self._vector_retriever.vector_search(
-                query_embedding,
-                chunks,
-                embedding_model=self.embedding_config.model,
-                embedding_version=self.embedding_config.version,
-                top_k=self.config.vector_top_n,
-            )
-            if not vector_results:
-                vector_status = "empty"
-        except Exception as error:
-            if not self.config.fallback_on_vector_error:
-                raise
-            vector_status = "unavailable"
-            vector_error = f"{type(error).__name__}: {error}"
+        if vector_coverage.get("available") and not vector_coverage.get(
+            "embedded_count"
+        ):
+            vector_status = "no_coverage"
+        else:
+            try:
+                query_embedding = self._embedder.embed_query(plan.lexical_query)
+                vector_results = self._vector_retriever.vector_search(
+                    query_embedding,
+                    chunks,
+                    embedding_model=self.embedding_config.model,
+                    embedding_version=self.embedding_config.version,
+                    top_k=self.config.vector_top_n,
+                )
+                if not vector_results:
+                    vector_status = "empty"
+            except Exception as error:
+                if not self.config.fallback_on_vector_error:
+                    raise
+                vector_status = "unavailable"
+                vector_error = f"{type(error).__name__}: {error}"
 
         fused = reciprocal_rank_fusion(lexical_results, vector_results, self.config.rrf)
         if not vector_results:
@@ -253,6 +261,7 @@ class HybridQueryExecutor:
                 },
                 "vector_status": vector_status,
                 "vector_error": vector_error,
+                "coverage": vector_coverage,
             },
         }
         return HybridQueryExecution(
@@ -267,7 +276,50 @@ class HybridQueryExecutor:
             routing=routing,
             vector_status=vector_status,
             vector_error=vector_error,
+            vector_coverage=vector_coverage,
+            embedded_candidate_ids=embedded_candidate_ids,
         )
+
+    def _vector_coverage(
+        self, chunks: Sequence[CandidateChunk]
+    ) -> tuple[tuple[str, ...], dict[str, Any]]:
+        candidate_ids = tuple(dict.fromkeys(chunk.chunk_id for chunk in chunks))
+        lookup = getattr(self._vector_retriever, "existing_embedding_chunk_ids", None)
+        if not callable(lookup):
+            return (), {
+                "available": False,
+                "candidate_count": len(candidate_ids),
+                "embedded_count": None,
+                "ratio": None,
+            }
+        try:
+            embedded = set(
+                lookup(
+                    candidate_ids,
+                    embedding_model=self.embedding_config.model,
+                    embedding_version=self.embedding_config.version,
+                    embedding_dimensions=self.embedding_config.dimensions,
+                )
+            )
+        except Exception as error:
+            return (), {
+                "available": False,
+                "candidate_count": len(candidate_ids),
+                "embedded_count": None,
+                "ratio": None,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        embedded_ids = tuple(sorted(embedded.intersection(candidate_ids)))
+        return embedded_ids, {
+            "available": True,
+            "candidate_count": len(candidate_ids),
+            "embedded_count": len(embedded_ids),
+            "ratio": (
+                round(len(embedded_ids) / len(candidate_ids), 6)
+                if candidate_ids
+                else 0.0
+            ),
+        }
 
     def _hybrid_rerank(
         self,

@@ -18,7 +18,7 @@ from app.reasoning.hybrid_evaluation import (
     write_hybrid_evaluation_report,
 )
 from app.reasoning.query_understanding import QueryUnderstanding
-from app.retrieval.embeddings import DeterministicHashEmbedder, EmbeddingConfig
+from app.retrieval.embeddings import EmbeddingConfig, create_embedding_provider
 from app.retrieval.hybrid import (
     HybridQueryExecutor,
     HybridRetrievalConfig,
@@ -47,11 +47,7 @@ def main() -> None:
     args = parser.parse_args()
 
     embedding_config = EmbeddingConfig.from_env()
-    if embedding_config.provider != "hash":
-        raise RuntimeError(
-            "this local CLI only wires the dependency-free hash provider; inject an "
-            "EmbeddingProvider adapter for the configured production provider"
-        )
+    embedder = create_embedding_provider(embedding_config)
 
     backend = PostgresBackend()
     understanding = QueryUnderstanding(company_resolver=backend.resolve_company)
@@ -69,7 +65,7 @@ def main() -> None:
     )
     executor = HybridQueryExecutor(
         backend,
-        DeterministicHashEmbedder(embedding_config),
+        embedder,
         embedding_config,
         config=hybrid_config,
     )
@@ -98,6 +94,7 @@ def main() -> None:
                 "improvement": report["improvement"],
                 "failure_counts": report["failure_counts"],
                 "vector_status_counts": report["vector_status_counts"],
+                "vector_coverage": report["vector_coverage"],
                 "output_dir": str(args.output_dir),
             },
             ensure_ascii=False,

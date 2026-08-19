@@ -13,6 +13,8 @@ class VectorMigrationTests(unittest.TestCase):
         self.assertIn("embedding_model text NOT NULL", migration)
         self.assertIn("embedding_version text NOT NULL", migration)
         self.assertIn("USING hnsw", migration)
+        self.assertIn("embedding::vector(1024)", migration)
+        self.assertIn("embedding_dimensions = 1024", migration)
         self.assertIn("vector_cosine_ops", migration)
         self.assertNotIn("ALTER TABLE chunks", migration)
 

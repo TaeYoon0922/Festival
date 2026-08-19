@@ -12,6 +12,7 @@ class FakeCursor:
     def __init__(self, database: "FakeDatabase") -> None:
         self.database = database
         self.rows: list[dict] = []
+        self.rowcount = 0
 
     def __enter__(self) -> "FakeCursor":
         return self
@@ -22,6 +23,11 @@ class FakeCursor:
     def execute(self, query: str, params: tuple) -> None:
         self.database.calls.append((query, params))
         self.rows = list(self.database.handler(query, params))
+        self.rowcount = len(self.rows)
+
+    def executemany(self, query: str, params: list[tuple]) -> None:
+        self.database.many_calls.append((query, params))
+        self.rowcount = len(params)
 
     def fetchall(self) -> list[dict]:
         return self.rows
@@ -34,6 +40,7 @@ class FakeConnection:
     def __init__(self, database: "FakeDatabase") -> None:
         self.database = database
         self.closed = False
+        self.committed = False
 
     def cursor(self, **_kwargs: object) -> FakeCursor:
         return FakeCursor(self.database)
@@ -41,11 +48,15 @@ class FakeConnection:
     def close(self) -> None:
         self.closed = True
 
+    def commit(self) -> None:
+        self.committed = True
+
 
 class FakeDatabase:
     def __init__(self, handler=None) -> None:
         self.handler = handler or (lambda _query, _params: [])
         self.calls: list[tuple[str, tuple]] = []
+        self.many_calls: list[tuple[str, list[tuple]]] = []
         self.connect_calls: list[tuple[tuple, dict]] = []
         self.connections: list[FakeConnection] = []
 
@@ -312,6 +323,85 @@ class PostgresBackendTests(unittest.TestCase):
                 embedding_version="v1",
             )
         self.assertEqual(database.calls, [])
+
+    def test_embedding_resume_lookup_is_scoped_by_identity_and_dimension(self) -> None:
+        database = FakeDatabase(
+            lambda query, _params: (
+                [{"chunk_id": "c1", "embedding_dimensions": 3}]
+                if "FROM chunk_embeddings" in query
+                else []
+            )
+        )
+        backend = PostgresBackend(dsn="test", connection_factory=database.connect)
+        existing = backend.existing_embedding_chunk_ids(
+            ["c2", "c1", "c1"],
+            embedding_model="model",
+            embedding_version="v1",
+            embedding_dimensions=3,
+        )
+        self.assertEqual(existing, {"c1"})
+        sql, params = database.calls[0]
+        self.assertNotIn("embedding_dimensions = %s", sql)
+        self.assertEqual(params, (["c1", "c2"], "model", "v1"))
+
+    def test_embedding_resume_lookup_rejects_existing_wrong_dimension(self) -> None:
+        database = FakeDatabase(
+            lambda _query, _params: [
+                {"chunk_id": "c1", "embedding_dimensions": 2}
+            ]
+        )
+        backend = PostgresBackend(dsn="test", connection_factory=database.connect)
+        with self.assertRaisesRegex(ValueError, "dimension mismatch"):
+            backend.existing_embedding_chunk_ids(
+                ["c1"],
+                embedding_model="model",
+                embedding_version="v1",
+                embedding_dimensions=3,
+            )
+
+    def test_embedding_upsert_defaults_to_skip_and_force_overwrites(self) -> None:
+        database = FakeDatabase()
+        backend = PostgresBackend(dsn="test", connection_factory=database.connect)
+        records = [
+            {
+                "chunk_id": "c1",
+                "embedding": [0.1, 0.2],
+                "embedding_dimensions": 2,
+            }
+        ]
+        backend.upsert_embeddings(
+            records, embedding_model="model", embedding_version="v1"
+        )
+        sql, params = database.many_calls[0]
+        self.assertIn("DO NOTHING", sql)
+        self.assertEqual(params[0][:4], ("c1", "model", "v1", 2))
+        self.assertTrue(database.connections[0].committed)
+
+        backend.upsert_embeddings(
+            records,
+            embedding_model="model",
+            embedding_version="v1",
+            force=True,
+        )
+        force_sql, _params = database.many_calls[1]
+        self.assertIn("DO UPDATE SET", force_sql)
+
+    def test_embedding_upsert_rejects_dimension_mismatch_before_db(self) -> None:
+        database = FakeDatabase()
+        backend = PostgresBackend(dsn="test", connection_factory=database.connect)
+        with self.assertRaises(ValueError):
+            backend.upsert_embeddings(
+                [
+                    {
+                        "chunk_id": "c1",
+                        "embedding": [0.1],
+                        "embedding_dimensions": 2,
+                    }
+                ],
+                embedding_model="model",
+                embedding_version="v1",
+            )
+        self.assertEqual(database.many_calls, [])
 
 
 if __name__ == "__main__":

@@ -151,6 +151,16 @@ class PostgresBackend:
                 row = cursor.fetchone()
                 return dict(row) if row is not None else None
 
+    def _execute_many(
+        self, query: str, params: Sequence[Sequence[Any]]
+    ) -> int:
+        with self.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.executemany(query, [tuple(row) for row in params])
+                affected = int(cursor.rowcount)
+            connection.commit()
+        return affected
+
     @staticmethod
     def _company_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
         metadata = _mapping(row.get("company_metadata"))
@@ -446,6 +456,135 @@ class PostgresBackend:
         self, documents: Iterable[CandidateDocument]
     ) -> list[CandidateChunk]:
         return self.fetch_chunks(documents)
+
+    def fetch_embedding_source_chunks(
+        self, chunk_ids: Sequence[str]
+    ) -> list[dict[str, Any]]:
+        """Fetch only frozen retrieval text and identifying metadata for embedding."""
+
+        unique_ids = sorted({str(chunk_id) for chunk_id in chunk_ids if str(chunk_id)})
+        if not unique_ids:
+            return []
+        return self._fetch_all(
+            """
+            SELECT
+                c.chunk_id,
+                c.doc_id,
+                d.corp_code,
+                co.corp_name,
+                d.doc_group,
+                c.chunk_type,
+                c.retrieval_text
+            FROM chunks c
+            JOIN disclosures d ON d.doc_id = c.doc_id
+            JOIN companies co ON co.corp_code = d.corp_code
+            WHERE c.chunk_id = ANY(%s)
+              AND coalesce(c.metadata ->> 'is_indexable', 'true') = 'true'
+            ORDER BY c.chunk_id
+            """,
+            [unique_ids],
+        )
+
+    def existing_embedding_chunk_ids(
+        self,
+        chunk_ids: Sequence[str],
+        *,
+        embedding_model: str,
+        embedding_version: str,
+        embedding_dimensions: int,
+    ) -> set[str]:
+        """Return scoped rows already persisted for resume and coverage checks."""
+
+        unique_ids = sorted({str(chunk_id) for chunk_id in chunk_ids if str(chunk_id)})
+        if not unique_ids:
+            return set()
+        if not embedding_model.strip() or not embedding_version.strip():
+            raise ValueError("embedding model and version must not be empty")
+        if not 1 <= int(embedding_dimensions) <= 2000:
+            raise ValueError("embedding dimensions must be between 1 and 2000")
+        rows = self._fetch_all(
+            """
+            SELECT chunk_id, embedding_dimensions
+            FROM chunk_embeddings
+            WHERE chunk_id = ANY(%s)
+              AND embedding_model = %s
+              AND embedding_version = %s
+            """,
+            [
+                unique_ids,
+                embedding_model,
+                embedding_version,
+            ],
+        )
+        mismatches = [
+            str(row["chunk_id"])
+            for row in rows
+            if int(row["embedding_dimensions"]) != int(embedding_dimensions)
+        ]
+        if mismatches:
+            raise ValueError(
+                "existing embedding dimension mismatch for model/version: "
+                + ", ".join(mismatches[:5])
+            )
+        return {str(row["chunk_id"]) for row in rows}
+
+    def upsert_embeddings(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        embedding_model: str,
+        embedding_version: str,
+        force: bool = False,
+    ) -> int:
+        """Insert one committed batch; overwrite only when explicitly forced."""
+
+        if not records:
+            return 0
+        if not embedding_model.strip() or not embedding_version.strip():
+            raise ValueError("embedding model and version must not be empty")
+        params: list[tuple[Any, ...]] = []
+        for record in records:
+            chunk_id = str(record.get("chunk_id") or "").strip()
+            embedding = [float(value) for value in record.get("embedding") or []]
+            dimensions = int(record.get("embedding_dimensions") or len(embedding))
+            if not chunk_id:
+                raise ValueError("embedding record chunk_id must not be empty")
+            if not 1 <= dimensions <= 2000 or len(embedding) != dimensions:
+                raise ValueError("embedding record dimension mismatch")
+            if any(not math.isfinite(value) for value in embedding):
+                raise ValueError("embedding values must be finite")
+            vector_literal = (
+                "[" + ",".join(format(value, ".17g") for value in embedding) + "]"
+            )
+            params.append(
+                (
+                    chunk_id,
+                    embedding_model,
+                    embedding_version,
+                    dimensions,
+                    vector_literal,
+                )
+            )
+        conflict = (
+            "DO UPDATE SET embedding_dimensions = EXCLUDED.embedding_dimensions, "
+            "embedding = EXCLUDED.embedding, created_at = now()"
+            if force
+            else "DO NOTHING"
+        )
+        return self._execute_many(
+            f"""
+            INSERT INTO chunk_embeddings (
+                chunk_id,
+                embedding_model,
+                embedding_version,
+                embedding_dimensions,
+                embedding
+            ) VALUES (%s, %s, %s, %s, %s::vector)
+            ON CONFLICT (chunk_id, embedding_model, embedding_version)
+            {conflict}
+            """,
+            params,
+        )
 
     def lexical_search(
         self,
