@@ -73,6 +73,10 @@ with another dimension needs a matching expression index. Keep one active model/
 per production index where practical, because approximate filtering across many model
 versions can reduce recall.
 
+The BGE-M3 pilot uses normalized 1024-dimensional dense vectors, so the existing
+`vector(1024)` cosine expression index is compatible. The smoke benchmark does not need
+this migration and never builds an index or writes PostgreSQL.
+
 The candidate-first rollout, runtime environment, capacity estimate, resumable upsert,
 and Hybrid Gold60 commands are documented in `docs/embedding_pilot.md`.
 

@@ -200,6 +200,30 @@ class EmbeddingPipelineTests(unittest.TestCase):
         self.assertEqual(summary["status"], "interrupted")
         self.assertEqual(summary["embedded"], 0)
 
+    def test_smoke_limit_and_performance_metrics(self):
+        values = iter([0.0, 1.0, 2.0, 4.0])
+        provider = FakeProvider(self.config)
+        pipeline = SubsetEmbeddingPipeline(
+            provider,
+            FakeStore(),
+            self.config,
+            pipeline_config=EmbeddingPipelineConfig(
+                batch_size=1,
+                limit=1,
+                retry=RetryConfig(max_attempts=1, initial_delay_seconds=0),
+            ),
+            clock=lambda: next(values),
+            sleep=lambda _seconds: None,
+        )
+        summary = pipeline.run(candidates("c1", "c2"))
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["embedded"], 1)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["elapsed_seconds"], 4.0)
+        self.assertEqual(summary["chunks_per_second"], 0.25)
+        self.assertEqual(summary["average_embedding_latency_seconds"], 1.0)
+        self.assertEqual(summary["dimension"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

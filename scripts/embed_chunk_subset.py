@@ -44,6 +44,8 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--dimensions", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--max-length", type=int)
+    parser.add_argument("--device", choices=("cpu", "cuda"))
     parser.add_argument("--fetch-batch-size", type=int, default=1000)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force", action="store_true")
@@ -66,6 +68,8 @@ def main() -> None:
         version=args.version or environment_config.version,
         dimensions=args.dimensions or environment_config.dimensions,
         batch_size=args.batch_size or environment_config.batch_size,
+        max_length=args.max_length or environment_config.max_length,
+        device=args.device or environment_config.device,
     )
     backend = PostgresBackend()
     provider = (

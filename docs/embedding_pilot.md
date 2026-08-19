@@ -20,21 +20,35 @@ Database credentials use `DATABASE_URL` or standard PostgreSQL `PG*` variables. 
 credentials are runtime-only environment variables and are never written to reports.
 
 ```bash
-export FESTIVAL_EMBEDDING_PROVIDER=openai_compatible
-export FESTIVAL_EMBEDDING_MODEL='<provider-model-name>'
-export FESTIVAL_EMBEDDING_VERSION='<immutable-pilot-version>'
-export FESTIVAL_EMBEDDING_DIMENSIONS=768
-export FESTIVAL_EMBEDDING_BATCH_SIZE=32
-export FESTIVAL_EMBEDDING_API_URL='https://provider.example/v1/embeddings'
+export FESTIVAL_EMBEDDING_PROVIDER=bge_m3_local
+export FESTIVAL_EMBEDDING_MODEL='BAAI/bge-m3'
+export FESTIVAL_EMBEDDING_VERSION='6892b95fed65c899a30896eb40d619ae284d0455'
+export FESTIVAL_EMBEDDING_DIMENSIONS=1024
+export FESTIVAL_EMBEDDING_BATCH_SIZE=4
+export FESTIVAL_EMBEDDING_MAX_LENGTH=8192
+export FESTIVAL_EMBEDDING_DEVICE=cpu
+```
+
+`bge_m3_local` lazily loads `BGEM3FlagModel`; install its optional dependencies with
+`pip install -r requirements-embedding.txt`. It requests dense vectors only and applies
+final L2 normalization to query and document vectors. This matches pgvector cosine
+distance. Query and documents use the same model/version, max length, dense flags, and
+normalization path.
+
+For a remote service wrapping the documented BGE-M3 HTTP payload, change only:
+
+```bash
+export FESTIVAL_EMBEDDING_PROVIDER=bge_m3_http
+export FESTIVAL_EMBEDDING_API_URL='https://provider.example/bge-m3/embed'
 export FESTIVAL_EMBEDDING_API_KEY='<secret>'
 export FESTIVAL_EMBEDDING_API_KEY_HEADER='Authorization'
 export FESTIVAL_EMBEDDING_API_KEY_PREFIX='Bearer'
 export FESTIVAL_EMBEDDING_TIMEOUT_SECONDS=60
 ```
 
-The production adapter uses an OpenAI-compatible embeddings JSON contract behind an
-injectable HTTP transport. Other providers can implement the same `EmbeddingProvider`
-interface without changing collection, batching, PostgreSQL, or hybrid evaluation.
+The existing OpenAI-compatible provider remains available. Other providers can
+implement `EmbeddingProvider` without changing collection, batching, PostgreSQL, or
+hybrid evaluation.
 
 ## Server commands
 
@@ -43,6 +57,7 @@ From `/srv/festival/app` on the test server:
 ```bash
 source .venv/bin/activate
 python -m unittest discover -s tests
+pip install -r requirements-embedding.txt
 
 python scripts/collect_gold60_embedding_candidates.py
 
@@ -57,6 +72,22 @@ python scripts/generate_vector_index_sql.py \
   --output data/processed/gold60_embedding_candidates/hnsw_index.sql
 ```
 
+On the CPU-only test server, benchmark before any migration or DB write:
+
+```bash
+python scripts/benchmark_embedding_subset.py \
+  --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
+  --limit 10 --batch-size 2 --device cpu
+
+python scripts/benchmark_embedding_subset.py \
+  --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
+  --limit 100 --batch-size 4 --device cpu
+```
+
+The benchmark never constructs a PostgreSQL backend. It reports model load time,
+embedding throughput, mean/p50/p95 batch latency, estimated durations for 76,438 and
+1,363,336 chunks, and process peak RSS when supported by the operating system.
+
 The index helper only writes SQL. Review it; do not build the full-corpus HNSW index as
 part of candidate collection. When the migration is approved and backed up, apply it
 from the test server over the private DB network:
@@ -70,7 +101,7 @@ Check missing work without calling the provider or writing embeddings:
 ```bash
 python scripts/embed_chunk_subset.py \
   --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
-  --dry-run
+  --limit 100 --batch-size 4 --device cpu --dry-run
 ```
 
 The future approved pilot write is the same command without `--dry-run`:
@@ -79,7 +110,9 @@ The future approved pilot write is the same command without `--dry-run`:
 python scripts/embed_chunk_subset.py \
   --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
   --resume \
-  --batch-size "$FESTIVAL_EMBEDDING_BATCH_SIZE"
+  --limit 100 \
+  --batch-size 4 \
+  --device cpu
 ```
 
 Each committed batch is its own resume checkpoint. Existing rows with the same
@@ -100,3 +133,8 @@ python scripts/evaluate_postgres_hybrid_gold60.py \
 The report includes unique embedded candidate coverage and per-question zero-coverage
 diagnostics. Storage estimates are conservative planning figures, not byte guarantees;
 verify actual free space, existing PostgreSQL size, WAL headroom, and index workspace.
+
+`db/004_vector_search.sql` already defines a partial HNSW cosine expression index over
+`vector(1024)`, matching BGE-M3 dense output. No migration rewrite is required. Building
+or rebuilding the full index remains a separate operational step and is not part of the
+smoke benchmark.

@@ -83,6 +83,7 @@ class SubsetEmbeddingPipeline:
         pipeline_config: EmbeddingPipelineConfig | None = None,
         error_path: Path | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         if provider.config != embedding_config:
             raise ValueError("provider config must match embedding pipeline config")
@@ -94,6 +95,7 @@ class SubsetEmbeddingPipeline:
         )
         self.error_path = error_path
         self.sleep = sleep
+        self.clock = clock
 
     def run(
         self,
@@ -101,6 +103,7 @@ class SubsetEmbeddingPipeline:
         *,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        started = self.clock()
         state: dict[str, Any] = {
             "status": "completed",
             "input_rows": 0,
@@ -111,6 +114,8 @@ class SubsetEmbeddingPipeline:
             "would_embed": 0,
             "failed": 0,
             "batches": 0,
+            "embedding_batches": 0,
+            "embedding_time_seconds": 0.0,
             "dry_run": self.pipeline_config.dry_run,
             "force": self.pipeline_config.force,
             "model": self.embedding_config.model,
@@ -157,6 +162,25 @@ class SubsetEmbeddingPipeline:
                         progress(dict(state))
         except KeyboardInterrupt:
             state["status"] = "interrupted"
+        elapsed = max(self.clock() - started, 0.0)
+        state["elapsed_seconds"] = round(elapsed, 6)
+        state["chunks_per_second"] = (
+            round(state["embedded"] / elapsed, 6) if elapsed > 0.0 else 0.0
+        )
+        state["average_embedding_latency_seconds"] = (
+            round(
+                state["embedding_time_seconds"] / state["embedding_batches"],
+                6,
+            )
+            if state["embedding_batches"]
+            else 0.0
+        )
+        state["embedding_time_seconds"] = round(
+            state["embedding_time_seconds"], 6
+        )
+        state["processed"] = state["unique_chunk_ids"]
+        state["skipped"] = state["already_embedded"]
+        state["dimension"] = state["dimensions"]
         return state
 
     def _process_batch(
@@ -184,13 +208,21 @@ class SubsetEmbeddingPipeline:
             return
 
         texts = [row["retrieval_text"] for row in missing]
+        embedding_started = self.clock()
+        state["embedding_batches"] += 1
         try:
             vectors = self._retry_call(lambda: self.provider.embed_documents(texts))
         except Exception as error:
+            state["embedding_time_seconds"] += max(
+                self.clock() - embedding_started, 0.0
+            )
             state["failed"] += len(missing)
             for row in missing:
                 errors.write(row["chunk_id"], "embedding", str(error))
             return
+        state["embedding_time_seconds"] += max(
+            self.clock() - embedding_started, 0.0
+        )
         self._validate_vectors(vectors, len(missing))
         records = [
             {

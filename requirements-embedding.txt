@@ -1,0 +1,2 @@
+# Optional local BGE-M3 inference dependencies. Not needed for HTTP or fake tests.
+FlagEmbedding>=1.3,<2

@@ -20,6 +20,8 @@ class EmbeddingConfig:
     version: str = "v1"
     dimensions: int = 1024
     batch_size: int = 32
+    max_length: int = 8192
+    device: str = "cpu"
 
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.model.strip() or not self.version.strip():
@@ -28,6 +30,10 @@ class EmbeddingConfig:
             raise ValueError("embedding dimensions must be between 1 and 2000")
         if self.batch_size <= 0:
             raise ValueError("embedding batch size must be positive")
+        if self.max_length <= 0:
+            raise ValueError("embedding max length must be positive")
+        if not re.fullmatch(r"(?:cpu|cuda(?::\d+)?)", self.device.strip().casefold()):
+            raise ValueError("embedding device must be cpu, cuda, or cuda:<index>")
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> "EmbeddingConfig":
@@ -38,6 +44,8 @@ class EmbeddingConfig:
             version=values.get("FESTIVAL_EMBEDDING_VERSION", "v1"),
             dimensions=int(values.get("FESTIVAL_EMBEDDING_DIMENSIONS", "1024")),
             batch_size=int(values.get("FESTIVAL_EMBEDDING_BATCH_SIZE", "32")),
+            max_length=int(values.get("FESTIVAL_EMBEDDING_MAX_LENGTH", "8192")),
+            device=values.get("FESTIVAL_EMBEDDING_DEVICE", "cpu"),
         )
 
 
@@ -221,6 +229,8 @@ def create_embedding_provider(
     *,
     environment: Mapping[str, str] | None = None,
     transport: JsonHttpTransport | None = None,
+    bge_encoder: Any | None = None,
+    bge_encoder_factory: Any | None = None,
 ) -> EmbeddingProvider:
     """Create a configured adapter without embedding any text."""
 
@@ -229,6 +239,22 @@ def create_embedding_provider(
         return DeterministicHashEmbedder(config)
     if provider in {"openai", "openai_compatible", "http"}:
         return OpenAICompatibleEmbeddingProvider(
+            config,
+            HttpEmbeddingSettings.from_env(environment),
+            transport=transport,
+        )
+    if provider in {"bge_m3_local", "bgem3_local"}:
+        from app.retrieval.bge_m3 import BgeM3LocalEmbeddingProvider
+
+        return BgeM3LocalEmbeddingProvider(
+            config,
+            encoder=bge_encoder,
+            encoder_factory=bge_encoder_factory,
+        )
+    if provider in {"bge_m3_http", "bgem3_http"}:
+        from app.retrieval.bge_m3 import BgeM3HttpEmbeddingProvider
+
+        return BgeM3HttpEmbeddingProvider(
             config,
             HttpEmbeddingSettings.from_env(environment),
             transport=transport,
