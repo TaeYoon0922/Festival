@@ -73,6 +73,9 @@ class EvaluationHybridBackend:
         assert "gold" in candidate_ids
         return [VectorRetrievalResult("gold", "d1", 0.9, 1)]
 
+    def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
+        return {"gold"}.intersection(chunk_ids)
+
 
 class QueryPlanHybridEvaluatorTests(unittest.TestCase):
     def setUp(self):
@@ -107,10 +110,15 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertEqual(report["lexical_only"]["overall"]["recall_at_10"], 0.0)
         self.assertEqual(report["improvement"]["overall"]["recall_at_1"], 1.0)
         self.assertEqual(report["failure_counts"], {"success": 1})
+        self.assertTrue(report["vector_coverage"]["available"])
+        self.assertEqual(report["vector_coverage"]["unique_candidate_count"], 2)
+        self.assertEqual(report["vector_coverage"]["embedded_unique_candidate_count"], 1)
+        self.assertEqual(report["vector_coverage"]["ratio"], 0.5)
         row = report["questions"][0]
         self.assertIsNone(row["lexical_gold_rank"])
         self.assertEqual(row["vector_gold_rank"], 1)
         self.assertEqual(row["hybrid_gold_rank"], 1)
+        self.assertTrue(row["has_any_vector_candidate"])
         self.assertIn("rrf_score", row["hybrid_top10"][0]["hybrid"])
 
     def test_writes_json_markdown_and_csv(self):

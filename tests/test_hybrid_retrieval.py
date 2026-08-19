@@ -117,6 +117,9 @@ class FakeHybridBackend:
             return []
         return [VectorRetrievalResult("vec", "d1", 0.9, 1)]
 
+    def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
+        return {"vec"}.intersection(chunk_ids)
+
 
 class HybridExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -149,6 +152,8 @@ class HybridExecutorTests(unittest.TestCase):
         self.assertEqual(backend.document_filters["company"], ["Test Corp"])
         self.assertEqual(backend.document_filters["year"], [2024])
         self.assertEqual(backend.vector_candidate_ids, ["lex", "vec"])
+        self.assertEqual(execution.vector_coverage["embedded_count"], 1)
+        self.assertEqual(execution.vector_coverage["ratio"], 0.5)
         self.assertEqual(execution.results[0].chunk_id, "vec")
         debug = execution.results[0].metadata_match["hybrid"]
         for key in (
@@ -180,6 +185,15 @@ class HybridExecutorTests(unittest.TestCase):
 
         self.assertEqual(execution.vector_status, "unavailable")
         self.assertIn("pgvector unavailable", execution.vector_error)
+        self.assertEqual([item.chunk_id for item in execution.results], ["lex"])
+
+    def test_zero_embedding_coverage_skips_vector_call(self) -> None:
+        backend = FakeHybridBackend()
+        backend.existing_embedding_chunk_ids = lambda *_args, **_kwargs: set()
+        execution = self.executor(backend).execute(QueryPlan(query="revenue", top_k=10))
+        self.assertEqual(execution.vector_status, "no_coverage")
+        self.assertEqual(execution.vector_coverage["embedded_count"], 0)
+        self.assertIsNone(backend.vector_candidate_ids)
         self.assertEqual([item.chunk_id for item in execution.results], ["lex"])
 
     def test_vector_error_can_be_strict(self) -> None:

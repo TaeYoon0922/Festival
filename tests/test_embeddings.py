@@ -4,8 +4,21 @@ import unittest
 from app.retrieval.embeddings import (
     DeterministicHashEmbedder,
     EmbeddingConfig,
+    HttpEmbeddingSettings,
+    OpenAICompatibleEmbeddingProvider,
     chunk_embedding_text,
+    create_embedding_provider,
 )
+
+
+class FakeTransport:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def post_json(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
 
 
 class EmbeddingTests(unittest.TestCase):
@@ -37,6 +50,64 @@ class EmbeddingTests(unittest.TestCase):
         self.assertEqual(chunk_embedding_text(chunk), "indexed text")
         with self.assertRaises(ValueError):
             chunk_embedding_text({"content": "must not be used as fallback"})
+
+    def test_openai_compatible_adapter_uses_injected_transport(self) -> None:
+        config = EmbeddingConfig(
+            provider="openai_compatible",
+            model="semantic-model",
+            version="2026-08",
+            dimensions=2,
+        )
+        transport = FakeTransport(
+            {
+                "data": [
+                    {"index": 1, "embedding": [0.0, 1.0]},
+                    {"index": 0, "embedding": [1.0, 0.0]},
+                ]
+            }
+        )
+        provider = OpenAICompatibleEmbeddingProvider(
+            config,
+            HttpEmbeddingSettings("https://embedding.invalid/v1", "secret"),
+            transport=transport,
+        )
+        vectors = provider.embed_documents(["first", "second"])
+
+        self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
+        url, call = transport.calls[0]
+        self.assertEqual(url, "https://embedding.invalid/v1")
+        self.assertEqual(call["payload"], {"model": "semantic-model", "input": ["first", "second"]})
+        self.assertEqual(call["headers"]["Authorization"], "Bearer secret")
+        self.assertNotIn("secret", str(call["payload"]))
+
+    def test_provider_factory_reads_secret_only_from_environment(self) -> None:
+        config = EmbeddingConfig(
+            provider="http", model="model", version="v1", dimensions=2
+        )
+        provider = create_embedding_provider(
+            config,
+            environment={
+                "FESTIVAL_EMBEDDING_API_URL": "https://embedding.invalid/v1",
+                "FESTIVAL_EMBEDDING_API_KEY": "runtime-secret",
+                "FESTIVAL_EMBEDDING_API_KEY_HEADER": "api-key",
+                "FESTIVAL_EMBEDDING_API_KEY_PREFIX": "",
+            },
+            transport=FakeTransport({"data": []}),
+        )
+        self.assertEqual(provider.settings.request_headers(), {"api-key": "runtime-secret"})
+        self.assertNotIn("runtime-secret", repr(provider.settings))
+
+    def test_http_adapter_rejects_dimension_mismatch(self) -> None:
+        config = EmbeddingConfig(
+            provider="http", model="model", version="v1", dimensions=3
+        )
+        provider = OpenAICompatibleEmbeddingProvider(
+            config,
+            HttpEmbeddingSettings("https://embedding.invalid/v1", "secret"),
+            transport=FakeTransport({"data": [{"embedding": [1.0, 0.0]}]}),
+        )
+        with self.assertRaisesRegex(ValueError, "dimension mismatch"):
+            provider.embed_query("query")
 
 
 if __name__ == "__main__":

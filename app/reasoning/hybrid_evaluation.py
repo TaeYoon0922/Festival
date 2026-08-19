@@ -49,6 +49,33 @@ class QueryPlanHybridEvaluator:
 
         hybrid = _summary(rows, "hybrid_gold_rank", question_sets)
         lexical = _summary(rows, "lexical_gold_rank", question_sets)
+        candidate_union: set[str] = set()
+        embedded_union: set[str] = set()
+        coverage_available = True
+        for row in rows:
+            candidate_union.update(row.pop("_candidate_ids"))
+            embedded_ids = row.pop("_embedded_candidate_ids")
+            if embedded_ids is None:
+                coverage_available = False
+            else:
+                embedded_union.update(embedded_ids)
+        vector_coverage = {
+            "available": coverage_available,
+            "unique_candidate_count": len(candidate_union),
+            "embedded_unique_candidate_count": (
+                len(embedded_union) if coverage_available else None
+            ),
+            "ratio": (
+                round(len(embedded_union) / len(candidate_union), 6)
+                if coverage_available and candidate_union
+                else (0.0 if coverage_available else None)
+            ),
+            "questions_without_embedded_candidates": (
+                sum(row["embedded_vector_candidate_count"] == 0 for row in rows)
+                if coverage_available
+                else None
+            ),
+        }
         return {
             "method": {
                 "flow": (
@@ -63,6 +90,7 @@ class QueryPlanHybridEvaluator:
             "hybrid": hybrid,
             "lexical_only": lexical,
             "improvement": _summary_delta(hybrid, lexical),
+            "vector_coverage": vector_coverage,
             "failure_counts": dict(
                 sorted(Counter(row["failure_class"] for row in rows).items())
             ),
@@ -109,6 +137,8 @@ class QueryPlanHybridEvaluator:
             failure_class = "fusion_ranking_failure"
 
         routing = dict(execution.routing)
+        coverage = dict(execution.vector_coverage or {})
+        embedded_count = coverage.get("embedded_count")
         return {
             "question_id": str(question["question_id"]),
             "evaluation_set": set_name,
@@ -130,6 +160,11 @@ class QueryPlanHybridEvaluator:
             },
             "candidate_document_count": len(execution.documents),
             "candidate_chunk_count": len(execution.chunks),
+            "embedded_vector_candidate_count": embedded_count,
+            "vector_candidate_coverage": coverage.get("ratio"),
+            "has_any_vector_candidate": (
+                bool(embedded_count) if coverage.get("available") else None
+            ),
             "gold_document_in_candidates": gold_doc_id in candidate_doc_ids,
             "gold_relevant_candidate_count": len(relevant_candidates),
             "lexical_raw_gold_rank": lexical_raw_rank,
@@ -151,6 +186,12 @@ class QueryPlanHybridEvaluator:
             "hit_at_5": bool(hybrid_rank and hybrid_rank <= 5),
             "hit_at_10": bool(hybrid_rank and hybrid_rank <= 10),
             "failure_class": failure_class,
+            "_candidate_ids": [candidate.chunk_id for candidate in execution.chunks],
+            "_embedded_candidate_ids": (
+                list(execution.embedded_candidate_ids)
+                if coverage.get("available")
+                else None
+            ),
         }
 
 
@@ -306,6 +347,16 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         "",
         "Hybrid results use the same routed candidate universe as lexical retrieval.",
         "",
+        "## Vector coverage",
+        "",
+        f"- Available: {report['vector_coverage']['available']}",
+        f"- Embedded unique candidates: "
+        f"{report['vector_coverage']['embedded_unique_candidate_count']} / "
+        f"{report['vector_coverage']['unique_candidate_count']}",
+        f"- Coverage ratio: {report['vector_coverage']['ratio']}",
+        f"- Questions without embedded candidates: "
+        f"{report['vector_coverage']['questions_without_embedded_candidates']}",
+        "",
         "## Overall comparison",
         "",
         "| method | questions | R@1 | R@5 | R@10 |",
@@ -382,6 +433,9 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_query",
         "candidate_document_count",
         "candidate_chunk_count",
+        "embedded_vector_candidate_count",
+        "vector_candidate_coverage",
+        "has_any_vector_candidate",
         "lexical_raw_gold_rank",
         "lexical_gold_rank",
         "vector_gold_rank",
