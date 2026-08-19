@@ -1,0 +1,375 @@
+"""Metadata-scoped lexical/vector retrieval with RRF and deterministic reranking."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
+
+from app.reasoning.router import QueryRouter
+from app.retrieval.embeddings import EmbeddingConfig, EmbeddingProvider
+from app.retrieval.interfaces import (
+    CandidateChunk,
+    CandidateDocument,
+    ChunkBackend,
+    MetadataBackend,
+    RetrievalResult,
+    Retriever,
+)
+from app.retrieval.vector import VectorRetrievalResult, VectorRetriever
+
+
+@dataclass(frozen=True)
+class RRFConfig:
+    k: int = 60
+    lexical_weight: float = 1.0
+    vector_weight: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.k <= 0:
+            raise ValueError("RRF k must be positive")
+        if self.lexical_weight < 0.0 or self.vector_weight < 0.0:
+            raise ValueError("RRF weights must be non-negative")
+        if self.lexical_weight == 0.0 and self.vector_weight == 0.0:
+            raise ValueError("at least one RRF weight must be positive")
+
+
+@dataclass(frozen=True)
+class HybridRetrievalConfig:
+    lexical_top_n: int = 50
+    vector_top_n: int = 50
+    final_top_k: int = 10
+    fusion_weight: float = 0.60
+    deterministic_weight: float = 0.40
+    fallback_on_vector_error: bool = True
+    rrf: RRFConfig = field(default_factory=RRFConfig)
+
+    def __post_init__(self) -> None:
+        if min(self.lexical_top_n, self.vector_top_n, self.final_top_k) <= 0:
+            raise ValueError("hybrid retrieval limits must be positive")
+        if self.fusion_weight < 0.0 or self.deterministic_weight < 0.0:
+            raise ValueError("hybrid final weights must be non-negative")
+        total = self.fusion_weight + self.deterministic_weight
+        if total <= 0.0:
+            raise ValueError("at least one hybrid final weight must be positive")
+        object.__setattr__(self, "fusion_weight", self.fusion_weight / total)
+        object.__setattr__(self, "deterministic_weight", self.deterministic_weight / total)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "lexical_top_n": self.lexical_top_n,
+            "vector_top_n": self.vector_top_n,
+            "final_top_k": self.final_top_k,
+            "fusion_weight": self.fusion_weight,
+            "deterministic_weight": self.deterministic_weight,
+            "fallback_on_vector_error": self.fallback_on_vector_error,
+            "rrf": {
+                "k": self.rrf.k,
+                "lexical_weight": self.rrf.lexical_weight,
+                "vector_weight": self.rrf.vector_weight,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class FusedCandidate:
+    chunk_id: str
+    doc_id: str
+    rrf_score: float
+    fusion_rank: int
+    lexical_rank: int | None = None
+    lexical_score: float | None = None
+    vector_rank: int | None = None
+    vector_score: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chunk_id": self.chunk_id,
+            "doc_id": self.doc_id,
+            "lexical_rank": self.lexical_rank,
+            "lexical_score": self.lexical_score,
+            "vector_rank": self.vector_rank,
+            "vector_score": self.vector_score,
+            "rrf_score": self.rrf_score,
+            "fusion_rank": self.fusion_rank,
+        }
+
+
+@dataclass(frozen=True)
+class HybridQueryExecution:
+    plan: Any
+    documents: Sequence[CandidateDocument]
+    chunks: Sequence[CandidateChunk]
+    lexical_results: Sequence[RetrievalResult]
+    lexical_final_results: Sequence[RetrievalResult]
+    vector_results: Sequence[VectorRetrievalResult]
+    fused_candidates: Sequence[FusedCandidate]
+    results: Sequence[RetrievalResult]
+    routing: Mapping[str, Any]
+    vector_status: str
+    vector_error: str | None = None
+
+
+def reciprocal_rank_fusion(
+    lexical_results: Sequence[RetrievalResult],
+    vector_results: Sequence[VectorRetrievalResult],
+    config: RRFConfig | None = None,
+) -> list[FusedCandidate]:
+    settings = config or RRFConfig()
+    rows: dict[str, dict[str, Any]] = {}
+    for result in sorted(lexical_results, key=lambda item: (item.rank, item.chunk_id)):
+        row = rows.setdefault(result.chunk_id, {"doc_id": result.doc_id})
+        if row.get("lexical_rank") is None:
+            row["lexical_rank"] = result.rank
+            row["lexical_score"] = float(result.bm25_score)
+    for result in sorted(vector_results, key=lambda item: (item.rank, item.chunk_id)):
+        row = rows.setdefault(result.chunk_id, {"doc_id": result.doc_id})
+        if row.get("vector_rank") is None:
+            row["vector_rank"] = result.rank
+            row["vector_score"] = float(result.vector_score)
+
+    scored: list[tuple[float, str, dict[str, Any]]] = []
+    for chunk_id, row in rows.items():
+        score = 0.0
+        if row.get("lexical_rank") is not None:
+            score += settings.lexical_weight / (settings.k + row["lexical_rank"])
+        if row.get("vector_rank") is not None:
+            score += settings.vector_weight / (settings.k + row["vector_rank"])
+        scored.append((score, chunk_id, row))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [
+        FusedCandidate(
+            chunk_id=chunk_id,
+            doc_id=str(row["doc_id"]),
+            rrf_score=score,
+            fusion_rank=rank,
+            lexical_rank=row.get("lexical_rank"),
+            lexical_score=row.get("lexical_score"),
+            vector_rank=row.get("vector_rank"),
+            vector_score=row.get("vector_score"),
+        )
+        for rank, (score, chunk_id, row) in enumerate(scored, start=1)
+    ]
+
+
+class HybridQueryExecutor:
+    """Run lexical and vector search in one routed candidate universe."""
+
+    def __init__(
+        self,
+        metadata_backend: MetadataBackend,
+        embedder: EmbeddingProvider,
+        embedding_config: EmbeddingConfig,
+        *,
+        chunk_backend: ChunkBackend | None = None,
+        lexical_retriever: Retriever | None = None,
+        vector_retriever: VectorRetriever | None = None,
+        router: QueryRouter | None = None,
+        config: HybridRetrievalConfig | None = None,
+    ) -> None:
+        self._metadata_backend = metadata_backend
+        self._chunk_backend = (
+            chunk_backend
+            if chunk_backend is not None
+            else _require_method(metadata_backend, "get_candidate_chunks")
+        )
+        self._lexical_retriever = (
+            lexical_retriever
+            if lexical_retriever is not None
+            else _require_method(metadata_backend, "retrieve")
+        )
+        self._vector_retriever = (
+            vector_retriever
+            if vector_retriever is not None
+            else _require_method(metadata_backend, "vector_search")
+        )
+        self._embedder = embedder
+        self.embedding_config = embedding_config
+        if embedder.config != embedding_config:
+            raise ValueError("embedder config must match the vector index config")
+        self.router = router or QueryRouter()
+        self.config = config or HybridRetrievalConfig()
+
+    def execute(self, plan: Any) -> HybridQueryExecution:
+        route = self.router.route(plan)
+        documents = self._metadata_backend.get_candidate_documents(**route.backend_filters)
+        documents = self.router.filter_documents(documents, route)
+        chunks = self._chunk_backend.get_candidate_chunks(documents)
+        chunks = self.router.prepare_chunks(chunks, route)
+        document_metadata = {document.doc_id: document.metadata for document in documents}
+
+        lexical_results = self._lexical_retriever.retrieve(
+            plan.lexical_query,
+            chunks,
+            top_k=self.config.lexical_top_n,
+        )
+        lexical_final = self.router.rerank(
+            lexical_results,
+            route,
+            chunks=chunks,
+            document_metadata=document_metadata,
+            top_k=min(plan.top_k, self.config.final_top_k),
+        )
+
+        vector_results: list[VectorRetrievalResult] = []
+        vector_status = "ok"
+        vector_error: str | None = None
+        try:
+            query_embedding = self._embedder.embed_query(plan.lexical_query)
+            vector_results = self._vector_retriever.vector_search(
+                query_embedding,
+                chunks,
+                embedding_model=self.embedding_config.model,
+                embedding_version=self.embedding_config.version,
+                top_k=self.config.vector_top_n,
+            )
+            if not vector_results:
+                vector_status = "empty"
+        except Exception as error:
+            if not self.config.fallback_on_vector_error:
+                raise
+            vector_status = "unavailable"
+            vector_error = f"{type(error).__name__}: {error}"
+
+        fused = reciprocal_rank_fusion(lexical_results, vector_results, self.config.rrf)
+        if not vector_results:
+            final_results = _annotate_lexical_fallback(lexical_final, fused, vector_status)
+        else:
+            final_results = self._hybrid_rerank(
+                fused,
+                route,
+                chunks,
+                document_metadata,
+                top_k=min(plan.top_k, self.config.final_top_k),
+            )
+        routing = {
+            **route.to_dict(),
+            "hybrid": {
+                "config": self.config.to_dict(),
+                "embedding": {
+                    "provider": self.embedding_config.provider,
+                    "model": self.embedding_config.model,
+                    "version": self.embedding_config.version,
+                    "dimensions": self.embedding_config.dimensions,
+                },
+                "vector_status": vector_status,
+                "vector_error": vector_error,
+            },
+        }
+        return HybridQueryExecution(
+            plan=plan,
+            documents=documents,
+            chunks=chunks,
+            lexical_results=lexical_results,
+            lexical_final_results=lexical_final,
+            vector_results=vector_results,
+            fused_candidates=fused,
+            results=final_results,
+            routing=routing,
+            vector_status=vector_status,
+            vector_error=vector_error,
+        )
+
+    def _hybrid_rerank(
+        self,
+        fused: Sequence[FusedCandidate],
+        route: Any,
+        chunks: Sequence[CandidateChunk],
+        document_metadata: Mapping[str, Mapping[str, Any]],
+        *,
+        top_k: int,
+    ) -> list[RetrievalResult]:
+        chunks_by_id = {candidate.chunk_id: candidate for candidate in chunks}
+        max_rrf = max((candidate.rrf_score for candidate in fused), default=0.0)
+        scored: list[tuple[float, int, str, FusedCandidate, float, dict[str, float]]] = []
+        for candidate in fused:
+            source = chunks_by_id.get(candidate.chunk_id)
+            if source is None:
+                continue
+            components = self.router.deterministic_components(
+                route,
+                chunk=source.chunk,
+                metadata_match=source.metadata_match.to_dict(),
+                document_metadata=document_metadata.get(source.doc_id, {}),
+            )
+            deterministic_score = self.router.deterministic_score(components)
+            normalized_rrf = candidate.rrf_score / max_rrf if max_rrf > 0.0 else 0.0
+            final_score = (
+                self.config.fusion_weight * normalized_rrf
+                + self.config.deterministic_weight * deterministic_score
+            )
+            scored.append(
+                (
+                    final_score,
+                    candidate.fusion_rank,
+                    candidate.chunk_id,
+                    candidate,
+                    deterministic_score,
+                    components,
+                )
+            )
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+        output: list[RetrievalResult] = []
+        for final_rank, row in enumerate(scored[:top_k], start=1):
+            final_score, _, _, fused_candidate, deterministic_score, components = row
+            source = chunks_by_id[fused_candidate.chunk_id]
+            match = source.metadata_match.to_dict()
+            match["hybrid"] = {
+                **fused_candidate.to_dict(),
+                "normalized_rrf_score": (
+                    fused_candidate.rrf_score / max_rrf if max_rrf > 0.0 else 0.0
+                ),
+                "deterministic_rerank_score": deterministic_score,
+                "final_score": final_score,
+                "final_rank": final_rank,
+                "fusion_weight": self.config.fusion_weight,
+                "deterministic_weight": self.config.deterministic_weight,
+            }
+            match["score_components"] = components
+            output.append(
+                RetrievalResult(
+                    chunk_id=fused_candidate.chunk_id,
+                    doc_id=fused_candidate.doc_id,
+                    bm25_score=float(fused_candidate.lexical_score or 0.0),
+                    rank=final_rank,
+                    metadata_match=match,
+                )
+            )
+        return output
+
+
+def _annotate_lexical_fallback(
+    results: Sequence[RetrievalResult],
+    fused: Sequence[FusedCandidate],
+    vector_status: str,
+) -> list[RetrievalResult]:
+    fused_by_id = {candidate.chunk_id: candidate for candidate in fused}
+    output: list[RetrievalResult] = []
+    for result in results:
+        match = dict(result.metadata_match)
+        score_components = dict(match.get("score_components") or {})
+        fused_candidate = fused_by_id.get(result.chunk_id)
+        match["hybrid"] = {
+            **(fused_candidate.to_dict() if fused_candidate else {}),
+            "vector_status": vector_status,
+            "deterministic_rerank_score": score_components.get("final_score"),
+            "final_score": score_components.get("final_score"),
+            "final_rank": result.rank,
+            "fallback": "lexical_only",
+        }
+        output.append(
+            RetrievalResult(
+                chunk_id=result.chunk_id,
+                doc_id=result.doc_id,
+                bm25_score=result.bm25_score,
+                rank=result.rank,
+                metadata_match=match,
+            )
+        )
+    return output
+
+
+def _require_method(backend: object, method: str) -> Any:
+    if not callable(getattr(backend, method, None)):
+        raise TypeError(f"{type(backend).__name__} must implement {method}()")
+    return backend

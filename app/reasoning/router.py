@@ -270,17 +270,12 @@ class QueryRouter:
             report_metadata = metadata_by_doc.get(result.doc_id, {})
             components = {
                 "lexical": lexical,
-                "exact_term": _exact_term_score(route.lexical_query, chunk),
-                "section": _section_score(route.section_boosts, chunk),
-                "period_relevance": _period_relevance(
-                    route.ranking_context,
-                    chunk,
-                    report_metadata,
+                **self.deterministic_components(
+                    route,
+                    chunk=chunk,
+                    metadata_match=result.metadata_match,
+                    document_metadata=report_metadata,
                 ),
-                "basis_relevance": _basis_relevance(route, chunk),
-                "metadata": _metadata_score(route, chunk, result.metadata_match),
-                "retrieval_priority": _priority_score(chunk.get("retrieval_priority")),
-                "date_relevance": _date_relevance(route.date_range, chunk.get("rcept_dt")),
             }
             final_score = sum(
                 components[name] * weight for name, weight in self.SCORE_WEIGHTS.items()
@@ -309,6 +304,48 @@ class QueryRouter:
                 )
             )
         return output
+
+    def deterministic_components(
+        self,
+        route: RetrievalRoute,
+        *,
+        chunk: Mapping[str, Any],
+        metadata_match: Mapping[str, Any],
+        document_metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, float]:
+        """Return reusable non-retrieval features for lexical or hybrid ranking."""
+
+        report_metadata = document_metadata or {}
+        return {
+            "exact_term": _exact_term_score(route.lexical_query, chunk),
+            "section": _section_score(route.section_boosts, chunk),
+            "period_relevance": _period_relevance(
+                route.ranking_context,
+                chunk,
+                report_metadata,
+            ),
+            "basis_relevance": _basis_relevance(route, chunk),
+            "metadata": _metadata_score(route, chunk, metadata_match),
+            "retrieval_priority": _priority_score(chunk.get("retrieval_priority")),
+            "date_relevance": _date_relevance(route.date_range, chunk.get("rcept_dt")),
+        }
+
+    def deterministic_score(self, components: Mapping[str, float]) -> float:
+        """Normalize deterministic features independently from retrieval rank."""
+
+        weights = {
+            name: weight
+            for name, weight in self.SCORE_WEIGHTS.items()
+            if name != "lexical"
+        }
+        total = sum(weights.values())
+        if total <= 0.0:
+            return 0.0
+        weighted = sum(
+            float(components.get(name, 0.0)) * weight
+            for name, weight in weights.items()
+        )
+        return weighted / total
 
 
 def _normalized(value: Any) -> str:

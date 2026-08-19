@@ -8,6 +8,7 @@ evidence returned to callers.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from app.retrieval.interfaces import (
     MetadataMatch,
     RetrievalResult,
 )
+from app.retrieval.vector import VectorRetrievalResult
 
 
 ConnectionFactory = Callable[..., Any]
@@ -507,3 +509,74 @@ class PostgresBackend:
         top_k: int | None = None,
     ) -> list[RetrievalResult]:
         return self.lexical_search(query, candidates, top_k=top_k)
+
+    def vector_search(
+        self,
+        query_embedding: Sequence[float],
+        candidates: Sequence[CandidateChunk],
+        *,
+        embedding_model: str,
+        embedding_version: str,
+        top_k: int = 50,
+    ) -> list[VectorRetrievalResult]:
+        """Cosine-rank embeddings inside the already-routed candidate universe."""
+
+        if not candidates or top_k <= 0:
+            return []
+        if not embedding_model.strip() or not embedding_version.strip():
+            raise ValueError("embedding model and version must not be empty")
+        embedding = [float(value) for value in query_embedding]
+        if not embedding or len(embedding) > 2000:
+            raise ValueError("query embedding dimensions must be between 1 and 2000")
+        if any(not math.isfinite(value) for value in embedding):
+            raise ValueError("query embedding values must be finite")
+
+        candidates_by_id = {candidate.chunk_id: candidate for candidate in candidates}
+        dimensions = len(embedding)
+        # pgvector dimensions are SQL type modifiers, not bindable values. The
+        # integer is derived only from the validated vector length; all external
+        # text and vector values remain bound parameters.
+        vector_literal = "[" + ",".join(format(value, ".17g") for value in embedding) + "]"
+        rows = self._fetch_all(
+            f"""
+            WITH query_vector AS (
+                SELECT %s::vector({dimensions}) AS value
+            )
+            SELECT
+                ce.chunk_id,
+                c.doc_id,
+                1 - (ce.embedding::vector({dimensions}) <=> query_vector.value)
+                    AS vector_score
+            FROM chunk_embeddings ce
+            JOIN chunks c ON c.chunk_id = ce.chunk_id
+            CROSS JOIN query_vector
+            WHERE ce.chunk_id = ANY(%s)
+              AND ce.embedding_model = %s
+              AND ce.embedding_version = %s
+              AND ce.embedding_dimensions = {dimensions}
+            ORDER BY ce.embedding::vector({dimensions}) <=> query_vector.value,
+                     ce.chunk_id
+            LIMIT %s
+            """,
+            [
+                vector_literal,
+                sorted(candidates_by_id),
+                embedding_model,
+                embedding_version,
+                int(top_k),
+            ],
+        )
+        results: list[VectorRetrievalResult] = []
+        for rank, row in enumerate(rows, start=1):
+            candidate = candidates_by_id.get(str(row["chunk_id"]))
+            if candidate is None:
+                continue
+            results.append(
+                VectorRetrievalResult(
+                    chunk_id=candidate.chunk_id,
+                    doc_id=candidate.doc_id,
+                    vector_score=float(row["vector_score"]),
+                    rank=rank,
+                )
+            )
+        return results

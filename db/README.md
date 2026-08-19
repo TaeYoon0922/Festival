@@ -3,6 +3,11 @@
 Target: PostgreSQL 16 with pgvector 0.8.6. The schema enables `vector` but deliberately
 creates no embedding column and loads no embedding data.
 
+Optional hybrid retrieval keeps embeddings outside the frozen `chunks` table. Apply
+`db/004_vector_search.sql` only when the embedding model, version, and 1024-dimensional
+index choice have been confirmed. The migration creates an empty `chunk_embeddings`
+table and an HNSW cosine index; it does not generate or load embeddings.
+
 ## Actual-output field decisions
 
 - `doc_id`, `chunk_id`, local `section_id`, and local `table_id` are preserved exactly.
@@ -53,6 +58,19 @@ Then run:
 psql -X -v ON_ERROR_STOP=1 -f db/002_indexes.sql
 psql -X -v ON_ERROR_STOP=1 -f db/003_validation.sql
 ```
+
+For the optional vector layer, back up the database and apply the separate migration:
+
+```text
+psql -X -v ON_ERROR_STOP=1 -f db/004_vector_search.sql
+```
+
+HNSW was selected over IVFFlat because it needs no training set, supports incremental
+inserts, and generally favors query recall. Its tradeoffs are a larger index, slower
+builds, and higher memory use. The expression index targets `vector(1024)`; a provider
+with another dimension needs a matching expression index. Keep one active model/version
+per production index where practical, because approximate filtering across many model
+versions can reduce recall.
 
 Alternatively, `scripts/load_postgres.py` uses staging-table COPY plus
 `ON CONFLICT DO NOTHING`, records completed tables, and supports `--dry-run` and restart.
