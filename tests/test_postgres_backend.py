@@ -269,6 +269,50 @@ class PostgresBackendTests(unittest.TestCase):
         self.assertIn("websearch_to_tsquery('simple', %s)", sql)
         self.assertEqual(params, ("alpha", ["c1", "c2"], 1))
 
+    def test_vector_search_is_scoped_and_parameter_bound(self) -> None:
+        candidates = [
+            CandidateChunk("c1", "d1", {"retrieval_text": "alpha"}, MetadataMatch()),
+            CandidateChunk("c2", "d2", {"retrieval_text": "beta"}, MetadataMatch()),
+        ]
+        malicious_model = "model' OR TRUE --"
+
+        def handler(query: str, params: tuple) -> list[dict]:
+            self.assertIn("JOIN chunks c ON c.chunk_id = ce.chunk_id", query)
+            self.assertIn("ce.chunk_id = ANY(%s)", query)
+            self.assertIn("<=>", query)
+            self.assertIn("vector(3)", query)
+            self.assertNotIn(malicious_model, query)
+            return [{"chunk_id": "c1", "doc_id": "d1", "vector_score": 0.75}]
+
+        database = FakeDatabase(handler)
+        backend = PostgresBackend(dsn="test", connection_factory=database.connect)
+        result = backend.vector_search(
+            [0.1, 0.2, 0.3],
+            candidates,
+            embedding_model=malicious_model,
+            embedding_version="v1",
+            top_k=1,
+        )[0]
+
+        self.assertEqual(result.chunk_id, "c1")
+        self.assertEqual(result.vector_score, 0.75)
+        _sql, params = database.calls[0]
+        self.assertEqual(params[0], "[0.10000000000000001,0.20000000000000001,0.29999999999999999]")
+        self.assertEqual(params[1:], (["c1", "c2"], malicious_model, "v1", 1))
+
+    def test_vector_search_rejects_invalid_embeddings_without_querying(self) -> None:
+        database = FakeDatabase()
+        backend = PostgresBackend(dsn="test", connection_factory=database.connect)
+        candidate = CandidateChunk("c1", "d1", {}, MetadataMatch())
+        with self.assertRaises(ValueError):
+            backend.vector_search(
+                [float("nan")],
+                [candidate],
+                embedding_model="model",
+                embedding_version="v1",
+            )
+        self.assertEqual(database.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()
