@@ -40,6 +40,16 @@ class FakeTransport:
         return self.response
 
 
+class OomUntilBatchEncoder(FakeEncoder):
+    def encode(self, sentences, **kwargs):
+        self.calls.append((list(sentences), kwargs))
+        if kwargs["batch_size"] > 8:
+            raise RuntimeError("CUDA out of memory")
+        vector = [0.0] * BGE_M3_DIMENSIONS
+        vector[0] = 1.0
+        return {"dense_vecs": [list(vector) for _ in sentences]}
+
+
 def bge_config(**overrides):
     values = {
         "provider": "bge_m3_local",
@@ -153,6 +163,46 @@ class BgeM3ProviderTests(unittest.TestCase):
         self.assertTrue(payload["return_dense"])
         self.assertFalse(payload["return_sparse"])
         self.assertFalse(payload["return_colbert_vecs"])
+
+    def test_cuda_oom_halves_batch_and_retains_successful_size(self) -> None:
+        encoder = OomUntilBatchEncoder()
+        cleanups = []
+        provider = BgeM3LocalEmbeddingProvider(
+            bge_config(device="cuda", batch_size=32, min_batch_size=4),
+            encoder=encoder,
+            oom_cleanup=lambda: cleanups.append(True),
+        )
+
+        first = provider.embed_documents(["one", "two"])
+        provider.embed_query("three")
+
+        self.assertEqual(len(first[0]), 1024)
+        self.assertEqual([call[1]["batch_size"] for call in encoder.calls], [32, 16, 8, 8])
+        self.assertEqual(provider.effective_batch_size, 8)
+        self.assertEqual(provider.oom_retries, 2)
+        self.assertEqual(len(cleanups), 2)
+
+    def test_cpu_does_not_misclassify_memory_error_as_cuda_oom(self) -> None:
+        encoder = OomUntilBatchEncoder()
+        provider = BgeM3LocalEmbeddingProvider(
+            bge_config(device="cpu", batch_size=32), encoder=encoder
+        )
+        with self.assertRaisesRegex(RuntimeError, "CUDA out of memory"):
+            provider.embed_query("query")
+        self.assertEqual(len(encoder.calls), 1)
+        self.assertEqual(provider.oom_retries, 0)
+
+    def test_http_accepts_openai_style_dense_response(self) -> None:
+        vector = [0.0] * 1024
+        vector[3] = 5.0
+        provider = BgeM3HttpEmbeddingProvider(
+            bge_config(provider="bge_m3_http"),
+            HttpEmbeddingSettings("https://embedding.invalid/bge-m3", "secret"),
+            transport=FakeTransport(
+                {"data": [{"index": 0, "embedding": vector}]}
+            ),
+        )
+        self.assertEqual(provider.embed_query("query")[3], 1.0)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,10 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Mapping, Protocol, Sequence
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -22,6 +25,8 @@ class EmbeddingConfig:
     batch_size: int = 32
     max_length: int = 8192
     device: str = "cpu"
+    cuda_oom_retry: bool = True
+    min_batch_size: int = 1
 
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.model.strip() or not self.version.strip():
@@ -32,6 +37,8 @@ class EmbeddingConfig:
             raise ValueError("embedding batch size must be positive")
         if self.max_length <= 0:
             raise ValueError("embedding max length must be positive")
+        if not 1 <= self.min_batch_size <= self.batch_size:
+            raise ValueError("embedding min batch size must be between 1 and batch size")
         if not re.fullmatch(r"(?:cpu|cuda(?::\d+)?)", self.device.strip().casefold()):
             raise ValueError("embedding device must be cpu, cuda, or cuda:<index>")
 
@@ -46,6 +53,12 @@ class EmbeddingConfig:
             batch_size=int(values.get("FESTIVAL_EMBEDDING_BATCH_SIZE", "32")),
             max_length=int(values.get("FESTIVAL_EMBEDDING_MAX_LENGTH", "8192")),
             device=values.get("FESTIVAL_EMBEDDING_DEVICE", "cpu"),
+            cuda_oom_retry=_parse_bool(
+                values.get("FESTIVAL_EMBEDDING_CUDA_OOM_RETRY", "true")
+            ),
+            min_batch_size=int(
+                values.get("FESTIVAL_EMBEDDING_MIN_BATCH_SIZE", "1")
+            ),
         )
 
 
@@ -59,6 +72,23 @@ class EmbeddingProvider(Protocol):
 
 class EmbeddingDimensionMismatch(ValueError):
     """Raised when provider output cannot match the configured vector index."""
+
+
+class EmbeddingHttpError(RuntimeError):
+    """Sanitized HTTP failure with enough metadata for bounded retry decisions."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None,
+        transient: bool,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.transient = transient
+        self.retry_after_seconds = retry_after_seconds
 
 
 class JsonHttpTransport(Protocol):
@@ -77,6 +107,9 @@ class JsonHttpTransport(Protocol):
 class UrllibJsonTransport:
     """Small standard-library transport used only by an explicitly configured provider."""
 
+    def __init__(self, *, opener: Any | None = None) -> None:
+        self._opener = opener or urlopen
+
     def post_json(
         self,
         url: str,
@@ -91,8 +124,29 @@ class UrllibJsonTransport:
             headers={"Content-Type": "application/json", **dict(headers)},
             method="POST",
         )
-        with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310
-            value = json.loads(response.read().decode("utf-8"))
+        try:
+            with self._opener(  # nosec B310
+                request, timeout=timeout_seconds
+            ) as response:
+                value = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            status_code = int(error.code)
+            retry_after = _parse_retry_after(
+                error.headers.get("Retry-After") if error.headers else None
+            )
+            transient = status_code == 429 or 500 <= status_code <= 599
+            raise EmbeddingHttpError(
+                f"embedding endpoint returned HTTP {status_code}",
+                status_code=status_code,
+                transient=transient,
+                retry_after_seconds=retry_after,
+            ) from error
+        except (URLError, TimeoutError) as error:
+            raise EmbeddingHttpError(
+                "embedding endpoint request failed before a response was received",
+                status_code=None,
+                transient=True,
+            ) from error
         if not isinstance(value, Mapping):
             raise ValueError("embedding endpoint must return a JSON object")
         return value
@@ -269,3 +323,47 @@ def _validate_embedding(vector: Sequence[float], dimensions: int) -> None:
         )
     if any(not math.isfinite(float(value)) for value in vector):
         raise EmbeddingDimensionMismatch("embedding values must be finite")
+
+
+def should_retry_embedding_error(error: BaseException) -> bool:
+    """Unknown provider errors retain legacy retry behavior; explicit permanent errors do not."""
+
+    return getattr(error, "transient", None) is not False
+
+
+def embedding_retry_delay(
+    error: BaseException,
+    configured_delay: float,
+    max_delay: float | None = None,
+) -> float:
+    retry_after = getattr(error, "retry_after_seconds", None)
+    delay = (
+        configured_delay
+        if retry_after is None
+        else max(configured_delay, float(retry_after))
+    )
+    return min(delay, max_delay) if max_delay is not None else delay
+
+
+def _parse_bool(value: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean embedding setting: {value!r}")
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(value)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            return max((target - datetime.now(timezone.utc)).total_seconds(), 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return None

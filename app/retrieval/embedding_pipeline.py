@@ -15,6 +15,8 @@ from app.retrieval.embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingProvider,
     chunk_embedding_text,
+    embedding_retry_delay,
+    should_retry_embedding_error,
 )
 
 
@@ -257,11 +259,19 @@ class SubsetEmbeddingPipeline:
                 return operation()
             except EmbeddingDimensionMismatch:
                 raise
-            except Exception:
-                if attempt >= self.pipeline_config.retry.max_attempts:
+            except Exception as error:
+                if (
+                    attempt >= self.pipeline_config.retry.max_attempts
+                    or not should_retry_embedding_error(error)
+                ):
                     raise
-                if delay:
-                    self.sleep(delay)
+                wait_seconds = embedding_retry_delay(
+                    error,
+                    delay,
+                    self.pipeline_config.retry.max_delay_seconds,
+                )
+                if wait_seconds:
+                    self.sleep(wait_seconds)
                 delay = min(
                     max(delay * 2.0, self.pipeline_config.retry.initial_delay_seconds),
                     self.pipeline_config.retry.max_delay_seconds,

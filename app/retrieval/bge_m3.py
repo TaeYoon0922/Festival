@@ -26,6 +26,7 @@ class BgeM3Encoder(Protocol):
 
 
 EncoderFactory = Callable[[EmbeddingConfig], BgeM3Encoder]
+OomCleanup = Callable[[], None]
 
 
 class BgeM3LocalEmbeddingProvider:
@@ -38,13 +39,17 @@ class BgeM3LocalEmbeddingProvider:
         encoder: BgeM3Encoder | None = None,
         encoder_factory: EncoderFactory | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        oom_cleanup: OomCleanup | None = None,
     ) -> None:
         _validate_bge_config(config)
         self.config = config
         self._encoder = encoder
         self._encoder_factory = encoder_factory or _load_flag_embedding_encoder
         self._clock = clock
+        self._oom_cleanup = oom_cleanup or _clear_cuda_cache
         self.load_time_seconds = 0.0
+        self.effective_batch_size = config.batch_size
+        self.oom_retries = 0
 
     def load(self) -> None:
         self._ensure_encoder()
@@ -65,15 +70,47 @@ class BgeM3LocalEmbeddingProvider:
     def _encode(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        output = self._ensure_encoder().encode(
-            list(texts),
-            batch_size=self.config.batch_size,
-            max_length=self.config.max_length,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False,
-        )
+        encoder = self._ensure_encoder()
+        while True:
+            try:
+                output = encoder.encode(
+                    list(texts),
+                    batch_size=self.effective_batch_size,
+                    max_length=self.config.max_length,
+                    return_dense=True,
+                    return_sparse=False,
+                    return_colbert_vecs=False,
+                )
+                break
+            except Exception as error:
+                if not self._can_retry_cuda_oom(error):
+                    raise
+                self.effective_batch_size = max(
+                    self.config.min_batch_size, self.effective_batch_size // 2
+                )
+                self.oom_retries += 1
+                self._oom_cleanup()
         return _normalized_dense_vectors(output, self.config.dimensions, len(texts))
+
+    def _can_retry_cuda_oom(self, error: BaseException) -> bool:
+        return (
+            self.config.cuda_oom_retry
+            and self.config.device.casefold().startswith("cuda")
+            and self.effective_batch_size > self.config.min_batch_size
+            and _is_cuda_out_of_memory(error)
+        )
+
+    def peak_device_memory_bytes(self) -> int | None:
+        """Return CUDA allocator peak when PyTorch exposes it; otherwise ``None``."""
+
+        if not self.config.device.casefold().startswith("cuda"):
+            return None
+        try:
+            import torch
+
+            return int(torch.cuda.max_memory_allocated(self.config.device))
+        except (ImportError, RuntimeError, TypeError, ValueError):
+            return None
 
 
 class BgeM3HttpEmbeddingProvider:
@@ -136,6 +173,24 @@ def _load_flag_embedding_encoder(config: EmbeddingConfig) -> BgeM3Encoder:
     )
 
 
+def _is_cuda_out_of_memory(error: BaseException) -> bool:
+    name = type(error).__name__.casefold()
+    message = str(error).casefold()
+    return name == "outofmemoryerror" or any(
+        marker in message
+        for marker in ("cuda out of memory", "cuda error: out of memory")
+    )
+
+
+def _clear_cuda_cache() -> None:
+    try:
+        import torch
+
+        torch.cuda.empty_cache()
+    except (ImportError, RuntimeError):
+        pass
+
+
 def _validate_bge_config(config: EmbeddingConfig) -> None:
     if config.dimensions != BGE_M3_DIMENSIONS:
         raise EmbeddingDimensionMismatch(
@@ -157,7 +212,21 @@ def _normalized_dense_vectors(
                 value = output[key]
                 break
         else:
-            raise ValueError("BGE-M3 response does not contain dense vectors")
+            data = output.get("data")
+            if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
+                ordered: list[tuple[int, Any]] = []
+                for fallback_index, item in enumerate(data):
+                    if not isinstance(item, Mapping) or "embedding" not in item:
+                        raise ValueError("BGE-M3 response data item is malformed")
+                    ordered.append(
+                        (int(item.get("index", fallback_index)), item["embedding"])
+                    )
+                ordered.sort(key=lambda item: item[0])
+                if [index for index, _ in ordered] != list(range(len(ordered))):
+                    raise ValueError("BGE-M3 response indexes do not match input order")
+                value = [vector for _, vector in ordered]
+            else:
+                raise ValueError("BGE-M3 response does not contain dense vectors")
     if hasattr(value, "tolist"):
         value = value.tolist()
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):

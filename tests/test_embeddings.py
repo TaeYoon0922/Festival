@@ -1,11 +1,15 @@
 import math
 import unittest
+from io import BytesIO
+from urllib.error import HTTPError
 
 from app.retrieval.embeddings import (
     DeterministicHashEmbedder,
     EmbeddingConfig,
+    EmbeddingHttpError,
     HttpEmbeddingSettings,
     OpenAICompatibleEmbeddingProvider,
+    UrllibJsonTransport,
     chunk_embedding_text,
     create_embedding_provider,
 )
@@ -44,6 +48,17 @@ class EmbeddingTests(unittest.TestCase):
         )
         self.assertEqual(config.provider, "test-provider")
         self.assertEqual(config.dimensions, 8)
+
+    def test_embedding_config_reads_cuda_oom_controls(self) -> None:
+        config = EmbeddingConfig.from_env(
+            {
+                "FESTIVAL_EMBEDDING_BATCH_SIZE": "32",
+                "FESTIVAL_EMBEDDING_CUDA_OOM_RETRY": "false",
+                "FESTIVAL_EMBEDDING_MIN_BATCH_SIZE": "8",
+            }
+        )
+        self.assertFalse(config.cuda_oom_retry)
+        self.assertEqual(config.min_batch_size, 8)
 
     def test_document_embedding_uses_only_frozen_retrieval_text(self) -> None:
         chunk = {"retrieval_text": "indexed text", "content": "different content"}
@@ -108,6 +123,75 @@ class EmbeddingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "dimension mismatch"):
             provider.embed_query("query")
+
+    def test_transport_marks_429_transient_and_sanitizes_error(self) -> None:
+        secret = "must-not-leak"
+
+        def opener(request, **_kwargs):
+            raise HTTPError(
+                request.full_url,
+                429,
+                "rate limited",
+                {"Retry-After": "7"},
+                BytesIO(b'{"error":"body must not leak"}'),
+            )
+
+        transport = UrllibJsonTransport(opener=opener)
+        with self.assertRaises(EmbeddingHttpError) as raised:
+            transport.post_json(
+                "https://embedding.invalid/v1",
+                headers={"Authorization": f"Bearer {secret}"},
+                payload={"input": ["private input"]},
+                timeout_seconds=1,
+            )
+        error = raised.exception
+        self.assertTrue(error.transient)
+        self.assertEqual(error.status_code, 429)
+        self.assertEqual(error.retry_after_seconds, 7.0)
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn("private input", str(error))
+        self.assertNotIn("body must not leak", str(error))
+
+    def test_transport_marks_non_retryable_4xx_permanent(self) -> None:
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 400, "bad request", {}, None)
+
+        with self.assertRaises(EmbeddingHttpError) as raised:
+            UrllibJsonTransport(opener=opener).post_json(
+                "https://embedding.invalid/v1",
+                headers={"Authorization": "Bearer secret"},
+                payload={"input": ["text"]},
+                timeout_seconds=1,
+            )
+        self.assertFalse(raised.exception.transient)
+        self.assertEqual(raised.exception.status_code, 400)
+
+    def test_transport_marks_5xx_and_timeout_transient(self) -> None:
+        def unavailable(request, **_kwargs):
+            raise HTTPError(request.full_url, 503, "unavailable", {}, None)
+
+        with self.assertRaises(EmbeddingHttpError) as unavailable_error:
+            UrllibJsonTransport(opener=unavailable).post_json(
+                "https://embedding.invalid/v1",
+                headers={"Authorization": "Bearer secret"},
+                payload={"input": ["text"]},
+                timeout_seconds=1,
+            )
+        self.assertTrue(unavailable_error.exception.transient)
+        self.assertEqual(unavailable_error.exception.status_code, 503)
+
+        def timeout(_request, **_kwargs):
+            raise TimeoutError("timed out")
+
+        with self.assertRaises(EmbeddingHttpError) as timeout_error:
+            UrllibJsonTransport(opener=timeout).post_json(
+                "https://embedding.invalid/v1",
+                headers={"Authorization": "Bearer secret"},
+                payload={"input": ["text"]},
+                timeout_seconds=1,
+            )
+        self.assertTrue(timeout_error.exception.transient)
+        self.assertIsNone(timeout_error.exception.status_code)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,11 @@ def main() -> None:
     parser.add_argument("--dimensions", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--max-length", type=int)
-    parser.add_argument("--device", choices=("cpu", "cuda"))
+    parser.add_argument("--device", help="cpu, cuda, or cuda:<index>")
+    parser.add_argument("--min-batch-size", type=int)
+    parser.add_argument(
+        "--cuda-oom-retry", action=argparse.BooleanOptionalAction, default=None
+    )
     parser.add_argument("--fetch-batch-size", type=int, default=1000)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force", action="store_true")
@@ -66,10 +70,32 @@ def main() -> None:
         provider=args.provider or environment_config.provider,
         model=args.model or environment_config.model,
         version=args.version or environment_config.version,
-        dimensions=args.dimensions or environment_config.dimensions,
-        batch_size=args.batch_size or environment_config.batch_size,
-        max_length=args.max_length or environment_config.max_length,
+        dimensions=(
+            environment_config.dimensions
+            if args.dimensions is None
+            else args.dimensions
+        ),
+        batch_size=(
+            environment_config.batch_size
+            if args.batch_size is None
+            else args.batch_size
+        ),
+        max_length=(
+            environment_config.max_length
+            if args.max_length is None
+            else args.max_length
+        ),
         device=args.device or environment_config.device,
+        cuda_oom_retry=(
+            environment_config.cuda_oom_retry
+            if args.cuda_oom_retry is None
+            else args.cuda_oom_retry
+        ),
+        min_batch_size=(
+            environment_config.min_batch_size
+            if args.min_batch_size is None
+            else args.min_batch_size
+        ),
     )
     backend = PostgresBackend()
     provider = (

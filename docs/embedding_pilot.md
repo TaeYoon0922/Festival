@@ -27,6 +27,8 @@ export FESTIVAL_EMBEDDING_DIMENSIONS=1024
 export FESTIVAL_EMBEDDING_BATCH_SIZE=4
 export FESTIVAL_EMBEDDING_MAX_LENGTH=8192
 export FESTIVAL_EMBEDDING_DEVICE=cpu
+export FESTIVAL_EMBEDDING_CUDA_OOM_RETRY=true
+export FESTIVAL_EMBEDDING_MIN_BATCH_SIZE=1
 ```
 
 `bge_m3_local` lazily loads `BGEM3FlagModel`; install its optional dependencies with
@@ -34,6 +36,13 @@ export FESTIVAL_EMBEDDING_DEVICE=cpu
 final L2 normalization to query and document vectors. This matches pgvector cosine
 distance. Query and documents use the same model/version, max length, dense flags, and
 normalization path.
+
+For GPU inference, install the PyTorch build matching the server CUDA driver before
+installing `requirements-embedding.txt`, set `FESTIVAL_EMBEDDING_DEVICE=cuda` (or
+`cuda:0`), and tune `FESTIVAL_EMBEDDING_BATCH_SIZE` to 8, 16, or 32. On a recognized
+CUDA out-of-memory error, the local provider clears the CUDA cache, halves the batch
+size down to `FESTIVAL_EMBEDDING_MIN_BATCH_SIZE`, and retains the successful size for
+later batches. Non-CUDA and non-OOM failures are not treated as an OOM.
 
 For a remote service wrapping the documented BGE-M3 HTTP payload, change only:
 
@@ -45,6 +54,15 @@ export FESTIVAL_EMBEDDING_API_KEY_HEADER='Authorization'
 export FESTIVAL_EMBEDDING_API_KEY_PREFIX='Bearer'
 export FESTIVAL_EMBEDDING_TIMEOUT_SECONDS=60
 ```
+
+The HTTP adapter sends the same immutable model revision, max length, and dense-only
+normalization request as the local adapter. Workflow retries apply exponential backoff
+to timeouts, connection errors, HTTP 429, and HTTP 5xx; `Retry-After` is honored when
+present, capped by `--max-retry-delay-seconds`. Other HTTP 4xx responses fail
+immediately. Transport errors are sanitized so
+API keys, authorization headers, request bodies, and response bodies are not logged.
+Both the native BGE-M3 response (`dense_vecs`) and an OpenAI-style ordered `data` array
+are accepted, then dimension-checked and L2-normalized locally.
 
 The existing OpenAI-compatible provider remains available. Other providers can
 implement `EmbeddingProvider` without changing collection, batching, PostgreSQL, or
@@ -86,7 +104,48 @@ python scripts/benchmark_embedding_subset.py \
 
 The benchmark never constructs a PostgreSQL backend. It reports model load time,
 embedding throughput, mean/p50/p95 batch latency, estimated durations for 76,438 and
-1,363,336 chunks, and process peak RSS when supported by the operating system.
+1,363,336 chunks, CPU-baseline speedup, process peak RSS, and CUDA allocator peak when
+supported. Local CPU, local CUDA, and HTTP all emit the same JSON field schema. The
+default comparison baseline is the measured 1.489 documents/second and can be replaced
+with `--cpu-baseline-documents-per-second`.
+
+GPU benchmark (10 candidates, no database writes):
+
+```bash
+python scripts/benchmark_embedding_subset.py \
+  --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
+  --provider bge_m3_local \
+  --model BAAI/bge-m3 \
+  --version 6892b95fed65c899a30896eb40d619ae284d0455 \
+  --dimensions 1024 --max-length 8192 \
+  --limit 10 --batch-size 8 --min-batch-size 1 --device cuda
+```
+
+GPU benchmark (100 candidates, no database writes):
+
+```bash
+python scripts/benchmark_embedding_subset.py \
+  --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
+  --provider bge_m3_local \
+  --model BAAI/bge-m3 \
+  --version 6892b95fed65c899a30896eb40d619ae284d0455 \
+  --dimensions 1024 --max-length 8192 \
+  --limit 100 --batch-size 16 --min-batch-size 1 --device cuda
+```
+
+HTTP benchmark (10 candidates, no database writes; credentials stay in environment):
+
+```bash
+export FESTIVAL_EMBEDDING_API_URL='https://provider.example/bge-m3/embed'
+export FESTIVAL_EMBEDDING_API_KEY='<secret>'
+python scripts/benchmark_embedding_subset.py \
+  --input data/processed/gold60_embedding_candidates/candidate_chunks.jsonl \
+  --provider bge_m3_http \
+  --model BAAI/bge-m3 \
+  --version 6892b95fed65c899a30896eb40d619ae284d0455 \
+  --dimensions 1024 --max-length 8192 \
+  --limit 10 --batch-size 8 --max-attempts 3
+```
 
 The index helper only writes SQL. Review it; do not build the full-corpus HNSW index as
 part of candidate collection. When the migration is approved and backed up, apply it
