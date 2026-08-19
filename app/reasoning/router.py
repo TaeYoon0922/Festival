@@ -68,10 +68,11 @@ class QueryRouter:
     """Apply only high-confidence routes as exclusions; keep the rest as boosts."""
 
     SCORE_WEIGHTS = {
-        "lexical": 0.48,
+        "lexical": 0.40,
         "exact_term": 0.17,
         "section": 0.13,
         "period_relevance": 0.12,
+        "basis_relevance": 0.08,
         "metadata": 0.04,
         "retrieval_priority": 0.02,
         "date_relevance": 0.04,
@@ -220,8 +221,11 @@ class QueryRouter:
                 candidate.chunk, route.hard_routes["section_path"]
             ):
                 continue
-            if "basis" in route.hard_routes and not soft.get("basis", False):
-                continue
+            if "basis" in route.hard_routes:
+                requested_basis = route.hard_routes["basis"]
+                classification = _chunk_basis_classification(candidate.chunk)
+                if not _basis_candidate_allowed(classification, requested_basis):
+                    continue
             match = MetadataMatch(
                 hard_filters=candidate.metadata_match.hard_filters,
                 soft_boosts=soft,
@@ -273,6 +277,7 @@ class QueryRouter:
                     chunk,
                     report_metadata,
                 ),
+                "basis_relevance": _basis_relevance(route, chunk),
                 "metadata": _metadata_score(route, chunk, result.metadata_match),
                 "retrieval_priority": _priority_score(chunk.get("retrieval_priority")),
                 "date_relevance": _date_relevance(route.date_range, chunk.get("rcept_dt")),
@@ -327,11 +332,13 @@ def _chunk_section_matches(chunk: Mapping[str, Any], requested: Any) -> bool:
 
 
 def _chunk_basis_matches(chunk: Mapping[str, Any], requested: Any) -> bool:
-    aliases = {
-        "consolidated": ("연결", "consolidated"),
-        "standalone": ("별도", "개별", "separate", "standalone"),
-    }
-    expected = aliases.get(str(requested), (str(requested),))
+    classification = _chunk_basis_classification(chunk)
+    return classification == str(requested)
+
+
+def _chunk_basis_classification(chunk: Mapping[str, Any]) -> str:
+    """Classify basis conservatively from structured scope and section markers."""
+
     metadata = chunk.get("metadata")
     scope = str(
         chunk.get("statement_scope")
@@ -339,8 +346,65 @@ def _chunk_basis_matches(chunk: Mapping[str, Any], requested: Any) -> bool:
         or (metadata.get("statement_scope") if isinstance(metadata, Mapping) else "")
         or ""
     )
+    section = " ".join(
+        (
+            _section_text(chunk),
+            str(chunk.get("section_title") or ""),
+        )
+    )
     normalized_scope = _normalized(scope)
-    return any(_normalized(value) in normalized_scope for value in expected)
+    normalized_section = _normalized(section)
+    combined = f"{normalized_scope} {normalized_section}"
+
+    standalone_tokens = ("별도", "개별", "separate", "standalone")
+    has_standalone = any(token in combined for token in standalone_tokens)
+    has_consolidated = any(
+        token in combined
+        for token in (
+            "consolidated",
+            "연결재무",
+            "연결손익",
+            "연결포괄손익",
+            "연결기준",
+            "(연결)",
+            "[연결]",
+        )
+    ) or "연결" in normalized_scope
+
+    # Summary sections often declare both scopes and remain useful to either route.
+    if ("연결" in combined or "consolidated" in combined) and has_standalone:
+        return "mixed"
+    if has_consolidated:
+        return "consolidated"
+    if has_standalone:
+        return "standalone"
+    return "unspecified"
+
+
+def _basis_candidate_allowed(classification: str, requested: Any) -> bool:
+    """Keep standalone recall while preserving consolidated positive filtering."""
+
+    if requested == "consolidated":
+        return classification in {"consolidated", "mixed"}
+    if requested == "standalone":
+        return classification != "consolidated"
+    return True
+
+
+def _basis_relevance(route: RetrievalRoute, chunk: Mapping[str, Any]) -> float:
+    decision = route.decisions.get("basis")
+    if decision is None:
+        return 0.0
+    classification = _chunk_basis_classification(chunk)
+    if decision.value == "consolidated":
+        return {"consolidated": 1.0, "mixed": 0.60}.get(classification, 0.0)
+    if decision.value == "standalone":
+        return {
+            "standalone": 1.0,
+            "mixed": 0.60,
+            "unspecified": 0.35,
+        }.get(classification, 0.0)
+    return 0.0
 
 
 def _section_text(chunk: Mapping[str, Any]) -> str:
