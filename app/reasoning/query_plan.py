@@ -264,6 +264,7 @@ class QueryExecutor:
             results,
             route,
             chunks=chunks,
+            document_metadata={document.doc_id: document.metadata for document in documents},
             top_k=plan.top_k,
         )
         return QueryExecution(

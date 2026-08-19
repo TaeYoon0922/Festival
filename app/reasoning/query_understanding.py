@@ -37,16 +37,33 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 _SECTION_BOOSTS: dict[str, dict[str, float]] = {
     "매출액": {
         "매출 및 수주상황": 1.0,
+        "고객과의 계약에서 생기는 수익": 1.0,
+        "고객과의 계약으로 인한 수익": 0.98,
+        "포괄손익계산서": 0.98,
         "손익계산서": 0.95,
-        "연결재무제표": 0.90,
-        "재무제표": 0.75,
+        "수익의 인식": 0.90,
+        "영업수익": 0.88,
     },
-    "영업이익": {"손익계산서": 1.0, "연결재무제표": 0.90, "재무제표": 0.75},
-    "당기순이익": {"손익계산서": 1.0, "연결재무제표": 0.90, "재무제표": 0.75},
-    "자산총계": {"재무상태표": 1.0, "연결재무제표": 0.90, "재무제표": 0.75},
-    "부채총계": {"재무상태표": 1.0, "연결재무제표": 0.90, "재무제표": 0.75},
-    "자본총계": {"재무상태표": 1.0, "연결재무제표": 0.90, "재무제표": 0.75},
-    "주당순이익": {"주당이익": 1.0, "손익계산서": 0.85},
+    "영업이익": {
+        "포괄손익계산서": 1.0,
+        "손익계산서": 0.98,
+        "영업이익": 0.95,
+        "영업손익": 0.95,
+    },
+    "당기순이익": {
+        "포괄손익계산서": 1.0,
+        "손익계산서": 0.98,
+        "당기순이익": 0.95,
+        "당기순손익": 0.95,
+    },
+    "자산총계": {"재무상태표": 1.0, "자산총계": 0.95},
+    "부채총계": {"재무상태표": 1.0, "부채총계": 0.95},
+    "자본총계": {"재무상태표": 1.0, "자본총계": 0.95},
+    "주당순이익": {
+        "주당이익": 1.0,
+        "포괄손익계산서": 0.85,
+        "손익계산서": 0.82,
+    },
     "holding_ratio": {"보유 주식": 1.0, "대량보유": 0.95, "보유비율": 0.90},
     "holding_shares": {"보유 주식": 1.0, "대량보유": 0.95, "주식수": 0.90},
 }
@@ -180,6 +197,11 @@ class QueryUnderstanding:
         )
 
         fiscal_years = mentioned_years if period.is_fiscal else ()
+        annual_preferred = (
+            task_type == "financial_metric"
+            and period.period_type == "fiscal_year"
+            and period.quarter is None
+        )
         return QueryPlan(
             query=lexical_query,
             raw_query=raw_query,
@@ -204,6 +226,7 @@ class QueryUnderstanding:
             evidence={
                 "mentioned_years": list(mentioned_years),
                 "period_type": period.period_type,
+                "report_preference": "annual" if annual_preferred else None,
                 "company_resolved": bool(resolved),
                 "metric": metric_evidence or holding_evidence,
                 "event_type": event_evidence,

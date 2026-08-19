@@ -128,12 +128,18 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.basis, "unspecified")
         self.assertEqual(plan.raw_query, "고려아연 2024년 매출액")
         self.assertEqual(plan.lexical_query, "매출액")
+        self.assertEqual(plan.evidence["report_preference"], "annual")
+        self.assertIsNone(plan.backend_filters()["period"])
+        self.assertIsNone(plan.backend_filters()["doc_subtype"])
 
         route = QueryRouter().route(plan)
         self.assertEqual(route.hard_filters["company"], ["고려아연"])
         self.assertEqual(route.hard_filters["year"], [2024])
         self.assertNotIn("doc_group", route.hard_routes)
         self.assertEqual(route.soft_boosts["doc_group"], "periodic")
+        self.assertEqual(route.ranking_context["task_type"], "financial_metric")
+        self.assertEqual(route.ranking_context["metric"], "매출액")
+        self.assertEqual(route.ranking_context["period_type"], "fiscal_year")
 
     def test_company_prefix_fallback_handles_regression_without_aliases(self) -> None:
         plan = QueryUnderstanding().understand("고려아연 2024년 매출액")
@@ -333,6 +339,156 @@ class QueryRouterTests(unittest.TestCase):
         self.assertEqual(components["exact_term"], 1.0)
         self.assertEqual(components["section"], 1.0)
         self.assertIn("final_score", components)
+
+    def test_fiscal_year_revenue_prefers_annual_report_without_filtering_interims(self) -> None:
+        plan = QueryUnderstanding({"고려아연": {"고려아연"}}).understand(
+            "고려아연 2024년 매출액", top_k=5
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        report_specs = [
+            ("q1", "quarter", "분기보고서 (2024.03)", 3),
+            ("half", "half", "반기보고서 (2024.06)", 6),
+            ("q3", "quarter", "분기보고서 (2024.09)", 9),
+            ("q1-note", "quarter", "분기보고서 (2024.03)", 3),
+            ("half-note", "half", "반기보고서 (2024.06)", 6),
+            ("q3-note", "quarter", "분기보고서 (2024.09)", 9),
+            ("annual", "annual", "사업보고서 (2024.12)", 12),
+        ]
+        chunks = []
+        results = []
+        document_metadata = {}
+        for rank, (doc_id, subtype, report_name, month) in enumerate(
+            report_specs, start=1
+        ):
+            section = (
+                ["III. 재무에 관한 사항", "연결포괄손익계산서"]
+                if doc_id == "annual"
+                else ["III. 재무에 관한 사항", "연결재무제표 주석", "영업이익"]
+            )
+            chunks.append(
+                CandidateChunk(
+                    doc_id,
+                    doc_id,
+                    {
+                        "doc_group": "periodic",
+                        "section_path": section,
+                        "content": "매출액 12,345백만원",
+                    },
+                    MetadataMatch(),
+                )
+            )
+            results.append(
+                RetrievalResult(
+                    doc_id,
+                    doc_id,
+                    1.001 - rank * 0.001,
+                    rank,
+                    {},
+                )
+            )
+            document_metadata[doc_id] = {
+                "doc_group": "periodic",
+                "doc_subtype": subtype,
+                "report_nm": report_name,
+                "base_year": 2024,
+                "base_month": month,
+            }
+
+        reranked = router.rerank(
+            results,
+            route,
+            chunks=router.prepare_chunks(chunks, route),
+            document_metadata=document_metadata,
+            top_k=5,
+        )
+        annual = next(result for result in reranked if result.chunk_id == "annual")
+        self.assertLessEqual(annual.rank, 3)
+        self.assertEqual(
+            annual.metadata_match["score_components"]["period_relevance"], 1.0
+        )
+        self.assertEqual(annual.metadata_match["score_components"]["section"], 0.98)
+        self.assertTrue(any(result.chunk_id != "annual" for result in reranked))
+
+    def test_revenue_section_does_not_boost_unrelated_financial_statement_note(self) -> None:
+        plan = QueryUnderstanding({"고려아연": {"고려아연"}}).understand(
+            "고려아연 2024년 매출액"
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        chunks = [
+            CandidateChunk(
+                "unrelated-note",
+                "d1",
+                {
+                    "section_path": ["연결재무제표 주석", "영업이익"],
+                    "content": "매출액",
+                },
+                MetadataMatch(),
+            ),
+            CandidateChunk(
+                "revenue-note",
+                "d1",
+                {
+                    "section_path": [
+                        "연결재무제표 주석",
+                        "고객과의 계약에서 생기는 수익",
+                    ],
+                    "content": "매출액",
+                },
+                MetadataMatch(),
+            ),
+        ]
+        results = [
+            RetrievalResult("unrelated-note", "d1", 1.0, 1, {}),
+            RetrievalResult("revenue-note", "d1", 1.0, 2, {}),
+        ]
+        reranked = router.rerank(results, route, chunks=chunks, top_k=2)
+        by_id = {result.chunk_id: result for result in reranked}
+        self.assertEqual(
+            by_id["unrelated-note"].metadata_match["score_components"]["section"],
+            0.0,
+        )
+        self.assertEqual(
+            by_id["revenue-note"].metadata_match["score_components"]["section"],
+            1.0,
+        )
+        self.assertEqual(reranked[0].chunk_id, "revenue-note")
+
+    def test_period_relevance_uses_task_metric_and_explicit_quarter(self) -> None:
+        plan = QueryUnderstanding({"삼성전자": {"삼성전자"}}).understand(
+            "삼성전자 2024년 1분기 자산총계"
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        chunks = [
+            CandidateChunk("quarter", "q", {"doc_group": "periodic"}, MetadataMatch()),
+            CandidateChunk("annual", "a", {"doc_group": "periodic"}, MetadataMatch()),
+        ]
+        results = [
+            RetrievalResult("annual", "a", 1.0, 1, {}),
+            RetrievalResult("quarter", "q", 1.0, 2, {}),
+        ]
+        reranked = router.rerank(
+            results,
+            route,
+            chunks=chunks,
+            document_metadata={
+                "q": {"doc_subtype": "quarter", "base_year": 2024, "base_month": 3},
+                "a": {"doc_subtype": "annual", "base_year": 2024, "base_month": 12},
+            },
+            top_k=2,
+        )
+        by_id = {result.chunk_id: result for result in reranked}
+        self.assertEqual(
+            by_id["quarter"].metadata_match["score_components"]["period_relevance"],
+            1.0,
+        )
+        self.assertEqual(
+            by_id["annual"].metadata_match["score_components"]["period_relevance"],
+            0.0,
+        )
+        self.assertEqual(reranked[0].chunk_id, "quarter")
 
 
 if __name__ == "__main__":

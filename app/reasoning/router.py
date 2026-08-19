@@ -43,6 +43,7 @@ class RetrievalRoute:
     section_boosts: Mapping[str, float]
     lexical_query: str
     date_range: tuple[str, str] | None
+    ranking_context: Mapping[str, Any]
     retrieval_limit: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -55,6 +56,7 @@ class RetrievalRoute:
             "section_boosts": dict(self.section_boosts),
             "lexical_query": self.lexical_query,
             "date_range": list(self.date_range) if self.date_range else None,
+            "ranking_context": dict(self.ranking_context),
             "decisions": {
                 key: decision.to_dict() for key, decision in self.decisions.items()
             },
@@ -66,12 +68,13 @@ class QueryRouter:
     """Apply only high-confidence routes as exclusions; keep the rest as boosts."""
 
     SCORE_WEIGHTS = {
-        "lexical": 0.58,
-        "exact_term": 0.19,
-        "section": 0.16,
-        "metadata": 0.05,
+        "lexical": 0.48,
+        "exact_term": 0.17,
+        "section": 0.13,
+        "period_relevance": 0.12,
+        "metadata": 0.04,
         "retrieval_priority": 0.02,
-        "date_relevance": 0.00,
+        "date_relevance": 0.04,
     }
 
     def __init__(self, *, hard_threshold: float = 0.95) -> None:
@@ -155,6 +158,13 @@ class QueryRouter:
             section_boosts=plan.section_boosts,
             lexical_query=plan.lexical_query,
             date_range=date_range,
+            ranking_context={
+                "task_type": plan.task_type,
+                "metric": plan.metric,
+                "period_type": plan.period.period_type,
+                "fiscal_year": plan.period.year,
+                "fiscal_quarter": plan.period.quarter,
+            },
             retrieval_limit=retrieval_limit,
         )
 
@@ -234,27 +244,35 @@ class QueryRouter:
         route: RetrievalRoute,
         *,
         chunks: Sequence[CandidateChunk],
+        document_metadata: Mapping[str, Mapping[str, Any]] | None = None,
         top_k: int,
     ) -> list[RetrievalResult]:
         if not results:
             return []
         chunks_by_id = {chunk.chunk_id: chunk for chunk in chunks}
+        metadata_by_doc = document_metadata or {}
         raw_lexical = [float(result.bm25_score) for result in results]
-        low, high = min(raw_lexical), max(raw_lexical)
+        high = max(raw_lexical)
         scored: list[tuple[float, int, RetrievalResult, dict[str, float]]] = []
 
         for result in results:
             candidate = chunks_by_id.get(result.chunk_id)
             chunk = candidate.chunk if candidate else {}
             lexical = (
-                (float(result.bm25_score) - low) / (high - low)
-                if high > low
+                max(float(result.bm25_score), 0.0) / high
+                if high > 0.0
                 else 1.0
             )
+            report_metadata = metadata_by_doc.get(result.doc_id, {})
             components = {
                 "lexical": lexical,
                 "exact_term": _exact_term_score(route.lexical_query, chunk),
                 "section": _section_score(route.section_boosts, chunk),
+                "period_relevance": _period_relevance(
+                    route.ranking_context,
+                    chunk,
+                    report_metadata,
+                ),
                 "metadata": _metadata_score(route, chunk, result.metadata_match),
                 "retrieval_priority": _priority_score(chunk.get("retrieval_priority")),
                 "date_relevance": _date_relevance(route.date_range, chunk.get("rcept_dt")),
@@ -375,6 +393,87 @@ def _priority_score(value: Any) -> float:
     return {"high": 1.0, "normal": 0.5, "low": 0.0}.get(
         str(value or "").casefold(), 0.5
     )
+
+
+def _period_relevance(
+    context: Mapping[str, Any],
+    chunk: Mapping[str, Any],
+    document: Mapping[str, Any],
+) -> float:
+    """Score report-period fit without excluding otherwise relevant reports."""
+
+    if context.get("task_type") != "financial_metric" or not context.get("metric"):
+        return 0.0
+
+    group = _metadata_value("doc_group", chunk, document)
+    if group and not _same(group, "periodic"):
+        return 0.0
+
+    requested_year = _optional_int(context.get("fiscal_year"))
+    report_year = _optional_int(_metadata_value("base_year", chunk, document))
+    if requested_year is not None and report_year is not None and requested_year != report_year:
+        return 0.0
+
+    period_type = context.get("period_type")
+    requested_quarter = _optional_int(context.get("fiscal_quarter"))
+    report_kind = _report_kind(chunk, document)
+    report_month = _optional_int(_metadata_value("base_month", chunk, document))
+
+    if period_type == "fiscal_quarter" and requested_quarter is not None:
+        target_month = requested_quarter * 3
+        if report_month is not None:
+            return 1.0 if report_month == target_month else 0.0
+        expected_kind = {1: "quarter", 2: "half", 3: "quarter", 4: "annual"}[
+            requested_quarter
+        ]
+        return 1.0 if report_kind == expected_kind else 0.0
+
+    if period_type == "fiscal_year" and requested_quarter is None:
+        return {
+            "annual": 1.0,
+            "half": 0.40,
+            "quarter": 0.25,
+            "periodic": 0.15,
+        }.get(report_kind, 0.0)
+
+    if period_type == "latest_valid_periodic":
+        return {"annual": 0.75, "half": 0.55, "quarter": 0.45}.get(
+            report_kind, 0.0
+        )
+    return 0.0
+
+
+def _report_kind(
+    chunk: Mapping[str, Any], document: Mapping[str, Any]
+) -> str | None:
+    subtype = _normalized(_metadata_value("doc_subtype", chunk, document))
+    report_name = _normalized(_metadata_value("report_nm", chunk, document))
+    month = _optional_int(_metadata_value("base_month", chunk, document))
+    if subtype == "annual" or "사업보고서" in report_name or month == 12:
+        return "annual"
+    if subtype == "half" or "반기보고서" in report_name or month == 6:
+        return "half"
+    if subtype == "quarter" or "분기보고서" in report_name or month in {3, 9}:
+        return "quarter"
+    if _same(_metadata_value("doc_group", chunk, document), "periodic"):
+        return "periodic"
+    return None
+
+
+def _metadata_value(
+    key: str, chunk: Mapping[str, Any], document: Mapping[str, Any]
+) -> Any:
+    value = chunk.get(key)
+    return document.get(key) if value in (None, "") else value
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _date_relevance(date_range: tuple[str, str] | None, value: Any) -> float:
