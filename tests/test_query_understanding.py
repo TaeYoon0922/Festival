@@ -271,6 +271,172 @@ class QueryRouterTests(unittest.TestCase):
         selected = router.prepare_chunks(chunks, route)
         self.assertEqual([chunk.chunk_id for chunk in selected], ["connected"])
 
+    def test_standalone_basis_excludes_only_clear_consolidated_chunks(self) -> None:
+        plan = QueryUnderstanding({"고려아연": {"고려아연"}}).understand(
+            "고려아연 2024년 별도기준 매출액"
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        chunks = [
+            *[
+                CandidateChunk(
+                    f"neutral-{index}",
+                    "neutral-doc",
+                    {"section_path": ["재무제표 주석", "수익"]},
+                    MetadataMatch(),
+                )
+                for index in range(140)
+            ],
+            *[
+                CandidateChunk(
+                    f"standalone-{index}",
+                    "standalone-doc",
+                    {
+                        "statement_scope": "별도",
+                        "section_path": ["재무제표", "손익계산서"],
+                    },
+                    MetadataMatch(),
+                )
+                for index in range(5)
+            ],
+            *[
+                CandidateChunk(
+                    f"consolidated-{index}",
+                    "consolidated-doc",
+                    {"section_path": ["연결재무제표 주석", "수익"]},
+                    MetadataMatch(),
+                )
+                for index in range(10)
+            ],
+            CandidateChunk(
+                "mixed-1",
+                "mixed-doc",
+                {
+                    "statement_scope": "연결/별도",
+                    "section_path": ["요약재무정보"],
+                },
+                MetadataMatch(),
+            ),
+            CandidateChunk(
+                "mixed-2",
+                "mixed-doc",
+                {"section_path": ["연결/별도 요약재무정보"]},
+                MetadataMatch(),
+            ),
+        ]
+
+        selected = router.prepare_chunks(chunks, route)
+        selected_ids = {chunk.chunk_id for chunk in selected}
+        self.assertEqual(len(selected), 147)
+        self.assertGreater(len(selected), 133)
+        self.assertIn("neutral-0", selected_ids)
+        self.assertIn("standalone-0", selected_ids)
+        self.assertIn("mixed-1", selected_ids)
+        self.assertFalse(any(value.startswith("consolidated-") for value in selected_ids))
+
+    def test_explicit_consolidated_query_keeps_consolidated_top_five(self) -> None:
+        plan = QueryUnderstanding({"고려아연": {"고려아연"}}).understand(
+            "고려아연 2024년 연결기준 매출액", top_k=5
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        chunks = [
+            *[
+                CandidateChunk(
+                    f"consolidated-{index}",
+                    f"c-doc-{index}",
+                    {
+                        "statement_scope": "연결",
+                        "doc_group": "periodic",
+                        "section_path": ["연결포괄손익계산서"],
+                        "content": "매출액 100억원",
+                    },
+                    MetadataMatch(),
+                )
+                for index in range(6)
+            ],
+            CandidateChunk(
+                "standalone",
+                "s-doc",
+                {
+                    "statement_scope": "별도",
+                    "section_path": ["재무제표", "손익계산서"],
+                    "content": "매출액 100억원",
+                },
+                MetadataMatch(),
+            ),
+            CandidateChunk(
+                "neutral",
+                "n-doc",
+                {
+                    "section_path": ["재무제표 주석", "수익"],
+                    "content": "매출액 100억원",
+                },
+                MetadataMatch(),
+            ),
+        ]
+        selected = router.prepare_chunks(chunks, route)
+        results = [
+            RetrievalResult(chunk.chunk_id, chunk.doc_id, 1.0, rank, {})
+            for rank, chunk in enumerate(selected, start=1)
+        ]
+        reranked = router.rerank(results, route, chunks=selected, top_k=5)
+        self.assertEqual(len(reranked), 5)
+        self.assertTrue(
+            all(result.chunk_id.startswith("consolidated-") for result in reranked)
+        )
+
+    def test_explicit_standalone_query_keeps_plain_financial_chunks_in_top_five(self) -> None:
+        plan = QueryUnderstanding({"고려아연": {"고려아연"}}).understand(
+            "고려아연 2024년 별도기준 매출액", top_k=5
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        specs = [
+            ("standalone-statement", "별도", ["재무제표", "손익계산서"]),
+            ("standalone-note", "별도", ["재무제표 주석", "수익의 인식"]),
+            ("plain-statement", None, ["재무제표", "포괄손익계산서"]),
+            (
+                "plain-note",
+                None,
+                ["재무제표 주석", "고객과의 계약에서 생기는 수익"],
+            ),
+            ("plain-income", None, ["손익계산서"]),
+            ("mixed-summary", "연결/별도", ["요약재무정보"]),
+            ("consolidated-note", "연결", ["연결재무제표 주석", "수익"]),
+        ]
+        chunks = [
+            CandidateChunk(
+                chunk_id,
+                chunk_id,
+                {
+                    "statement_scope": scope,
+                    "doc_group": "periodic",
+                    "section_path": section,
+                    "content": "매출액 100억원",
+                },
+                MetadataMatch(),
+            )
+            for chunk_id, scope, section in specs
+        ]
+        selected = router.prepare_chunks(chunks, route)
+        results = [
+            RetrievalResult(chunk.chunk_id, chunk.doc_id, 1.0, rank, {})
+            for rank, chunk in enumerate(selected, start=1)
+        ]
+        reranked = router.rerank(results, route, chunks=selected, top_k=5)
+        top_ids = {result.chunk_id for result in reranked}
+
+        self.assertNotIn("consolidated-note", {chunk.chunk_id for chunk in selected})
+        self.assertIn("standalone-statement", top_ids)
+        self.assertTrue({"plain-statement", "plain-note", "plain-income"} & top_ids)
+        explicit = next(
+            result for result in reranked if result.chunk_id == "standalone-statement"
+        )
+        self.assertEqual(
+            explicit.metadata_match["score_components"]["basis_relevance"], 1.0
+        )
+
     def test_soft_correction_preference_is_annotated_without_exclusion(self) -> None:
         plan = QueryUnderstanding({"삼성전자": {"삼성전자"}}).understand(
             "삼성전자 2024년 정정 매출액"
