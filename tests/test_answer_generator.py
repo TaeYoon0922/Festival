@@ -1,0 +1,247 @@
+import copy
+import unittest
+from dataclasses import FrozenInstanceError, replace
+
+from app.generation.answer_generator import (
+    CitationAwareAnswerGenerator,
+    GeneratedAnswer,
+    generate_answer,
+)
+from app.reasoning.answer_composer import (
+    AnswerDraft,
+    AnswerSection,
+    EvidenceCitation,
+    compose_holding_answer,
+    compose_periodic_answer,
+)
+from app.reasoning.holding_event_resolver import resolve_holding_events
+from app.reasoning.periodic_fact_resolver import resolve_periodic_facts
+from tests.test_holding_event_resolver import (
+    _evidence_set as _holding_evidence,
+    _group as _holding_group,
+    _item as _holding_item,
+)
+from tests.test_periodic_fact_resolver import (
+    _evidence as _periodic_evidence,
+    _group as _periodic_group,
+    _item as _periodic_item,
+)
+
+
+def _multiple_holding_draft():
+    older = _holding_item(
+        "h23:ch_report",
+        "h23",
+        rank=1,
+        table_id="t23",
+        fields={
+            "reporter": "국민연금기금",
+            "reference_date": "2024-05-09",
+            "after_shares": "1,138,905",
+        },
+    )
+    newer = _holding_item(
+        "h25:ch_report",
+        "h25",
+        rank=2,
+        table_id="t25",
+        fields={
+            "reporter": "국민연금기금",
+            "reference_date": "2025-07-28",
+            "after_shares": "1,037,916",
+        },
+    )
+    evidence = _holding_evidence(
+        [_holding_group("g23", older), _holding_group("g25", newer)],
+        question="국민연금기금 변동일 변동후 주식수",
+    )
+    return compose_holding_answer(resolve_holding_events(evidence), evidence)
+
+
+def _repeated_periodic_draft():
+    older = _periodic_item(
+        "p24:ch_fact",
+        "p24",
+        rank=1,
+        text="동일한 주요 제품 및 사업 내용",
+        year=2024,
+        table_id="t24",
+    )
+    newer = _periodic_item(
+        "p25:ch_fact",
+        "p25",
+        rank=2,
+        text="동일한 주요 제품 및 사업 내용",
+        year=2025,
+        table_id="t25",
+    )
+    evidence = _periodic_evidence(
+        [
+            _periodic_group(
+                "g-repeat",
+                older,
+                newer,
+                group_type="periodic_repeated_fact",
+            )
+        ]
+    )
+    return compose_periodic_answer(resolve_periodic_facts(evidence), evidence)
+
+
+class AnswerGeneratorTests(unittest.TestCase):
+    def test_holding_multiple_events_and_order_are_preserved(self):
+        generated = CitationAwareAnswerGenerator().generate(
+            _multiple_holding_draft()
+        )
+
+        self.assertIsInstance(generated, GeneratedAnswer)
+        self.assertLess(
+            generated.answer_text.index("2024-05-09"),
+            generated.answer_text.index("2025-07-28"),
+        )
+        self.assertIn("1,138,905주", generated.answer_text)
+        self.assertIn("1,037,916주", generated.answer_text)
+        self.assertNotIn("최신", generated.answer_text)
+        self.assertTrue(generated.answerable)
+        with self.assertRaises(FrozenInstanceError):
+            generated.answerable = False
+
+    def test_holding_citations_and_ambiguity_warning_are_preserved(self):
+        generated = generate_answer(_multiple_holding_draft())
+
+        self.assertEqual(len(generated.citations), 2)
+        self.assertEqual(
+            [(citation.doc_id, citation.chunk_id) for citation in generated.citations],
+            [("h23", "h23:ch_report"), ("h25", "h25:ch_report")],
+        )
+        self.assertIn("2024-05-09 [1]", generated.answer_text)
+        self.assertIn("2025-07-28 [2]", generated.answer_text)
+        self.assertIn("특정 시점을 자동 선택하지 않았습니다", generated.answer_text)
+        self.assertIn("multiple_matching_holding_events", generated.warnings)
+
+    def test_periodic_repeated_periods_and_sources_are_preserved(self):
+        generated = generate_answer(_repeated_periodic_draft())
+
+        self.assertIn("2024년", generated.answer_text)
+        self.assertIn("2025년", generated.answer_text)
+        self.assertEqual(
+            generated.answer_text.count("동일한 주요 제품 및 사업 내용"), 2
+        )
+        self.assertIn("여러 기간의 공시에서 동일 사실이 확인됩니다", generated.answer_text)
+        self.assertNotIn("최신", generated.answer_text)
+        self.assertEqual(len(generated.citations), 2)
+        self.assertTrue(generated.answerable)
+
+    def test_periodic_conflict_alternatives_are_preserved(self):
+        first = _periodic_item(
+            "p1:ch_a", "p1", rank=1, text="제품 수는 10개", year=2024
+        )
+        second = _periodic_item(
+            "p1:ch_b", "p1", rank=2, text="제품 수는 12개", year=2024
+        )
+        evidence = _periodic_evidence(
+            [
+                _periodic_group(
+                    "g-conflict",
+                    first,
+                    second,
+                    group_type="document_evidence",
+                )
+            ]
+        )
+        draft = compose_periodic_answer(resolve_periodic_facts(evidence), evidence)
+
+        generated = generate_answer(draft)
+
+        self.assertIn("상충하는 대안", generated.answer_text)
+        self.assertIn("제품 수는 10개", generated.answer_text)
+        self.assertIn("제품 수는 12개", generated.answer_text)
+        self.assertIn("확인되지 않은 정보가 있습니다", generated.answer_text)
+        self.assertFalse(generated.answerable)
+
+    def test_missing_provenance_prevents_citation_and_fact_rendering(self):
+        draft = _multiple_holding_draft()
+        citations = tuple(
+            replace(citation, provenance_path=()) for citation in draft.citations
+        )
+        unsafe = replace(draft, citations=citations)
+
+        generated = generate_answer(unsafe)
+
+        self.assertEqual(generated.citations, ())
+        self.assertNotIn("1,138,905", generated.answer_text)
+        self.assertNotIn("1,037,916", generated.answer_text)
+        self.assertIn("provenance가 없어", generated.answer_text)
+        self.assertFalse(generated.answerable)
+        self.assertTrue(
+            any(value.startswith("citation_missing_provenance") for value in generated.warnings)
+        )
+
+    def test_general_generation_emits_only_draft_evidence_content(self):
+        citation = EvidenceCitation(
+            chunk_id="d1:ch_fact",
+            doc_id="d1",
+            source_refs=({"table_id": "t1", "row_start": 1, "row_end": 1},),
+            provenance_path=(
+                {
+                    "resolver": None,
+                    "source_chunk_id": "d1:ch_fact",
+                    "source_doc_id": "d1",
+                },
+            ),
+        )
+        draft = AnswerDraft(
+            question="일반 질문",
+            task_type="general_evidence",
+            answer_sections=(
+                AnswerSection(
+                    title="General evidence",
+                    content={
+                        "evidence": [
+                            {
+                                "chunk_id": "d1:ch_fact",
+                                "evidence_text": "검증된 원문 ONLY_TOKEN",
+                            }
+                        ]
+                    },
+                    supporting_evidence_ids=("d1:ch_fact",),
+                ),
+            ),
+            evidence_references=("d1:ch_fact",),
+            citations=(citation,),
+            ambiguity={},
+            warnings=(),
+            confidence={"level": "high", "score": 1.0},
+            answerable=True,
+        )
+
+        generated = generate_answer(draft)
+
+        evidence_section = generated.sections[0]
+        self.assertEqual(evidence_section.content, "1. 검증된 원문 ONLY_TOKEN [1]")
+        for unsupported in ("시장 전망", "투자 추천", "업계 1위", "향후 성장"):
+            self.assertNotIn(unsupported, generated.answer_text)
+
+    def test_answer_draft_is_not_mutated(self):
+        draft = _repeated_periodic_draft()
+        before = copy.deepcopy(draft.to_dict())
+
+        generate_answer(draft)
+
+        self.assertEqual(draft.to_dict(), before)
+
+    def test_confidence_labels_follow_answer_draft(self):
+        draft = _repeated_periodic_draft()
+        high = generate_answer(replace(draft, confidence={"level": "high"}))
+        medium = generate_answer(replace(draft, confidence={"level": "medium"}))
+        low = generate_answer(
+            replace(draft, confidence={"level": "low"}, answerable=False)
+        )
+
+        self.assertIn("답변 신뢰도: 높음", high.answer_text)
+        self.assertIn("답변 신뢰도: 중간", medium.answer_text)
+        self.assertIn("추가 확인이 필요합니다", low.answer_text)
+
+
+if __name__ == "__main__":
+    unittest.main()
