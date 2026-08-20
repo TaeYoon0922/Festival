@@ -5,6 +5,9 @@ from pathlib import Path
 
 from app.reasoning.hybrid_evaluation import (
     QueryPlanHybridEvaluator,
+    _holding_structure,
+    _query_alignment,
+    _query_evidence_profile,
     compare_hybrid_evaluation_reports,
     write_hybrid_evaluation_report,
 )
@@ -214,6 +217,17 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertTrue(
             section_debug["dominant_gap"]["vector_top10"]["matches_gold_section"]
         )
+        self.assertEqual(
+            row["query_evidence_diagnostic"]["core_terms"],
+            ["rights", "offering"],
+        )
+        self.assertEqual(
+            diagnostic["query_alignment"]["core_term_coverage_ratio"], 1.0
+        )
+        self.assertIn("score_diagnostic", row["hybrid_top10"][0])
+        component_comparison = row["score_component_comparison"]
+        self.assertIn("exact_term", component_comparison["components"])
+        self.assertIn("final_score", component_comparison["scores"])
 
     def test_writes_json_markdown_and_csv(self):
         report = self.evaluator.evaluate(self.question_sets)
@@ -292,6 +306,70 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
                 self.assertTrue(rank_debug["same_query_filter_execution"])
                 self.assertFalse(rank_debug["section_boost_applied_to_raw_vector"])
                 self.assertEqual(rank_debug["rank_level"], "chunk")
+
+    def test_whitespace_normalized_phrase_and_mixed_product_term_alignment(self):
+        holding_profile = _query_evidence_profile(
+            QueryPlan(
+                query="국민연금기금 변동 후 주식수",
+                task_type="holding_change",
+            )
+        )
+        holding_alignment = _query_alignment(
+            holding_profile,
+            {"retrieval_text": "국민연금기금 변동후 주식수 1,000주"},
+        )
+        product_profile = _query_evidence_profile(
+            QueryPlan(query="TC BONDER 반도체 제조 장비")
+        )
+        product_alignment = _query_alignment(
+            product_profile,
+            {"retrieval_text": "반도체 제조용 장비인 TC-BONDER 제품"},
+        )
+        unrelated_alignment = _query_alignment(
+            product_profile,
+            {"retrieval_text": "임직원 보수와 이사회 현황"},
+        )
+
+        self.assertFalse(holding_alignment["exact_phrase_match"])
+        self.assertTrue(holding_alignment["normalized_phrase_match"])
+        self.assertEqual(holding_alignment["core_term_coverage_ratio"], 1.0)
+        self.assertGreaterEqual(product_alignment["core_term_coverage_ratio"], 0.75)
+        self.assertEqual(unrelated_alignment["core_term_coverage_ratio"], 0.0)
+
+    def test_holding_projection_field_alignment_uses_existing_metadata(self):
+        profile = _query_evidence_profile(
+            QueryPlan(
+                query="국민연금기금 변동일 감소 후 주식수",
+                task_type="holding_change",
+                reporter="국민연금기금",
+            )
+        )
+        structure = _holding_structure(
+            {
+                "chunk_type": "table_projection",
+                "projection_type": "holding_detail_row",
+                "projection_state": "resolved",
+                "projection_fields": {
+                    "보고자/보유자": "국민연금기금",
+                    "기준일/보고일": "2023년 06월 13일",
+                    "직전 보유주식수": "2,485,201",
+                    "증감주식수": "-283,151",
+                    "보유주식수": "2,202,050",
+                },
+                "projection_field_refs": {
+                    "보유주식수": [{"table_id": "t0019", "row_start": 2}]
+                },
+                "source_table_ids": ["t0019"],
+                "source_refs": [{"table_id": "t0019", "row_start": 2}],
+            },
+            profile,
+        )
+
+        self.assertTrue(structure["is_projection"])
+        self.assertEqual(structure["projection_type"], "holding_detail_row")
+        self.assertEqual(structure["change_direction"], "decrease")
+        self.assertEqual(structure["after_shares"], "2,202,050")
+        self.assertEqual(structure["field_alignment_ratio"], 1.0)
 
     def test_rejects_top_k_below_recall_cutoff(self):
         with self.assertRaises(ValueError):
