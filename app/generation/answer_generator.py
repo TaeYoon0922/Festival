@@ -34,12 +34,14 @@ class GeneratedSection:
     title: str
     content: str
     citations: tuple[str, ...]
+    metadata: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "content": self.content,
             "citations": list(self.citations),
+            "metadata": list(self.metadata),
         }
 
 
@@ -252,6 +254,7 @@ def _periodic_sections(
             continue
         facts_seen += 1
         lines = ["확인된 사업 또는 공시 내용:"]
+        metadata_lines: list[str] = []
         citation_ids: list[str] = []
         sources = _mapping_list(fact.get("sources"))
         if sources:
@@ -276,6 +279,9 @@ def _periodic_sections(
                     )
                     supported = False
                     continue
+                metadata_lines.extend(
+                    _periodic_source_metadata(source, source_index)
+                )
                 lines.extend(source_lines)
                 citation_ids.extend(source_ids)
         else:
@@ -285,6 +291,7 @@ def _periodic_sections(
             )
             fallback_lines = _periodic_fact_fallback_lines(fact, fallback_ids)
             if fallback_lines:
+                metadata_lines.extend(_periodic_fact_fallback_metadata(fact))
                 lines.extend(fallback_lines)
                 citation_ids.extend(fallback_ids)
             else:
@@ -292,24 +299,31 @@ def _periodic_sections(
                 warnings.append(f"missing_provenance:periodic_fact:{section_index}")
                 supported = False
 
-        alternative_lines, alternative_ids, alternatives_supported = (
+        (
+            alternative_lines,
+            alternative_metadata,
+            alternative_ids,
+            alternatives_supported,
+        ) = (
             _periodic_alternative_lines(fact, registry)
         )
         lines.extend(alternative_lines)
+        metadata_lines.extend(alternative_metadata)
         citation_ids.extend(alternative_ids)
         supported = supported and alternatives_supported
         fact_markers = " ".join(_unique(citation_ids))
         if fact.get("repeated_across_periods") and fact_markers:
-            lines.append(
-                f"여러 기간의 공시에서 동일 사실이 확인됩니다. {fact_markers}"
+            metadata_lines.append(
+                "여러 기간의 공시에서 동일 사실이 확인됩니다."
             )
         if fact.get("period_evolution") and fact_markers:
-            lines.append(f"기간별 내용 변화가 함께 보존되어 있습니다. {fact_markers}")
+            metadata_lines.append("기간별 내용 변화가 함께 보존되어 있습니다.")
         output.append(
             GeneratedSection(
                 title=answer_section.title,
                 content="\n".join(lines),
                 citations=_unique(citation_ids),
+                metadata=_unique(metadata_lines),
             )
         )
 
@@ -325,17 +339,21 @@ def _periodic_sections(
 
 
 def _periodic_source_lines(source: Mapping[str, Any], marker: str) -> list[str]:
+    fact_text = _text(source.get("fact_text"))
+    return [f"내용: {fact_text} {marker}"] if fact_text else []
+
+
+def _periodic_source_metadata(
+    source: Mapping[str, Any], source_index: int
+) -> list[str]:
     lines = []
     period = source.get("reporting_period")
     period_label = _period_label(period if isinstance(period, Mapping) else {})
     if period_label:
-        lines.append(f"보고 기간: {period_label} {marker}")
+        lines.append(f"근거 {source_index} 보고 기간: {period_label}")
     report_name = _text(source.get("report_name"))
     if report_name:
-        lines.append(f"보고서: {report_name} {marker}")
-    fact_text = _text(source.get("fact_text"))
-    if fact_text:
-        lines.append(f"내용: {fact_text} {marker}")
+        lines.append(f"근거 {source_index} 보고서: {report_name}")
     return lines
 
 
@@ -345,31 +363,36 @@ def _periodic_fact_fallback_lines(
     if not citation_ids:
         return []
     marker = " ".join(citation_ids)
+    fact_text = _text(fact.get("fact_text"))
+    return [f"내용: {fact_text} {marker}"] if fact_text else []
+
+
+def _periodic_fact_fallback_metadata(fact: Mapping[str, Any]) -> list[str]:
     lines = []
     for period in _mapping_list(fact.get("reporting_periods")):
         label = _period_label(period)
         if label:
-            lines.append(f"보고 기간: {label} {marker}")
-    fact_text = _text(fact.get("fact_text"))
-    if fact_text:
-        lines.append(f"내용: {fact_text} {marker}")
+            lines.append(f"보고 기간: {label}")
+    for report_name in _string_list(fact.get("report_names")):
+        lines.append(f"보고서: {report_name}")
     return lines
 
 
 def _periodic_alternative_lines(
     fact: Mapping[str, Any], registry: _CitationRegistry
-) -> tuple[list[str], list[str], bool]:
+) -> tuple[list[str], list[str], list[str], bool]:
     alternatives = _mapping_list(fact.get("alternatives"))
     fact_conflict = bool(fact.get("fact_conflict"))
     period_evolution = bool(fact.get("period_evolution"))
     if not alternatives or (
         len(alternatives) == 1 and not fact_conflict and not period_evolution
     ):
-        return [], [], True
+        return [], [], [], True
     lines = [
         "상충하는 대안:" if fact_conflict else "기간별로 구분되는 내용:"
     ]
     used_ids: list[str] = []
+    metadata: list[str] = []
     supported = True
     for index, alternative in enumerate(alternatives, start=1):
         ids = registry.ids_for(_string_list(alternative.get("evidence_chunk_ids")))
@@ -388,9 +411,9 @@ def _periodic_alternative_lines(
         for period in _mapping_list(alternative.get("reporting_periods")):
             label = _period_label(period)
             if label:
-                lines.append(f"대안 {index} 보고 기간: {label} {marker}")
+                metadata.append(f"대안 {index} 보고 기간: {label}")
         used_ids.extend(ids)
-    return lines, used_ids, supported
+    return lines, metadata, used_ids, supported
 
 
 def _general_sections(
@@ -491,7 +514,7 @@ def _period_label(period: Mapping[str, Any]) -> str | None:
         values.append(f"{year}년")
     if quarter:
         values.append(f"{quarter}분기")
-    if period_type:
+    if period_type and period_type not in {"fiscal_year", "fiscal_quarter"}:
         values.append(period_type)
     if end_date:
         values.append(end_date)
@@ -537,9 +560,11 @@ def _render_answer_text(
     sections: Sequence[GeneratedSection],
     citations: Sequence[GeneratedCitation],
 ) -> str:
-    blocks = [
-        f"{section.title}\n{section.content}" for section in sections if section.content
-    ]
+    blocks = []
+    for section in sections:
+        body = "\n".join([*section.metadata, section.content]).strip()
+        if body:
+            blocks.append(f"{section.title}\n{body}")
     if citations:
         citation_lines = ["인용"]
         for citation in citations:

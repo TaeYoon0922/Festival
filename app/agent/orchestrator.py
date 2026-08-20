@@ -23,6 +23,7 @@ from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactResolver,
 )
+from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 
 @dataclass(frozen=True)
@@ -58,12 +59,16 @@ class AgentOrchestrator:
         evidence_builder: EvidenceBuilder | None = None,
         holding_resolver: HoldingEventResolver | None = None,
         periodic_resolver: PeriodicFactResolver | None = None,
+        periodic_evidence_selector: PeriodicEvidenceSelector | None = None,
         answer_composer: AnswerComposer | None = None,
     ) -> None:
         self.task_router = task_router or TaskRouter()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
         self.holding_resolver = holding_resolver or HoldingEventResolver()
         self.periodic_resolver = periodic_resolver or PeriodicFactResolver()
+        self.periodic_evidence_selector = (
+            periodic_evidence_selector or PeriodicEvidenceSelector()
+        )
         self.answer_composer = answer_composer or AnswerComposer()
 
     def run(
@@ -105,9 +110,13 @@ class AgentOrchestrator:
                 evidence, query_plan=query_plan
             )
             resolution_before = copy.deepcopy(resolution.to_dict())
+            trace.append("periodic_evidence_selector")
+            selection = self.periodic_evidence_selector.select(
+                resolution, query_plan=query_plan
+            )
             trace.append("answer_composer")
             draft = self.answer_composer.compose(
-                evidence, periodic_resolution=resolution
+                evidence, periodic_resolution=selection.resolution
             )
         else:
             resolution = None

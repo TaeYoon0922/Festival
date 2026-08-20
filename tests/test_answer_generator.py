@@ -132,6 +132,19 @@ class AnswerGeneratorTests(unittest.TestCase):
         self.assertEqual(len(generated.citations), 2)
         self.assertTrue(generated.answerable)
 
+    def test_periodic_metadata_is_outside_citation_claim_scope(self):
+        generated = generate_answer(_repeated_periodic_draft())
+        fact_section = generated.sections[0]
+
+        self.assertTrue(any("보고 기간" in row for row in fact_section.metadata))
+        self.assertTrue(all("[" not in row for row in fact_section.metadata))
+        self.assertNotIn("보고 기간", fact_section.content)
+        factual_lines = [
+            line for line in fact_section.content.splitlines() if line.startswith("내용:")
+        ]
+        self.assertTrue(factual_lines)
+        self.assertTrue(all("[" in line for line in factual_lines))
+
     def test_periodic_conflict_alternatives_are_preserved(self):
         first = _periodic_item(
             "p1:ch_a", "p1", rank=1, text="제품 수는 10개", year=2024

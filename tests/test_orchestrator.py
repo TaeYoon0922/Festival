@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 from app.agent.orchestrator import AgentOrchestrator
+from app.generation.answer_generator import generate_answer
 from app.reasoning.answer_composer import AnswerDraft
 from app.reasoning.holding_event_resolver import HoldingResolution
 from app.reasoning.periodic_fact_resolver import PeriodicFactResolution
@@ -124,6 +125,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                 "task_router",
                 "evidence_builder",
                 "periodic_fact_resolver",
+                "periodic_evidence_selector",
                 "answer_composer",
             ),
         )
@@ -138,6 +140,100 @@ class AgentOrchestratorTests(unittest.TestCase):
         citations = {citation.chunk_id: citation for citation in result.answer_draft.citations}
         self.assertEqual(citations["p23:ch_fact"].source_refs[0]["table_id"], "t23")
         self.assertEqual(citations["p24:ch_fact"].source_refs[0]["table_id"], "t24")
+
+    def test_periodic_selector_keeps_only_question_and_period_aligned_evidence(self):
+        correct = _candidate(
+            "p23q1:ch_sales",
+            "p23q1",
+            rank=1,
+            doc_group="periodic",
+            content="연료전지 주기기 매출액 23,848백만원",
+            section="매출 및 수주상황",
+            fiscal_year=2023,
+            quarter=1,
+            period_type="fiscal_quarter",
+            report_nm="분기보고서 (2023.03)",
+            source_refs=[{"table_id": "sales", "row_start": 2, "row_end": 2}],
+        )
+        unrelated = _candidate(
+            "p23q1:ch_inventory",
+            "p23q1",
+            rank=2,
+            doc_group="periodic",
+            content="재고자산과 원재료에 관한 표",
+            section="재고자산",
+            fiscal_year=2023,
+            quarter=1,
+            period_type="fiscal_quarter",
+            source_refs=[{"table_id": "inventory", "row_start": 1, "row_end": 4}],
+        )
+        wrong_period = _candidate(
+            "p23q2:ch_sales",
+            "p23q2",
+            rank=3,
+            doc_group="periodic",
+            content="연료전지 주기기 매출액 48,000백만원",
+            section="매출 및 수주상황",
+            fiscal_year=2023,
+            quarter=2,
+            period_type="fiscal_quarter",
+            source_refs=[{"table_id": "sales-q2", "row_start": 2, "row_end": 2}],
+        )
+        wrong_subject = _candidate(
+            "p23q1:ch_total_sales",
+            "p23q1",
+            rank=4,
+            doc_group="periodic",
+            content="회사 전체 매출액 99,999백만원",
+            section="요약재무정보",
+            fiscal_year=2023,
+            quarter=1,
+            period_type="fiscal_quarter",
+            source_refs=[{"table_id": "total-sales", "row_start": 1, "row_end": 1}],
+        )
+        plan = QueryPlan(
+            query="연료전지 주기기 매출액",
+            raw_query="두산퓨얼셀 2023년 1분기 연료전지 주기기 매출액",
+            company="두산퓨얼셀",
+            task_type="financial_metric",
+            metric="매출액",
+            period=(2023, 3),
+            disclosure_route=("periodic",),
+        )
+        execution = _execution(plan, correct, unrelated, wrong_period, wrong_subject)
+
+        result = AgentOrchestrator().run(plan.raw_query, plan, execution)
+
+        self.assertEqual(len(result.resolution.facts), 4)
+        self.assertEqual(
+            result.answer_draft.evidence_references,
+            ("p23q1:ch_sales",),
+        )
+        self.assertNotIn(
+            "p23q1:ch_inventory", result.answer_draft.evidence_references
+        )
+        self.assertNotIn(
+            "p23q2:ch_sales", result.answer_draft.evidence_references
+        )
+        self.assertEqual(
+            result.evidence_set.retrieval_order,
+            (
+                "p23q1:ch_sales",
+                "p23q1:ch_inventory",
+                "p23q2:ch_sales",
+                "p23q1:ch_total_sales",
+            ),
+        )
+        generated = generate_answer(result.answer_draft)
+        fact_section = generated.sections[0]
+        self.assertTrue(generated.answerable)
+        self.assertIn("연료전지 주기기 매출액 23,848백만원 [1]", fact_section.content)
+        self.assertNotIn("재고자산", generated.answer_text)
+        self.assertNotIn("48,000", generated.answer_text)
+        self.assertNotIn("99,999", generated.answer_text)
+        self.assertTrue(any("2023년 1분기" in row for row in fact_section.metadata))
+        self.assertTrue(any("분기보고서 (2023.03)" in row for row in fact_section.metadata))
+        self.assertTrue(all("[1]" not in row for row in fact_section.metadata))
 
     def test_general_evidence_uses_no_resolver_and_keeps_retrieval_order(self):
         first = _candidate(

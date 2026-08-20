@@ -196,6 +196,7 @@ class AgentEndToEndSmokeTests(unittest.TestCase):
                 "task_router",
                 "evidence_builder",
                 "periodic_fact_resolver",
+                "periodic_evidence_selector",
                 "answer_composer",
                 "answer_generator",
             ],
