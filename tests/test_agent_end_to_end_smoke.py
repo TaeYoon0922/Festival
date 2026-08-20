@@ -76,6 +76,32 @@ def _run_full_pipeline(question, plan, execution):
 
 
 class AgentEndToEndSmokeTests(unittest.TestCase):
+    def test_expected_corporate_event_no_evidence_is_not_an_invariant_failure(self):
+        plan = QueryPlan(
+            query="삼성전자 유상증자 공시 내용",
+            task_type="corporate_event",
+            event_type="capital_increase",
+            disclosure_route=("major",),
+        )
+        execution = _execution(plan)
+
+        report = run_smoke_pipeline(
+            (plan.raw_query,),
+            understanding=_StaticUnderstanding(plan.raw_query, plan),
+            executor=_StaticExecutor(plan, execution),
+            output_path=None,
+        )
+        row = report["queries"][0]
+
+        self.assertTrue(report["all_invariants_preserved"])
+        self.assertEqual(report["invariant_failures"], [])
+        self.assertFalse(row["answerable"])
+        self.assertEqual(row["citation_count"], 0)
+        self.assertIn("answer_not_supported", row["warnings"])
+        self.assertTrue(row["validation"]["no_evidence_state_consistent"])
+        self.assertTrue(row["validation"]["all_invariants_preserved"])
+        self.assertEqual(row["failed_invariants"], [])
+
     def test_full_holding_pipeline_preserves_order_citations_and_ambiguity(self):
         first = _holding_pair(
             "h23:ch_report",

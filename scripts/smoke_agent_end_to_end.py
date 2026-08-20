@@ -120,11 +120,15 @@ def validate_completed_execution(
         "citations_have_provenance": _citations_have_provenance(
             agent_result.answer_draft, generated
         ),
+        "no_evidence_state_consistent": _no_evidence_state_consistent(
+            agent_result.answer_draft, generated
+        ),
         "unsupported_facts_not_generated": _unsupported_facts_absent(
             agent_result.answer_draft, generated
         ),
     }
     validations["all_invariants_preserved"] = all(validations.values())
+    failed_invariants = _failed_invariants(validations)
 
     warnings = tuple(
         dict.fromkeys([*agent_result.warnings, *generated.warnings])
@@ -144,6 +148,7 @@ def validate_completed_execution(
         "answerable": generated.answerable,
         "citation_count": len(generated.citations),
         "warnings": list(warnings),
+        "failed_invariants": failed_invariants,
         "evidence": {
             "raw_candidate_count": agent_result.evidence_set.raw_candidate_count,
             "selected_evidence_count": agent_result.evidence_set.selected_evidence_count,
@@ -227,6 +232,7 @@ def run_smoke_pipeline(
                     "answerable": False,
                     "citation_count": 0,
                     "warnings": [f"pipeline_failed:{stage}"],
+                    "failed_invariants": [f"pipeline_failed:{stage}"],
                     "validation": {"all_invariants_preserved": False},
                 }
             )
@@ -242,6 +248,14 @@ def run_smoke_pipeline(
             row.get("validation", {}).get("all_invariants_preserved") is True
             for row in rows
         ),
+        "invariant_failures": [
+            {
+                "question": row["question"],
+                "failed_invariants": list(row.get("failed_invariants") or ()),
+            }
+            for row in rows
+            if row.get("failed_invariants")
+        ],
         "queries": rows,
     }
     if output_path is not None:
@@ -402,6 +416,16 @@ def _citations_have_provenance(draft: Any, generated: Any) -> bool:
     )
 
 
+def _no_evidence_state_consistent(draft: Any, generated: Any) -> bool:
+    if generated.answerable or generated.citations:
+        return True
+    return bool(
+        not draft.evidence_references
+        and not draft.citations
+        and "answer_not_supported" in generated.warnings
+    )
+
+
 def _unsupported_facts_absent(draft: Any, generated: Any) -> bool:
     draft_text = json.dumps(draft.to_dict(), ensure_ascii=False, default=str)
     generated_sections = "\n".join(section.content for section in generated.sections)
@@ -443,12 +467,21 @@ def _mapping_sequence(value: Any) -> tuple[Mapping[str, Any], ...]:
     return ()
 
 
+def _failed_invariants(validations: Mapping[str, Any]) -> list[str]:
+    return sorted(
+        name
+        for name, passed in validations.items()
+        if name != "all_invariants_preserved" and passed is not True
+    )
+
+
 def _concise_report(report: Mapping[str, Any], output_path: Path) -> dict[str, Any]:
     return {
         "query_count": report["query_count"],
         "successful_query_count": report["successful_query_count"],
         "failed_query_count": report["failed_query_count"],
         "all_invariants_preserved": report["all_invariants_preserved"],
+        "invariant_failures": report.get("invariant_failures", []),
         "queries": [
             {
                 "question": row["question"],
@@ -457,6 +490,7 @@ def _concise_report(report: Mapping[str, Any], output_path: Path) -> dict[str, A
                 "answerable": row.get("answerable"),
                 "citation_count": row.get("citation_count"),
                 "warnings": row.get("warnings", []),
+                "failed_invariants": row.get("failed_invariants", []),
             }
             for row in report["queries"]
         ],
