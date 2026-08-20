@@ -400,6 +400,53 @@ class QueryUnderstandingTests(unittest.TestCase):
 
 
 class QueryRouterTests(unittest.TestCase):
+    def test_explicit_corporate_event_filters_other_major_event_documents(self) -> None:
+        plan = QueryUnderstanding({"삼성전자": {"삼성전자"}}).understand(
+            "삼성전자 유상증자 공시 내용"
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        documents = [
+            CandidateDocument(
+                "rights-offering",
+                {
+                    "doc_group": "major",
+                    "report_nm": "주요사항보고서(유상증자결정)",
+                },
+                MetadataMatch(),
+            ),
+            CandidateDocument(
+                "treasury-stock",
+                {
+                    "doc_group": "major",
+                    "report_nm": "주요사항보고서(자기주식취득결정)",
+                },
+                MetadataMatch(),
+            ),
+        ]
+
+        selected = router.filter_documents(documents, route)
+
+        self.assertEqual(route.hard_routes["event_type"], "capital_increase")
+        self.assertEqual([document.doc_id for document in selected], ["rights-offering"])
+
+    def test_explicit_corporate_event_returns_no_unrelated_fallback(self) -> None:
+        plan = QueryUnderstanding({"삼성전자": {"삼성전자"}}).understand(
+            "삼성전자 유상증자 공시 내용"
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        unrelated = CandidateDocument(
+            "treasury-stock",
+            {
+                "doc_group": "major",
+                "report_nm": "주요사항보고서(자기주식취득결정)",
+            },
+            MetadataMatch(),
+        )
+
+        self.assertEqual(router.filter_documents([unrelated], route), [])
+
     def test_hard_basis_filters_chunks(self) -> None:
         plan = QueryUnderstanding({"삼성전자": {"삼성전자"}}).understand(
             "삼성전자 연결 기준 매출액"
