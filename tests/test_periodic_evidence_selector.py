@@ -114,6 +114,65 @@ def test_selector_returns_unanswerable_view_when_explicit_period_has_no_match() 
     assert "explicit_period_evidence_unmatched" in selected.warnings
 
 
+def test_p07_product_phrase_outranks_generic_sales_metric_chunks() -> None:
+    generic_sales = [
+        _item(
+            f"periodic_20230512001368:ch_generic_{index}",
+            "periodic_20230512001368",
+            rank=index,
+            text=text,
+            year=2023,
+            quarter=1,
+            section="매출 및 수주상황",
+            temporal_match=True,
+        )
+        for index, text in enumerate(
+            (
+                "연료전지 서비스 매출액 12,000",
+                "기타 주기기 매출액 18,000",
+                "연료전지 부품 매출액 9,000",
+            ),
+            start=1,
+        )
+    ]
+    gold = _item(
+        "periodic_20230512001368:ch_55913a2857ccdcfb104f",
+        "periodic_20230512001368",
+        rank=8,
+        text="구분 | 연료전지 주기기 | 매출액 | 23,848",
+        year=2023,
+        quarter=1,
+        section="매출 및 수주상황",
+        temporal_match=True,
+    )
+    evidence = _evidence(
+        [
+            *(
+                _group(f"generic-{index}", item)
+                for index, item in enumerate(generic_sales, start=1)
+            ),
+            _group("gold", gold),
+        ],
+        question="두산퓨얼셀 2023년 1분기 연료전지 주기기 매출액",
+        year=2023,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update({"metric": "매출액", "lexical_query": "연료전지 주기기 매출액"})
+    plan["period"]["quarter"] = 1
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids[0] == gold.chunk_id
+    selected_sources = [
+        source
+        for fact in selected.resolution.facts
+        for source in fact.sources
+    ]
+    assert selected_sources[0].source_refs
+
+
 def test_p02_fiscal_year_prefers_annual_report_over_half_year_source() -> None:
     half_year = replace(
         _item(
@@ -190,8 +249,39 @@ def test_p08_explicit_quarter_keeps_matching_production_evidence() -> None:
         ),
         report_nm="반기보고서 (2023.06)",
     )
+    same_period_competitors = [
+        replace(
+            _item(
+                f"periodic_20230512001368:ch_competing_{index}",
+                "periodic_20230512001368",
+                rank=index,
+                text=text,
+                year=2023,
+                quarter=1,
+                section="생산 및 설비",
+                temporal_match=True,
+            ),
+            report_nm="분기보고서 (2023.03)",
+        )
+        for index, text in enumerate(
+            (
+                "창원공장 생산능력 생산실적 평균가동률 71%",
+                "익산공장 생산설비 현황",
+                "익산공장 생산능력 58.0",
+            ),
+            start=1,
+        )
+    ]
+    gold = replace(gold, retrieval_rank=8, retrieval_score=0.92)
     evidence = _evidence(
-        [_group("q1", gold), _group("q2", other)],
+        [
+            *(
+                _group(f"competing-{index}", item)
+                for index, item in enumerate(same_period_competitors, start=1)
+            ),
+            _group("q1", gold),
+            _group("q2", other),
+        ],
         question="두산퓨얼셀 익산공장 1분기 생산능력 생산실적 평균가동률",
         year=2023,
         task_type="periodic_fact",
@@ -203,8 +293,14 @@ def test_p08_explicit_quarter_keeps_matching_production_evidence() -> None:
 
     selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
 
-    assert selected.selected_chunk_ids == (
-        "periodic_20230512001368:ch_production",
+    assert selected.selected_chunk_ids[0] == (
+        "periodic_20230512001368:ch_production"
+    )
+    assert all(
+        source.source_refs
+        for fact in selected.resolution.facts
+        for source in fact.sources
+        if source.chunk_id == "periodic_20230512001368:ch_production"
     )
 
 

@@ -38,6 +38,34 @@ _QUERY_STOPWORDS = {
     "반기보고서",
     "사업보고서",
 }
+_TABLE_METRIC_TERMS = {
+    "가동률",
+    "금액",
+    "당기순이익",
+    "매출",
+    "매출액",
+    "생산능력",
+    "생산량",
+    "생산실적",
+    "수량",
+    "수주액",
+    "수주잔고",
+    "순이익",
+    "영업이익",
+    "주식수",
+    "판매량",
+    "평균가동률",
+    "비율",
+}
+
+# A product/facility phrase identifies which row the question is asking for,
+# while table metrics identify the requested columns.  Both should outweigh a
+# small retrieval-rank difference at answer-selection time.
+_FOCUS_TERM_BOOST = 10.0
+_FOCUS_PHRASE_BOOST = 24.0
+_FOCUS_COMPLETE_BOOST = 12.0
+_TABLE_METRIC_BOOST = 8.0
+_TABLE_METRIC_COMPLETE_BOOST = 16.0
 
 
 @dataclass(frozen=True)
@@ -204,9 +232,34 @@ def _source_relevance(
     distinct_subject_match = bool(
         subject_match and (not metric or _normalize(subject) != _normalize(metric))
     )
+    focus_terms = tuple(signals["focus_terms"])
+    matched_focus_terms = tuple(
+        term for term in focus_terms if _normalize(term) in normalized
+    )
+    focus_phrase = str(signals["focus_phrase"] or "")
+    focus_phrase_match = bool(
+        focus_phrase and _normalize(focus_phrase) in normalized
+    )
+    table_metrics = tuple(signals["table_metrics"])
+    matched_table_metrics = tuple(
+        term for term in table_metrics if _normalize(term) in normalized
+    )
+    focus_complete = bool(
+        focus_terms and len(matched_focus_terms) == len(focus_terms)
+    )
+    table_metrics_complete = bool(
+        table_metrics and len(matched_table_metrics) == len(table_metrics)
+    )
 
     if len(core_terms) <= 1:
-        eligible = bool(matched or phrase_matches or metric_match or subject_match)
+        eligible = bool(
+            matched
+            or phrase_matches
+            or metric_match
+            or subject_match
+            or matched_focus_terms
+            or matched_table_metrics
+        )
     else:
         non_metric_matches = [
             term for term in matched if not metric or _normalize(term) != _normalize(metric)
@@ -216,12 +269,27 @@ def _source_relevance(
             or len(matched) >= 2
             or (metric_match and non_metric_matches)
             or (distinct_subject_match and matched)
+            or focus_phrase_match
+            or focus_complete
+            or (
+                table_metrics_complete
+                and (not focus_terms or bool(matched_focus_terms))
+            )
         )
     score = (
         len(phrase_matches) * 8.0
         + len(matched) * 3.0
         + (5.0 if metric_match else 0.0)
         + (3.0 if subject_match else 0.0)
+        + len(matched_focus_terms) * _FOCUS_TERM_BOOST
+        + (_FOCUS_PHRASE_BOOST if focus_phrase_match else 0.0)
+        + (_FOCUS_COMPLETE_BOOST if focus_complete else 0.0)
+        + len(matched_table_metrics) * _TABLE_METRIC_BOOST
+        + (
+            _TABLE_METRIC_COMPLETE_BOOST
+            if table_metrics_complete
+            else 0.0
+        )
         + (4.0 if source.temporal_match is True else 0.0)
         + min(float(source.retrieval_score), 1.0)
         + (1.0 / max(source.retrieval_rank, 1))
@@ -254,6 +322,29 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
         )
     )
     term_source = " ".join([question, *phrases])
+    metric = str(plan.get("metric") or "").strip()
+    lexical_query = str(plan.get("lexical_query") or question).strip()
+    lexical_tokens = _tokens(lexical_query)
+    table_metrics = tuple(
+        dict.fromkeys(
+            token
+            for token in lexical_tokens
+            if _normalize(token) in _TABLE_METRIC_TERMS
+            or (metric and _normalize(token) == _normalize(metric))
+        )
+    )
+    metric_norms = {_normalize(value) for value in table_metrics}
+    focus_terms = tuple(
+        dict.fromkeys(
+            token
+            for token in lexical_tokens
+            if len(_normalize(token)) >= 2
+            and _normalize(token) not in companies
+            and _normalize(token) not in metric_norms
+            and token not in _QUERY_STOPWORDS
+            and not _PERIOD_TOKEN.fullmatch(token)
+        )
+    )
     core_terms = []
     for token in _tokens(term_source):
         normalized = _normalize(token)
@@ -268,6 +359,9 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "phrases": phrases,
         "core_terms": tuple(dict.fromkeys(core_terms)),
+        "focus_terms": focus_terms,
+        "focus_phrase": " ".join(focus_terms),
+        "table_metrics": table_metrics,
     }
 
 
