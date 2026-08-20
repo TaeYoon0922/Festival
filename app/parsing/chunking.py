@@ -1283,6 +1283,11 @@ def _table_chunks_for_section(
                 logical.header_row_count - 1, 0
             )
             quality_flags = ["header_only"] if header_only else []
+            source_ref = {
+                "table_id": table.table_id,
+                "row_start": row_start,
+                "row_end": row_end,
+            }
             chunk = _base_chunk(
                 document,
                 source_file,
@@ -1293,6 +1298,9 @@ def _table_chunks_for_section(
                     f"{_retrieval_prefix(document, section, context)}\n\n{content}"
                 ),
                 table_id=table.table_id,
+                source_table_id=table.table_id,
+                source_table_ids=[table.table_id],
+                source_refs=[source_ref],
                 table_title=context["table_title"],
                 row_start=row_start,
                 row_end=row_end,
