@@ -243,8 +243,9 @@ class QueryPlanHybridEvaluator:
                 "candidate_relevant_chunk_ids": relevant_candidates,
                 "relevant_chunks": [
                     _gold_chunk_summary(
-                        candidate.chunk_id,
-                        candidate.chunk,
+                        chunk_id=candidate.chunk_id,
+                        doc_id=candidate.doc_id,
+                        chunk=candidate.chunk,
                         evidence_profile=evidence_profile,
                         task_type=plan.task_type,
                     )
@@ -272,6 +273,14 @@ class QueryPlanHybridEvaluator:
                 "vector": len(execution.diagnostic_vector_results),
             },
             "gold_fusion_diagnostic": gold_fusion_diagnostic,
+            "lexical_gold_matches": {
+                "production": _lexical_gold_matches(
+                    execution.lexical_results, chunks_by_id, question
+                ),
+                "diagnostic": _lexical_gold_matches(
+                    execution.diagnostic_lexical_results, chunks_by_id, question
+                ),
+            },
             "query_evidence_diagnostic": evidence_profile,
             "score_component_comparison": _score_component_comparison(
                 gold_fusion_diagnostic, hybrid_top10
@@ -464,8 +473,31 @@ def _retrieval_summaries(
     for result in results[:10]:
         chunk = chunks_by_id.get(result.chunk_id, {})
         relevant = _candidate_is_relevant(chunk, result.doc_id, question)
-        output.append(_result_summary(result, chunk, relevant))
+        summary = _result_summary(result, chunk, relevant)
+        summary.update(_diagnostic_identity(result.chunk_id, result.doc_id))
+        output.append(summary)
     return output
+
+
+def _lexical_gold_matches(
+    results: Sequence[Any],
+    chunks_by_id: Mapping[str, Mapping[str, Any]],
+    question: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for result in results:
+        chunk = chunks_by_id.get(result.chunk_id, {})
+        if not _candidate_is_relevant(chunk, result.doc_id, question):
+            continue
+        matches.append(
+            {
+                **_diagnostic_identity(result.chunk_id, result.doc_id),
+                "rank": int(result.rank),
+                "bm25_score": float(result.bm25_score),
+                "section_path": _section_path_values(chunk),
+            }
+        )
+    return matches
 
 
 def _vector_summaries(
@@ -484,9 +516,8 @@ def _vector_summaries(
             section_path = [section_path]
         output.append(
             {
+                **_diagnostic_identity(result.chunk_id, result.doc_id),
                 "rank": result.rank,
-                "chunk_id": result.chunk_id,
-                "doc_id": result.doc_id,
                 "vector_score": float(result.vector_score),
                 "section_path": list(section_path),
                 "chunk_type": chunk.get("chunk_type"),
@@ -513,9 +544,8 @@ def _vector_gold_matches(
             section_path = [section_path]
         matches.append(
             {
+                **_diagnostic_identity(result.chunk_id, result.doc_id),
                 "rank": int(result.rank),
-                "chunk_id": result.chunk_id,
-                "doc_id": result.doc_id,
                 "vector_score": float(result.vector_score),
                 "section_path": list(section_path),
             }
@@ -712,9 +742,10 @@ def _alignment_normalize(value: Any) -> str:
 
 
 def _gold_chunk_summary(
-    chunk_id: str,
-    chunk: Mapping[str, Any],
     *,
+    chunk_id: str,
+    doc_id: str,
+    chunk: Mapping[str, Any],
     evidence_profile: Mapping[str, Any] | None = None,
     task_type: str | None = None,
 ) -> dict[str, Any]:
@@ -723,8 +754,7 @@ def _gold_chunk_summary(
         section_path = [section_path]
     preview = " ".join(str(chunk.get("retrieval_text") or "").split())[:500]
     summary = {
-        "chunk_id": chunk_id,
-        "doc_id": chunk.get("doc_id"),
+        **_diagnostic_identity(chunk_id, doc_id),
         "chunk_type": chunk.get("chunk_type"),
         "section_path": list(section_path),
         "retrieval_text_preview": preview,
@@ -839,6 +869,10 @@ def _enrich_fusion_diagnostic(
         section_path = [section_path]
     enriched.update(
         {
+            **_diagnostic_identity(
+                str(diagnostic.get("chunk_id") or ""),
+                str(diagnostic.get("doc_id") or ""),
+            ),
             "chunk_type": chunk.get("chunk_type"),
             "section_path": list(section_path),
             "retrieval_text_preview": " ".join(
@@ -852,6 +886,19 @@ def _enrich_fusion_diagnostic(
             chunk, evidence_profile
         )
     return enriched
+
+
+def _diagnostic_identity(chunk_id: Any, doc_id: Any) -> dict[str, str]:
+    """Serialize identity from typed retrieval objects, never chunk payload aliases."""
+
+    return {"chunk_id": str(chunk_id), "doc_id": str(doc_id)}
+
+
+def _section_path_values(chunk: Mapping[str, Any]) -> list[str]:
+    section_path = chunk.get("section_path") or []
+    if isinstance(section_path, str):
+        return [section_path]
+    return [str(value) for value in section_path]
 
 
 def _score_diagnostic(
@@ -1168,6 +1215,7 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "vector_diagnostic_gold_rank",
         "diagnostic_source_top_n",
         "gold_fusion_diagnostic",
+        "lexical_gold_matches",
         "query_evidence_diagnostic",
         "score_component_comparison",
         "vector_status",
@@ -1199,6 +1247,7 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "diagnostic_source_top_n",
         "section_path_diagnostic",
         "gold_fusion_diagnostic",
+        "lexical_gold_matches",
         "query_evidence_diagnostic",
         "score_component_comparison",
     }
