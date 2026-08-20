@@ -1,6 +1,7 @@
 import unittest
 
 from app.reasoning.query_plan import QueryPlan
+from app.reasoning.router import QueryRouter
 from app.retrieval.embeddings import DeterministicHashEmbedder, EmbeddingConfig
 from app.retrieval.hybrid import (
     HybridQueryExecutor,
@@ -121,6 +122,72 @@ class FakeHybridBackend:
         return {"vec"}.intersection(chunk_ids)
 
 
+class ControlledDeterministicRouter(QueryRouter):
+    def deterministic_components(
+        self,
+        _route,
+        *,
+        chunk,
+        metadata_match,
+        document_metadata=None,
+    ):
+        score = float(chunk.get("fixture_deterministic_score", 0.0))
+        return {
+            "exact_term": score,
+            "section": score,
+            "period_relevance": score,
+            "basis_relevance": score,
+            "metadata": score,
+            "retrieval_priority": score,
+            "date_relevance": score,
+        }
+
+
+class SingleSourcePreservationBackend:
+    def __init__(self, lexical_ids, vector_ids, gold_id):
+        all_ids = tuple(dict.fromkeys((*lexical_ids, *vector_ids)))
+        self.documents = [CandidateDocument("d1", {}, MetadataMatch())]
+        self.chunks = [
+            CandidateChunk(
+                chunk_id,
+                "d1",
+                {
+                    "chunk_id": chunk_id,
+                    "content": chunk_id,
+                    "retrieval_text": chunk_id,
+                    "fixture_deterministic_score": (
+                        0.0 if chunk_id == gold_id else 1.0
+                    ),
+                },
+                MetadataMatch(),
+            )
+            for chunk_id in all_ids
+        ]
+        self.lexical_ids = lexical_ids
+        self.vector_ids = vector_ids
+
+    def get_candidate_documents(self, **_filters):
+        return self.documents
+
+    def get_candidate_chunks(self, _documents):
+        return self.chunks
+
+    def retrieve(self, _query, _candidates, *, top_k=None):
+        return [
+            RetrievalResult(chunk_id, "d1", 1.0 / rank, rank, {})
+            for rank, chunk_id in enumerate(self.lexical_ids, start=1)
+        ]
+
+    def vector_search(self, _embedding, _candidates, **_kwargs):
+        return [
+            VectorRetrievalResult(chunk_id, "d1", 1.0 / rank, rank)
+            for rank, chunk_id in enumerate(self.vector_ids, start=1)
+        ]
+
+    def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
+        return set(chunk_ids)
+
+
 class HybridExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.embedding_config = EmbeddingConfig(
@@ -209,6 +276,67 @@ class HybridExecutorTests(unittest.TestCase):
                 DeterministicHashEmbedder(self.embedding_config),
                 EmbeddingConfig(model="other", version="v1", dimensions=8),
             )
+
+    def test_vector_rank_nine_survives_bounded_deterministic_rerank(self) -> None:
+        common = [f"common-{rank:02d}" for rank in range(1, 9)]
+        lexical_ids = [*common, *[f"lex-{rank:02d}" for rank in range(10, 22)]]
+        vector_ids = [
+            *common,
+            "gold-vector",
+            *[f"vec-{rank:02d}" for rank in range(10, 22)],
+        ]
+        backend = SingleSourcePreservationBackend(
+            lexical_ids, vector_ids, "gold-vector"
+        )
+        execution = HybridQueryExecutor(
+            backend,
+            DeterministicHashEmbedder(self.embedding_config),
+            self.embedding_config,
+            router=ControlledDeterministicRouter(),
+        ).execute(QueryPlan(query="listing date", top_k=10))
+
+        diagnostic = next(
+            item
+            for item in execution.rerank_diagnostics
+            if item["chunk_id"] == "gold-vector"
+        )
+        self.assertEqual(diagnostic["vector_rank"], 9)
+        self.assertIsNone(diagnostic["lexical_rank"])
+        self.assertGreater(diagnostic["legacy_final_rank"], 10)
+        self.assertEqual(diagnostic["preservation_rank"], 9)
+        self.assertLessEqual(diagnostic["final_rank"], 10)
+        self.assertEqual(len(diagnostic["weight_grid"]), 4)
+        self.assertIn("gold-vector", [result.chunk_id for result in execution.results])
+
+    def test_lexical_rank_six_survives_bounded_deterministic_rerank(self) -> None:
+        common = [f"common-{rank:02d}" for rank in range(1, 6)]
+        lexical_ids = [
+            *common,
+            "gold-lexical",
+            *[f"lex-{rank:02d}" for rank in range(7, 20)],
+        ]
+        vector_ids = [*common, *[f"vec-{rank:02d}" for rank in range(7, 20)]]
+        backend = SingleSourcePreservationBackend(
+            lexical_ids, vector_ids, "gold-lexical"
+        )
+        execution = HybridQueryExecutor(
+            backend,
+            DeterministicHashEmbedder(self.embedding_config),
+            self.embedding_config,
+            router=ControlledDeterministicRouter(),
+        ).execute(QueryPlan(query="merger effective date", top_k=10))
+
+        diagnostic = next(
+            item
+            for item in execution.rerank_diagnostics
+            if item["chunk_id"] == "gold-lexical"
+        )
+        self.assertEqual(diagnostic["lexical_rank"], 6)
+        self.assertIsNone(diagnostic["vector_rank"])
+        self.assertGreater(diagnostic["legacy_final_rank"], 10)
+        self.assertEqual(diagnostic["preservation_rank"], 6)
+        self.assertLessEqual(diagnostic["final_rank"], 10)
+        self.assertIn("gold-lexical", [result.chunk_id for result in execution.results])
 
 
 if __name__ == "__main__":

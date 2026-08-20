@@ -18,6 +18,14 @@ from app.retrieval.interfaces import (
 from app.retrieval.vector import VectorRetrievalResult, VectorRetriever
 
 
+DIAGNOSTIC_WEIGHT_GRID: tuple[tuple[float, float], ...] = (
+    (0.60, 0.40),
+    (0.70, 0.30),
+    (0.75, 0.25),
+    (0.80, 0.20),
+)
+
+
 @dataclass(frozen=True)
 class RRFConfig:
     k: int = 60
@@ -40,12 +48,15 @@ class HybridRetrievalConfig:
     final_top_k: int = 10
     fusion_weight: float = 0.60
     deterministic_weight: float = 0.40
+    rerank_window_size: int = 2
     fallback_on_vector_error: bool = True
     rrf: RRFConfig = field(default_factory=RRFConfig)
 
     def __post_init__(self) -> None:
         if min(self.lexical_top_n, self.vector_top_n, self.final_top_k) <= 0:
             raise ValueError("hybrid retrieval limits must be positive")
+        if self.rerank_window_size <= 0:
+            raise ValueError("hybrid rerank window size must be positive")
         if self.fusion_weight < 0.0 or self.deterministic_weight < 0.0:
             raise ValueError("hybrid final weights must be non-negative")
         total = self.fusion_weight + self.deterministic_weight
@@ -61,7 +72,9 @@ class HybridRetrievalConfig:
             "final_top_k": self.final_top_k,
             "fusion_weight": self.fusion_weight,
             "deterministic_weight": self.deterministic_weight,
+            "rerank_window_size": self.rerank_window_size,
             "fallback_on_vector_error": self.fallback_on_vector_error,
+            "diagnostic_weight_grid": [list(pair) for pair in DIAGNOSTIC_WEIGHT_GRID],
             "rrf": {
                 "k": self.rrf.k,
                 "lexical_weight": self.rrf.lexical_weight,
@@ -109,6 +122,7 @@ class HybridQueryExecution:
     vector_error: str | None = None
     vector_coverage: Mapping[str, Any] = field(default_factory=dict)
     embedded_candidate_ids: Sequence[str] = ()
+    rerank_diagnostics: Sequence[Mapping[str, Any]] = ()
 
 
 def reciprocal_rank_fusion(
@@ -239,10 +253,11 @@ class HybridQueryExecutor:
                 vector_error = f"{type(error).__name__}: {error}"
 
         fused = reciprocal_rank_fusion(lexical_results, vector_results, self.config.rrf)
+        rerank_diagnostics: Sequence[Mapping[str, Any]] = ()
         if not vector_results:
             final_results = _annotate_lexical_fallback(lexical_final, fused, vector_status)
         else:
-            final_results = self._hybrid_rerank(
+            final_results, rerank_diagnostics = self._hybrid_rerank(
                 fused,
                 route,
                 chunks,
@@ -278,6 +293,7 @@ class HybridQueryExecutor:
             vector_error=vector_error,
             vector_coverage=vector_coverage,
             embedded_candidate_ids=embedded_candidate_ids,
+            rerank_diagnostics=rerank_diagnostics,
         )
 
     def _vector_coverage(
@@ -329,10 +345,10 @@ class HybridQueryExecutor:
         document_metadata: Mapping[str, Mapping[str, Any]],
         *,
         top_k: int,
-    ) -> list[RetrievalResult]:
+    ) -> tuple[list[RetrievalResult], list[dict[str, Any]]]:
         chunks_by_id = {candidate.chunk_id: candidate for candidate in chunks}
         max_rrf = max((candidate.rrf_score for candidate in fused), default=0.0)
-        scored: list[tuple[float, int, str, FusedCandidate, float, dict[str, float]]] = []
+        scored: list[dict[str, Any]] = []
         for candidate in fused:
             source = chunks_by_id.get(candidate.chunk_id)
             if source is None:
@@ -345,39 +361,95 @@ class HybridQueryExecutor:
             )
             deterministic_score = self.router.deterministic_score(components)
             normalized_rrf = candidate.rrf_score / max_rrf if max_rrf > 0.0 else 0.0
+            source_rank_score = _best_source_rank_score(candidate, self.config.rrf.k)
+            retrieval_score = max(normalized_rrf, source_rank_score)
             final_score = (
+                self.config.fusion_weight * retrieval_score
+                + self.config.deterministic_weight * deterministic_score
+            )
+            legacy_final_score = (
                 self.config.fusion_weight * normalized_rrf
                 + self.config.deterministic_weight * deterministic_score
             )
             scored.append(
-                (
-                    final_score,
-                    candidate.fusion_rank,
-                    candidate.chunk_id,
-                    candidate,
-                    deterministic_score,
-                    components,
-                )
+                {
+                    "candidate": candidate,
+                    "normalized_rrf_score": normalized_rrf,
+                    "source_rank_score": source_rank_score,
+                    "retrieval_score": retrieval_score,
+                    "deterministic_score": deterministic_score,
+                    "final_score": final_score,
+                    "legacy_final_score": legacy_final_score,
+                    "components": components,
+                }
             )
-        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+        retrieval_order = sorted(
+            scored,
+            key=lambda row: (
+                -float(row["retrieval_score"]),
+                -float(row["normalized_rrf_score"]),
+                row["candidate"].fusion_rank,
+                row["candidate"].chunk_id,
+            ),
+        )
+        for rank, row in enumerate(retrieval_order, start=1):
+            row["preservation_rank"] = rank
+
+        legacy_order = sorted(
+            scored,
+            key=lambda row: (
+                -float(row["legacy_final_score"]),
+                row["candidate"].fusion_rank,
+                row["candidate"].chunk_id,
+            ),
+        )
+        for rank, row in enumerate(legacy_order, start=1):
+            row["legacy_final_rank"] = rank
+
+        unbounded_order = sorted(
+            scored,
+            key=lambda row: (
+                -float(row["final_score"]),
+                int(row["preservation_rank"]),
+                row["candidate"].chunk_id,
+            ),
+        )
+        for rank, row in enumerate(unbounded_order, start=1):
+            row["unbounded_final_rank"] = rank
+
+        final_order = _windowed_order(
+            retrieval_order,
+            score_key="final_score",
+            window_size=self.config.rerank_window_size,
+        )
+        for rank, row in enumerate(final_order, start=1):
+            row["final_rank"] = rank
+        _attach_weight_grid(scored, retrieval_order, self.config.rerank_window_size)
 
         output: list[RetrievalResult] = []
-        for final_rank, row in enumerate(scored[:top_k], start=1):
-            final_score, _, _, fused_candidate, deterministic_score, components = row
+        for row in final_order[:top_k]:
+            fused_candidate = row["candidate"]
+            final_rank = int(row["final_rank"])
             source = chunks_by_id[fused_candidate.chunk_id]
             match = source.metadata_match.to_dict()
             match["hybrid"] = {
                 **fused_candidate.to_dict(),
-                "normalized_rrf_score": (
-                    fused_candidate.rrf_score / max_rrf if max_rrf > 0.0 else 0.0
-                ),
-                "deterministic_rerank_score": deterministic_score,
-                "final_score": final_score,
+                "normalized_rrf_score": row["normalized_rrf_score"],
+                "source_rank_score": row["source_rank_score"],
+                "retrieval_score": row["retrieval_score"],
+                "preservation_rank": row["preservation_rank"],
+                "deterministic_rerank_score": row["deterministic_score"],
+                "legacy_final_score": row["legacy_final_score"],
+                "legacy_final_rank": row["legacy_final_rank"],
+                "unbounded_final_rank": row["unbounded_final_rank"],
+                "final_score": row["final_score"],
                 "final_rank": final_rank,
                 "fusion_weight": self.config.fusion_weight,
                 "deterministic_weight": self.config.deterministic_weight,
+                "rerank_window_size": self.config.rerank_window_size,
             }
-            match["score_components"] = components
+            match["score_components"] = row["components"]
             output.append(
                 RetrievalResult(
                     chunk_id=fused_candidate.chunk_id,
@@ -387,7 +459,109 @@ class HybridQueryExecutor:
                     metadata_match=match,
                 )
             )
-        return output
+        diagnostics = [_rerank_diagnostic(row) for row in final_order]
+        return output, diagnostics
+
+
+def _best_source_rank_score(candidate: FusedCandidate, rrf_k: int) -> float:
+    ranks = [
+        rank
+        for rank in (candidate.lexical_rank, candidate.vector_rank)
+        if rank is not None
+    ]
+    if not ranks:
+        return 0.0
+    return (rrf_k + 1.0) / (rrf_k + min(ranks))
+
+
+def _windowed_order(
+    retrieval_order: Sequence[dict[str, Any]],
+    *,
+    score_key: str,
+    window_size: int,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for start in range(0, len(retrieval_order), window_size):
+        window = retrieval_order[start : start + window_size]
+        output.extend(
+            sorted(
+                window,
+                key=lambda row: (
+                    -float(row[score_key]),
+                    int(row["preservation_rank"]),
+                    row["candidate"].chunk_id,
+                ),
+            )
+        )
+    return output
+
+
+def _attach_weight_grid(
+    rows: Sequence[dict[str, Any]],
+    retrieval_order: Sequence[dict[str, Any]],
+    window_size: int,
+) -> None:
+    for row in rows:
+        row["weight_grid"] = []
+    for fusion_weight, deterministic_weight in DIAGNOSTIC_WEIGHT_GRID:
+        for row in rows:
+            row["_grid_score"] = (
+                fusion_weight * float(row["retrieval_score"])
+                + deterministic_weight * float(row["deterministic_score"])
+            )
+        unbounded = sorted(
+            rows,
+            key=lambda row: (
+                -float(row["_grid_score"]),
+                int(row["preservation_rank"]),
+                row["candidate"].chunk_id,
+            ),
+        )
+        unbounded_ranks = {
+            row["candidate"].chunk_id: rank
+            for rank, row in enumerate(unbounded, start=1)
+        }
+        bounded = _windowed_order(
+            retrieval_order,
+            score_key="_grid_score",
+            window_size=window_size,
+        )
+        bounded_ranks = {
+            row["candidate"].chunk_id: rank
+            for rank, row in enumerate(bounded, start=1)
+        }
+        for row in rows:
+            chunk_id = row["candidate"].chunk_id
+            row["weight_grid"].append(
+                {
+                    "fusion_weight": fusion_weight,
+                    "deterministic_weight": deterministic_weight,
+                    "final_score": row["_grid_score"],
+                    "unbounded_rank": unbounded_ranks[chunk_id],
+                    "bounded_rank": bounded_ranks[chunk_id],
+                }
+            )
+    for row in rows:
+        row.pop("_grid_score", None)
+
+
+def _rerank_diagnostic(row: Mapping[str, Any]) -> dict[str, Any]:
+    candidate = row["candidate"]
+    return {
+        **candidate.to_dict(),
+        "normalized_rrf_score": row["normalized_rrf_score"],
+        "source_rank_score": row["source_rank_score"],
+        "retrieval_score": row["retrieval_score"],
+        "preservation_rank": row["preservation_rank"],
+        "deterministic_rerank_score": row["deterministic_score"],
+        "legacy_final_score": row["legacy_final_score"],
+        "legacy_final_rank": row["legacy_final_rank"],
+        "unbounded_final_rank": row["unbounded_final_rank"],
+        "final_score": row["final_score"],
+        "final_rank": row["final_rank"],
+        "score_components": dict(row["components"]),
+        "weight_grid": list(row["weight_grid"]),
+    }
 
 
 def _annotate_lexical_fallback(
