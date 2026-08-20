@@ -16,6 +16,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
+CLOVA_CONTEXT_LENGTH_ERROR_CODE = "40003"
+CLOVA_DEFAULT_SEGMENT_MAX_CHARS = 1800
+
+
 @dataclass(frozen=True)
 class EmbeddingConfig:
     provider: str = "hash"
@@ -84,11 +88,15 @@ class EmbeddingHttpError(RuntimeError):
         status_code: int | None,
         transient: bool,
         retry_after_seconds: float | None = None,
+        response_error_code: str | None = None,
+        response_error_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.transient = transient
         self.retry_after_seconds = retry_after_seconds
+        self.response_error_code = response_error_code
+        self.response_error_message = response_error_message
 
 
 class JsonHttpTransport(Protocol):
@@ -134,12 +142,20 @@ class UrllibJsonTransport:
             retry_after = _parse_retry_after(
                 error.headers.get("Retry-After") if error.headers else None
             )
+            response_error_code, response_error_message = _http_error_details(error)
             transient = status_code == 429 or 500 <= status_code <= 599
+            code_suffix = (
+                f" (error code {response_error_code})"
+                if response_error_code is not None
+                else ""
+            )
             raise EmbeddingHttpError(
-                f"embedding endpoint returned HTTP {status_code}",
+                f"embedding endpoint returned HTTP {status_code}{code_suffix}",
                 status_code=status_code,
                 transient=transient,
                 retry_after_seconds=retry_after,
+                response_error_code=response_error_code,
+                response_error_message=response_error_message,
             ) from error
         except (URLError, TimeoutError) as error:
             raise EmbeddingHttpError(
@@ -203,19 +219,27 @@ class OpenAIEmbeddingRequestOptions:
     input_mode: str = "batch"
     encoding_format: str | None = None
     include_dimensions: bool = False
+    long_text_fallback: bool = False
+    segment_max_chars: int = CLOVA_DEFAULT_SEGMENT_MAX_CHARS
 
     def __post_init__(self) -> None:
         if self.input_mode not in {"batch", "sequential"}:
             raise ValueError("OpenAI embedding input mode must be batch or sequential")
         if self.encoding_format is not None and not self.encoding_format.strip():
             raise ValueError("embedding encoding format must not be empty")
+        if self.segment_max_chars <= 0:
+            raise ValueError("embedding segment max chars must be positive")
 
     @classmethod
-    def clova_studio(cls) -> "OpenAIEmbeddingRequestOptions":
+    def clova_studio(
+        cls, *, segment_max_chars: int = CLOVA_DEFAULT_SEGMENT_MAX_CHARS
+    ) -> "OpenAIEmbeddingRequestOptions":
         return cls(
             input_mode="sequential",
             encoding_format="float",
             include_dimensions=True,
+            long_text_fallback=True,
+            segment_max_chars=segment_max_chars,
         )
 
 
@@ -234,6 +258,8 @@ class OpenAICompatibleEmbeddingProvider:
         self.settings = settings
         self.transport = transport or UrllibJsonTransport()
         self.request_options = request_options or OpenAIEmbeddingRequestOptions()
+        self._long_text_fallbacks = 0
+        self._long_text_segments = 0
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
@@ -244,9 +270,53 @@ class OpenAICompatibleEmbeddingProvider:
         if self.request_options.input_mode == "sequential":
             vectors: list[list[float]] = []
             for text in texts:
-                vectors.extend(self._embed_input(text, expected_count=1))
+                try:
+                    vectors.extend(self._embed_input(text, expected_count=1))
+                except EmbeddingHttpError as error:
+                    if not self._is_context_length_error(error):
+                        raise
+                    vectors.append(self._embed_long_text(text))
             return vectors
         return self._embed_input(list(texts), expected_count=len(texts))
+
+    def embedding_statistics(self) -> dict[str, int]:
+        """Return counters only; input text and credentials are never retained."""
+
+        return {
+            "long_text_fallbacks": self._long_text_fallbacks,
+            "long_text_segments": self._long_text_segments,
+        }
+
+    def _is_context_length_error(self, error: EmbeddingHttpError) -> bool:
+        return (
+            self.request_options.long_text_fallback
+            and error.status_code == 400
+            and error.response_error_code == CLOVA_CONTEXT_LENGTH_ERROR_CODE
+        )
+
+    def _embed_long_text(self, text: str) -> list[float]:
+        self._long_text_fallbacks += 1
+        vectors = self._embed_safe_segments(text)
+        self._long_text_segments += len(vectors)
+        return _mean_pool_and_normalize(vectors, self.config.dimensions)
+
+    def _embed_safe_segments(self, text: str) -> list[list[float]]:
+        segment_limit = self.request_options.segment_max_chars
+        if len(text) <= segment_limit:
+            segment_limit = max(1, len(text) // 2)
+        segments = _split_embedding_text(text, max_chars=segment_limit)
+        if len(segments) <= 1:
+            raise ValueError("CLOVA long-text fallback could not split the input")
+
+        vectors: list[list[float]] = []
+        for segment in segments:
+            try:
+                vectors.extend(self._embed_input(segment, expected_count=1))
+            except EmbeddingHttpError as error:
+                if not self._is_context_length_error(error) or len(segment) <= 1:
+                    raise
+                vectors.extend(self._embed_safe_segments(segment))
+        return vectors
 
     def _embed_input(
         self, input_value: str | list[str], *, expected_count: int
@@ -353,11 +423,19 @@ def create_embedding_provider(
             transport=transport,
         )
     if provider in {"clova", "clova_studio", "clova_openai_compatible"}:
+        values = os.environ if environment is None else environment
         return OpenAICompatibleEmbeddingProvider(
             config,
             HttpEmbeddingSettings.from_env(environment),
             transport=transport,
-            request_options=OpenAIEmbeddingRequestOptions.clova_studio(),
+            request_options=OpenAIEmbeddingRequestOptions.clova_studio(
+                segment_max_chars=int(
+                    values.get(
+                        "FESTIVAL_EMBEDDING_LONG_TEXT_SEGMENT_CHARS",
+                        str(CLOVA_DEFAULT_SEGMENT_MAX_CHARS),
+                    )
+                )
+            ),
         )
     if provider in {"bge_m3_local", "bgem3_local"}:
         from app.retrieval.bge_m3 import BgeM3LocalEmbeddingProvider
@@ -385,6 +463,55 @@ def _validate_embedding(vector: Sequence[float], dimensions: int) -> None:
         )
     if any(not math.isfinite(float(value)) for value in vector):
         raise EmbeddingDimensionMismatch("embedding values must be finite")
+
+
+def _split_embedding_text(text: str, *, max_chars: int) -> list[str]:
+    """Split without truncation, preferring paragraph, line, sentence, then space."""
+
+    if max_chars <= 0:
+        raise ValueError("embedding segment max chars must be positive")
+    if not text:
+        return []
+    segments: list[str] = []
+    start = 0
+    while len(text) - start > max_chars:
+        hard_end = start + max_chars
+        minimum = start + max(1, max_chars // 2)
+        split_at = _preferred_split_point(text, minimum, hard_end)
+        if split_at <= start:
+            split_at = hard_end
+        segments.append(text[start:split_at])
+        start = split_at
+    if start < len(text):
+        segments.append(text[start:])
+    return segments
+
+
+def _preferred_split_point(text: str, minimum: int, hard_end: int) -> int:
+    for marker in ("\n\n", "\n", ". ", "\u3002", "! ", "? ", " "):
+        position = text.rfind(marker, minimum, hard_end)
+        if position >= minimum:
+            return position + len(marker)
+    return hard_end
+
+
+def _mean_pool_and_normalize(
+    vectors: Sequence[Sequence[float]], dimensions: int
+) -> list[float]:
+    if not vectors:
+        raise EmbeddingDimensionMismatch("cannot pool an empty embedding collection")
+    totals = [0.0] * dimensions
+    for vector in vectors:
+        _validate_embedding(vector, dimensions)
+        for index, value in enumerate(vector):
+            totals[index] += float(value)
+    mean = [value / len(vectors) for value in totals]
+    norm = math.sqrt(sum(value * value for value in mean))
+    if norm <= 0.0:
+        raise EmbeddingDimensionMismatch("mean pooled embedding is a zero vector")
+    normalized = [value / norm for value in mean]
+    _validate_embedding(normalized, dimensions)
+    return normalized
 
 
 def should_retry_embedding_error(error: BaseException) -> bool:
@@ -429,3 +556,36 @@ def _parse_retry_after(value: str | None) -> float | None:
             return max((target - datetime.now(timezone.utc)).total_seconds(), 0.0)
         except (TypeError, ValueError, OverflowError):
             return None
+
+
+def _http_error_details(error: HTTPError) -> tuple[str | None, str | None]:
+    try:
+        raw = error.read(65_536)
+        value = json.loads(raw.decode("utf-8"))
+    except (
+        AttributeError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        OSError,
+    ):
+        return None, None
+    if not isinstance(value, Mapping):
+        return None, None
+    detail = value.get("error", value)
+    if not isinstance(detail, Mapping):
+        return None, None
+    code = _sanitize_error_field(detail.get("code"), max_length=64, code=True)
+    message = _sanitize_error_field(detail.get("message"), max_length=256)
+    return code, message
+
+
+def _sanitize_error_field(
+    value: object, *, max_length: int, code: bool = False
+) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if code:
+        text = re.sub(r"[^0-9A-Za-z_.-]", "", text)
+    return text[:max_length] or None

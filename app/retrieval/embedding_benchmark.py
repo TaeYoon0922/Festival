@@ -170,6 +170,7 @@ class EmbeddingSubsetBenchmark:
                 if device_peak_bytes is not None
                 else None
             ),
+            "provider_statistics": _provider_statistics(self.provider),
             "database_writes": 0,
         }
 
@@ -234,6 +235,16 @@ def _provider_peak_device_memory(provider: EmbeddingProvider) -> int | None:
         return reader()
     except Exception:
         return None
+
+
+def _provider_statistics(provider: EmbeddingProvider) -> dict[str, Any]:
+    reader = getattr(provider, "embedding_statistics", None)
+    if not callable(reader):
+        return {}
+    try:
+        return dict(reader())
+    except Exception:
+        return {}
 
 
 def process_peak_memory_bytes() -> int | None:

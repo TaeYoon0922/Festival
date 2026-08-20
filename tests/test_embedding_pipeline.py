@@ -103,6 +103,24 @@ class EmbeddingPipelineTests(unittest.TestCase):
         self.assertEqual(second["embedded"], 1)
         self.assertEqual(second_provider.calls, [["retrieval-c2"]])
 
+    def test_provider_statistics_do_not_change_resume_or_upsert_contract(self):
+        class StatisticsProvider(FakeProvider):
+            def embedding_statistics(self):
+                return {"long_text_fallbacks": 1, "long_text_segments": 3}
+
+        provider = StatisticsProvider(self.config)
+        store = FakeStore(existing={"c1"})
+        summary = self.pipeline(provider, store).run(candidates("c1", "c2"))
+
+        self.assertEqual(summary["already_embedded"], 1)
+        self.assertEqual(summary["embedded"], 1)
+        self.assertEqual(provider.calls, [["retrieval-c2"]])
+        self.assertEqual(len(store.upserts), 1)
+        self.assertEqual(
+            summary["provider_statistics"],
+            {"long_text_fallbacks": 1, "long_text_segments": 3},
+        )
+
     def test_force_overwrites_existing_embedding(self):
         provider = FakeProvider(self.config)
         store = FakeStore(existing={"c1"})
