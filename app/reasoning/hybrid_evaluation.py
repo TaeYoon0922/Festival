@@ -115,10 +115,13 @@ class QueryPlanHybridEvaluator:
         chunks_by_id = {candidate.chunk_id: candidate.chunk for candidate in execution.chunks}
         candidate_doc_ids = {document.doc_id for document in execution.documents}
         gold_doc_id = str(question["doc_id"])
-        relevant_candidates = [
-            candidate.chunk_id
+        relevant_candidate_chunks = [
+            candidate
             for candidate in execution.chunks
             if _candidate_is_relevant(candidate.chunk, candidate.doc_id, question)
+        ]
+        relevant_candidates = [
+            candidate.chunk_id for candidate in relevant_candidate_chunks
         ]
 
         lexical_raw_rank = _gold_rank(
@@ -129,6 +132,18 @@ class QueryPlanHybridEvaluator:
         )
         vector_rank = _gold_rank(execution.vector_results, chunks_by_id, question)
         hybrid_rank = _gold_rank(execution.results, chunks_by_id, question)
+        lexical_diagnostic_rank = _gold_rank(
+            execution.diagnostic_lexical_results,
+            chunks_by_id,
+            question,
+            limit=None,
+        )
+        vector_diagnostic_rank = _gold_rank(
+            execution.diagnostic_vector_results,
+            chunks_by_id,
+            question,
+            limit=None,
+        )
         gold_fusion_diagnostic = _gold_fusion_diagnostic(
             execution.rerank_diagnostics,
             chunks_by_id,
@@ -167,6 +182,10 @@ class QueryPlanHybridEvaluator:
                 "target_id": question["target_id"],
                 "evidence_terms": list(question.get("evidence_terms") or []),
                 "candidate_relevant_chunk_ids": relevant_candidates,
+                "relevant_chunks": [
+                    _gold_chunk_summary(candidate.chunk_id, candidate.chunk)
+                    for candidate in relevant_candidate_chunks
+                ],
             },
             "candidate_document_count": len(execution.documents),
             "candidate_chunk_count": len(execution.chunks),
@@ -181,6 +200,12 @@ class QueryPlanHybridEvaluator:
             "lexical_gold_rank": lexical_rank,
             "vector_gold_rank": vector_rank,
             "hybrid_gold_rank": hybrid_rank,
+            "lexical_diagnostic_gold_rank": lexical_diagnostic_rank,
+            "vector_diagnostic_gold_rank": vector_diagnostic_rank,
+            "diagnostic_source_top_n": {
+                "lexical": len(execution.diagnostic_lexical_results),
+                "vector": len(execution.diagnostic_vector_results),
+            },
             "gold_fusion_diagnostic": gold_fusion_diagnostic,
             "lexical_top10": _retrieval_summaries(
                 execution.lexical_final_results, chunks_by_id, question
@@ -190,6 +215,13 @@ class QueryPlanHybridEvaluator:
             ),
             "hybrid_top10": _hybrid_summaries(
                 execution.results, chunks_by_id, question
+            ),
+            "section_path_diagnostic": _section_path_diagnostic(
+                relevant_candidate_chunks,
+                lexical_results=execution.lexical_final_results,
+                vector_results=execution.vector_results,
+                hybrid_results=execution.results,
+                chunks_by_id=chunks_by_id,
             ),
             "vector_status": execution.vector_status,
             "vector_error": execution.vector_error,
@@ -221,12 +253,114 @@ def write_hybrid_evaluation_report(
     )
 
 
+def compare_hybrid_evaluation_reports(
+    baseline: Mapping[str, Any], current: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Compare two complete reports without encoding question-specific rules."""
+
+    baseline_hybrid = baseline.get("hybrid") or {}
+    current_hybrid = current.get("hybrid") or {}
+    metric_comparison = {
+        "overall": _metric_comparison(
+            baseline_hybrid.get("overall") or {},
+            current_hybrid.get("overall") or {},
+        ),
+        "by_evaluation_set": _group_metric_comparison(
+            baseline_hybrid.get("by_evaluation_set") or {},
+            current_hybrid.get("by_evaluation_set") or {},
+        ),
+        "by_doc_group": _group_metric_comparison(
+            baseline_hybrid.get("by_doc_group") or {},
+            current_hybrid.get("by_doc_group") or {},
+        ),
+    }
+    baseline_rows = {
+        str(row.get("question_id")): row for row in baseline.get("questions") or []
+    }
+    current_rows = {
+        str(row.get("question_id")): row for row in current.get("questions") or []
+    }
+    rank_changes = []
+    for question_id in sorted(set(baseline_rows).intersection(current_rows)):
+        before = baseline_rows[question_id]
+        after = current_rows[question_id]
+        rank_changes.append(
+            {
+                "question_id": question_id,
+                "doc_group": after.get("doc_group"),
+                "periodic_intent": (
+                    (after.get("query_plan") or {}).get("evidence") or {}
+                ).get("periodic_intent"),
+                "lexical_rank": {
+                    "before": before.get("lexical_gold_rank"),
+                    "after": after.get("lexical_gold_rank"),
+                },
+                "vector_rank": {
+                    "before": before.get("vector_gold_rank"),
+                    "after": after.get("vector_gold_rank"),
+                },
+                "hybrid_rank": {
+                    "before": before.get("hybrid_gold_rank"),
+                    "after": after.get("hybrid_gold_rank"),
+                },
+            }
+        )
+    new_failures = [
+        row["question_id"]
+        for row in rank_changes
+        if row["hybrid_rank"]["before"] is not None
+        and row["hybrid_rank"]["after"] is None
+    ]
+    recovered = [
+        row["question_id"]
+        for row in rank_changes
+        if row["hybrid_rank"]["before"] is None
+        and row["hybrid_rank"]["after"] is not None
+    ]
+    return {
+        "metrics": metric_comparison,
+        "question_rank_changes": rank_changes,
+        "new_failures": new_failures,
+        "recovered": recovered,
+    }
+
+
+def _group_metric_comparison(
+    baseline: Mapping[str, Any], current: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        name: _metric_comparison(baseline.get(name) or {}, current.get(name) or {})
+        for name in sorted(set(baseline).union(current))
+    }
+
+
+def _metric_comparison(
+    baseline: Mapping[str, Any], current: Mapping[str, Any]
+) -> dict[str, Any]:
+    fields = ("recall_at_1", "recall_at_5", "recall_at_10")
+    return {
+        "baseline": {field: baseline.get(field) for field in fields},
+        "current": {field: current.get(field) for field in fields},
+        "delta": {
+            field: (
+                round(float(current[field]) - float(baseline[field]), 6)
+                if current.get(field) is not None and baseline.get(field) is not None
+                else None
+            )
+            for field in fields
+        },
+    }
+
+
 def _gold_rank(
     results: Sequence[Any],
     chunks_by_id: Mapping[str, Mapping[str, Any]],
     question: Mapping[str, Any],
+    *,
+    limit: int | None = 10,
 ) -> int | None:
-    for result in results[:10]:
+    selected = results if limit is None else results[:limit]
+    for result in selected:
         if _candidate_is_relevant(
             chunks_by_id.get(result.chunk_id, {}), result.doc_id, question
         ):
@@ -255,18 +389,98 @@ def _vector_summaries(
     output = []
     for result in results[:10]:
         chunk = chunks_by_id.get(result.chunk_id, {})
+        section_path = chunk.get("section_path") or []
+        if isinstance(section_path, str):
+            section_path = [section_path]
         output.append(
             {
                 "rank": result.rank,
                 "chunk_id": result.chunk_id,
                 "doc_id": result.doc_id,
                 "vector_score": float(result.vector_score),
+                "section_path": list(section_path),
+                "chunk_type": chunk.get("chunk_type"),
                 "is_gold_relevant": _candidate_is_relevant(
                     chunk, result.doc_id, question
                 ),
             }
         )
     return output
+
+
+def _gold_chunk_summary(chunk_id: str, chunk: Mapping[str, Any]) -> dict[str, Any]:
+    section_path = chunk.get("section_path") or []
+    if isinstance(section_path, str):
+        section_path = [section_path]
+    preview = " ".join(str(chunk.get("retrieval_text") or "").split())[:500]
+    return {
+        "chunk_id": chunk_id,
+        "chunk_type": chunk.get("chunk_type"),
+        "section_path": list(section_path),
+        "retrieval_text_preview": preview,
+    }
+
+
+def _section_path_diagnostic(
+    gold_candidates: Sequence[Any],
+    *,
+    lexical_results: Sequence[Any],
+    vector_results: Sequence[Any],
+    hybrid_results: Sequence[Any],
+    chunks_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    gold_sections = sorted(
+        {
+            _section_path_label(candidate.chunk)
+            for candidate in gold_candidates
+            if _section_path_label(candidate.chunk)
+        }
+    )
+    distributions = {
+        "lexical_top10": _section_path_distribution(
+            lexical_results, chunks_by_id
+        ),
+        "vector_top10": _section_path_distribution(vector_results, chunks_by_id),
+        "hybrid_top10": _section_path_distribution(hybrid_results, chunks_by_id),
+    }
+    dominant_gap: dict[str, Any] = {}
+    for source, distribution in distributions.items():
+        dominant = distribution[0] if distribution else None
+        dominant_path = dominant["section_path"] if dominant else None
+        dominant_gap[source] = {
+            "dominant_section_path": dominant_path,
+            "dominant_count": dominant["count"] if dominant else 0,
+            "matches_gold_section": dominant_path in gold_sections,
+            "gold_section_paths": gold_sections,
+        }
+    return {
+        "gold_section_paths": gold_sections,
+        **distributions,
+        "dominant_gap": dominant_gap,
+    }
+
+
+def _section_path_distribution(
+    results: Sequence[Any], chunks_by_id: Mapping[str, Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter(
+        _section_path_label(chunks_by_id.get(result.chunk_id, {}))
+        or "<missing-section>"
+        for result in results[:10]
+    )
+    return [
+        {"section_path": section_path, "count": count}
+        for section_path, count in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+
+
+def _section_path_label(chunk: Mapping[str, Any]) -> str:
+    section_path = chunk.get("section_path") or []
+    if isinstance(section_path, str):
+        return section_path.strip()
+    return " > ".join(str(value).strip() for value in section_path if str(value).strip())
 
 
 def _hybrid_summaries(
@@ -419,6 +633,29 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
             lines.append(_scoped_metrics_row(name, "lexical-only", lexical))
             lines.append(_scoped_metrics_row(name, "hybrid", metrics))
 
+    comparison = report.get("baseline_comparison")
+    if isinstance(comparison, Mapping):
+        overall = comparison["metrics"]["overall"]
+        lines.extend(
+            [
+                "",
+                "## Production baseline comparison",
+                "",
+                "| metric | baseline | current | delta |",
+                "| --- | ---: | ---: | ---: |",
+                *[
+                    f"| {field.replace('recall_at_', 'R@')} | "
+                    f"{overall['baseline'][field]} | {overall['current'][field]} | "
+                    f"{overall['delta'][field]} |"
+                    for field in ("recall_at_1", "recall_at_5", "recall_at_10")
+                ],
+                "",
+                "- New failures: "
+                + ", ".join(comparison["new_failures"] or ["none"]),
+                "- Recovered: " + ", ".join(comparison["recovered"] or ["none"]),
+            ]
+        )
+
     lines.extend(["", "## Failures", ""])
     for row in report["failures"]:
         lines.extend(
@@ -482,6 +719,9 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_gold_rank",
         "vector_gold_rank",
         "hybrid_gold_rank",
+        "lexical_diagnostic_gold_rank",
+        "vector_diagnostic_gold_rank",
+        "diagnostic_source_top_n",
         "gold_fusion_diagnostic",
         "vector_status",
         "vector_error",
@@ -493,6 +733,7 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_top10",
         "vector_top10",
         "hybrid_top10",
+        "section_path_diagnostic",
     ]
     structured = {
         "query_plan",
@@ -502,6 +743,8 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_top10",
         "vector_top10",
         "hybrid_top10",
+        "diagnostic_source_top_n",
+        "section_path_diagnostic",
         "gold_fusion_diagnostic",
     }
     with path.open("w", encoding="utf-8-sig", newline="") as target:

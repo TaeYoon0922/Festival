@@ -168,6 +168,7 @@ class QueryRouter:
                 "period_type": plan.period.period_type,
                 "fiscal_year": plan.period.year,
                 "fiscal_quarter": plan.period.quarter,
+                "periodic_intent": plan.evidence.get("periodic_intent"),
             },
             retrieval_limit=retrieval_limit,
         )

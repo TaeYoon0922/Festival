@@ -69,6 +69,54 @@ _SECTION_BOOSTS: dict[str, dict[str, float]] = {
     "holding_shares": {"보유 주식": 1.0, "대량보유": 0.95, "주식수": 0.90},
 }
 
+_PERIODIC_INTENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "business_product",
+        (
+            r"주요\s*제품",
+            r"제품\s*(?:및|과)\s*서비스",
+            r"사업\s*(?:설명|내용|개요)",
+            r"주요\s*사업",
+            r"장비\s*사업",
+            r"(?:기술|제품)\s*설명",
+        ),
+    ),
+    (
+        "listing_history",
+        (
+            r"상장\s*일(?:자)?",
+            r"(?:유가증권|코스피|코스닥|증권|주식)\s*시장\s*상장",
+            r"(?:설립|상장).{0,12}(?:상장|이력)",
+        ),
+    ),
+    (
+        "merger_history",
+        (
+            r"합병\s*기일",
+            r"흡수\s*합병",
+            r"합병\s*이력",
+            r"회사의\s*중요한\s*변동",
+        ),
+    ),
+)
+
+_PERIODIC_SECTION_BOOSTS: dict[str, dict[str, float]] = {
+    "business_product": {
+        "사업의 개요": 1.0,
+        "주요 제품 및 서비스": 1.0,
+        "사업의 내용": 0.82,
+        "회사의 개요": 0.65,
+    },
+    "listing_history": {
+        "회사의 개요": 1.0,
+    },
+    "merger_history": {
+        "회사의 연혁": 1.0,
+        "회사의 중요한 변동": 0.95,
+        "합병": 0.85,
+    },
+}
+
 
 class QueryUnderstanding:
     """Rule-first parser with an optional backend company resolver interface."""
@@ -146,6 +194,9 @@ class QueryUnderstanding:
             event_route=event_route,
             event_evidence=event_evidence,
         )
+        periodic_intent, periodic_intent_evidence = _find_periodic_intent(raw_query)
+        if not _periodic_intent_allowed(task_type, event_type, routes):
+            periodic_intent, periodic_intent_evidence = None, None
         period, period_spans, mentioned_years, date_semantics = _period_from_query(
             raw_query,
             task_type=task_type,
@@ -220,7 +271,7 @@ class QueryUnderstanding:
             comparison=comparison,
             doc_subtype=subtype,
             section_path=section_path,
-            section_boosts=_SECTION_BOOSTS.get(metric or "", {}),
+            section_boosts=_section_boosts(metric, periodic_intent),
             route_confidence=route_confidence,
             route_evidence=route_evidence,
             top_k=top_k,
@@ -232,6 +283,8 @@ class QueryUnderstanding:
                 "company_resolved": bool(resolved),
                 "metric": metric_evidence or holding_evidence,
                 "event_type": event_evidence,
+                "periodic_intent": periodic_intent,
+                "periodic_intent_evidence": periodic_intent_evidence,
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
             },
         )
@@ -276,6 +329,36 @@ def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
     if "지분" in compact and any(term in compact for term in ("변동", "증감", "보유")):
         return "holding_ratio", "지분+변동/증감/보유"
     return None, None
+
+
+def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
+    for intent, patterns in _PERIODIC_INTENTS:
+        for pattern in patterns:
+            match = re.search(pattern, query, flags=re.IGNORECASE)
+            if match:
+                return intent, match.group(0)
+    return None, None
+
+
+def _periodic_intent_allowed(
+    task_type: str,
+    event_type: str | None,
+    routes: tuple[str, ...],
+) -> bool:
+    if task_type == "disclosure_lookup":
+        return not routes or "periodic" in routes
+    return event_type == "merger" and "periodic" in routes
+
+
+def _section_boosts(
+    metric: str | None, periodic_intent: str | None
+) -> dict[str, float]:
+    merged = dict(_SECTION_BOOSTS.get(metric or "", {}))
+    for section, weight in _PERIODIC_SECTION_BOOSTS.get(
+        periodic_intent or "", {}
+    ).items():
+        merged[section] = max(merged.get(section, 0.0), weight)
+    return merged
 
 
 def _routes(
