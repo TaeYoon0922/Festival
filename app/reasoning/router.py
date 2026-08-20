@@ -96,10 +96,13 @@ class QueryRouter:
             if value not in (None, [], ())
         }
         date_range = None
-        if plan.period.from_date and plan.period.to_date:
+        if (
+            plan.period.from_date
+            and plan.period.to_date
+            and plan.period.period_type in {"receipt_date", "date_range"}
+        ):
             date_range = (plan.period.from_date, plan.period.to_date)
-            if plan.period.period_type in {"receipt_date", "date_range"}:
-                hard_filters["rcept_dt"] = date_range
+            hard_filters["rcept_dt"] = date_range
 
         route_candidates = {
             route: float(plan.route_confidence.get(f"disclosure_route.{route}", 0.5))

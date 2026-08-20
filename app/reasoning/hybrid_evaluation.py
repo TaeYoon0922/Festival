@@ -81,7 +81,8 @@ class QueryPlanHybridEvaluator:
                 "flow": (
                     "Question -> QueryUnderstanding -> QueryPlan/Router -> shared "
                     "metadata candidate scope -> lexical Top-N + vector Top-N -> RRF "
-                    "-> deterministic rerank -> Top-10"
+                    "-> source-rank preservation -> bounded deterministic rerank "
+                    "-> Top-10"
                 ),
                 "gold_judgment": "app.parsing.final_validation._is_relevant",
                 "top_k": self.top_k,
@@ -124,6 +125,11 @@ class QueryPlanHybridEvaluator:
         )
         vector_rank = _gold_rank(execution.vector_results, chunks_by_id, question)
         hybrid_rank = _gold_rank(execution.results, chunks_by_id, question)
+        gold_fusion_diagnostic = _gold_fusion_diagnostic(
+            execution.rerank_diagnostics,
+            chunks_by_id,
+            question,
+        )
 
         if gold_doc_id not in candidate_doc_ids:
             failure_class = "metadata_filter_failure"
@@ -131,7 +137,7 @@ class QueryPlanHybridEvaluator:
             failure_class = "gold_mapping_or_route_failure"
         elif hybrid_rank is not None:
             failure_class = "success"
-        elif vector_rank is None:
+        elif lexical_rank is None and vector_rank is None:
             failure_class = "vector_missing_failure"
         else:
             failure_class = "fusion_ranking_failure"
@@ -171,6 +177,7 @@ class QueryPlanHybridEvaluator:
             "lexical_gold_rank": lexical_rank,
             "vector_gold_rank": vector_rank,
             "hybrid_gold_rank": hybrid_rank,
+            "gold_fusion_diagnostic": gold_fusion_diagnostic,
             "lexical_top10": _retrieval_summaries(
                 execution.lexical_final_results, chunks_by_id, question
             ),
@@ -267,6 +274,31 @@ def _hybrid_summaries(
     for item, result in zip(output, results[:10]):
         item["hybrid"] = dict(result.metadata_match.get("hybrid") or {})
     return output
+
+
+def _gold_fusion_diagnostic(
+    diagnostics: Sequence[Mapping[str, Any]],
+    chunks_by_id: Mapping[str, Mapping[str, Any]],
+    question: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    relevant = [
+        dict(item)
+        for item in diagnostics
+        if _candidate_is_relevant(
+            chunks_by_id.get(str(item.get("chunk_id") or ""), {}),
+            str(item.get("doc_id") or ""),
+            question,
+        )
+    ]
+    if not relevant:
+        return None
+    return min(
+        relevant,
+        key=lambda item: (
+            int(item.get("final_rank") or 10**9),
+            str(item.get("chunk_id") or ""),
+        ),
+    )
 
 
 def _summary(
@@ -394,6 +426,12 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                 f"- Ranks (lexical/vector/hybrid): "
                 f"{row['lexical_gold_rank']} / {row['vector_gold_rank']} / "
                 f"{row['hybrid_gold_rank']}",
+                "- Gold fusion diagnostic: "
+                + json.dumps(
+                    row["gold_fusion_diagnostic"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 f"- Vector status: {row['vector_status']}",
                 "- Hybrid Top10: "
                 + ", ".join(
@@ -440,6 +478,7 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_gold_rank",
         "vector_gold_rank",
         "hybrid_gold_rank",
+        "gold_fusion_diagnostic",
         "vector_status",
         "vector_error",
         "failure_class",
@@ -459,6 +498,7 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_top10",
         "vector_top10",
         "hybrid_top10",
+        "gold_fusion_diagnostic",
     }
     with path.open("w", encoding="utf-8-sig", newline="") as target:
         writer = csv.DictWriter(target, fieldnames=fields, extrasaction="ignore")

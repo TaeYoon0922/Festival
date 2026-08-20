@@ -120,6 +120,13 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertEqual(row["hybrid_gold_rank"], 1)
         self.assertTrue(row["has_any_vector_candidate"])
         self.assertIn("rrf_score", row["hybrid_top10"][0]["hybrid"])
+        diagnostic = row["gold_fusion_diagnostic"]
+        self.assertEqual(diagnostic["vector_rank"], 1)
+        self.assertIn("normalized_rrf_score", diagnostic)
+        self.assertIn("deterministic_rerank_score", diagnostic)
+        self.assertIn("legacy_final_rank", diagnostic)
+        self.assertIn("final_rank", diagnostic)
+        self.assertEqual(len(diagnostic["weight_grid"]), 4)
 
     def test_writes_json_markdown_and_csv(self):
         report = self.evaluator.evaluate(self.question_sets)

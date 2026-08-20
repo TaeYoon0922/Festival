@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Mapping
+from calendar import monthrange
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
@@ -145,7 +146,7 @@ class QueryUnderstanding:
             event_route=event_route,
             event_evidence=event_evidence,
         )
-        period, period_spans, mentioned_years = _period_from_query(
+        period, period_spans, mentioned_years, date_semantics = _period_from_query(
             raw_query,
             task_type=task_type,
             routes=routes,
@@ -226,6 +227,7 @@ class QueryUnderstanding:
             evidence={
                 "mentioned_years": list(mentioned_years),
                 "period_type": period.period_type,
+                "date_semantics": date_semantics,
                 "report_preference": "annual" if annual_preferred else None,
                 "company_resolved": bool(resolved),
                 "metric": metric_evidence or holding_evidence,
@@ -325,7 +327,12 @@ def _period_from_query(
     *,
     task_type: str,
     routes: tuple[str, ...],
-) -> tuple[QueryPeriod, list[tuple[int, int]], tuple[int, ...]]:
+) -> tuple[
+    QueryPeriod,
+    list[tuple[int, int]],
+    tuple[int, ...],
+    dict[str, Any],
+]:
     years_with_spans = [
         (int(match.group(1)), match.span())
         for match in re.finditer(
@@ -352,26 +359,110 @@ def _period_from_query(
             query,
         )
     ]
+    date_role, date_marker = _date_semantic_role(query, task_type)
     if len(dates) >= 2:
-        spans.extend(span for _, span in dates[:2])
+        selected_spans = [span for _, span in dates[:2]]
+        if date_role != "holding_reference":
+            spans.extend(selected_spans)
+        period_type = (
+            "holding_reference_range"
+            if date_role == "holding_reference"
+            else "date_range"
+        )
         return (
             QueryPeriod(
                 from_date=dates[0][0],
                 to_date=dates[1][0],
-                period_type="date_range",
+                period_type=period_type,
             ),
-            spans,
+            [] if date_role == "holding_reference" else spans,
             years,
+            _date_semantics(date_role, date_marker, [value for value, _ in dates[:2]]),
         )
 
     year = years[0] if len(years) == 1 else None
     compact = compact_query
-    if year is not None and any(
-        marker in compact for marker in ("공시한", "공시된", "접수된", "공시일")
-    ):
-        return _whole_year_period(year, "receipt_date"), spans, years
+    if date_role == "receipt" and year is not None:
+        if dates:
+            value, date_span = dates[0]
+            spans.append(date_span)
+            return (
+                QueryPeriod(
+                    year=year,
+                    from_date=value,
+                    to_date=value,
+                    period_type="receipt_date",
+                ),
+                spans,
+                years,
+                _date_semantics(date_role, date_marker, [value]),
+            )
+        year_month = _single_year_month(query, excluded_spans=[span for _, span in dates])
+        if year_month is not None:
+            month_year, month, month_span = year_month
+            spans.append(month_span)
+            start = f"{month_year:04d}-{month:02d}-01"
+            end = f"{month_year:04d}-{month:02d}-{monthrange(month_year, month)[1]:02d}"
+            return (
+                QueryPeriod(
+                    year=month_year,
+                    from_date=start,
+                    to_date=end,
+                    period_type="receipt_date",
+                ),
+                spans,
+                years,
+                _date_semantics(date_role, date_marker, [start, end]),
+            )
+        period = _whole_year_period(year, "receipt_date")
+        return (
+            period,
+            spans,
+            years,
+            _date_semantics(date_role, date_marker, [period.from_date, period.to_date]),
+        )
+    if date_role == "holding_reference" and task_type == "holding_change":
+        if dates:
+            value = dates[0][0]
+            return (
+                QueryPeriod(
+                    year=year,
+                    from_date=value,
+                    to_date=value,
+                    period_type="holding_reference_date",
+                ),
+                [],
+                years,
+                _date_semantics(date_role, date_marker, [value]),
+            )
+        if year is not None:
+            period = _whole_year_period(year, "holding_reference_year")
+            return (
+                period,
+                [],
+                years,
+                _date_semantics(
+                    date_role, date_marker, [period.from_date, period.to_date]
+                ),
+            )
+        return (
+            QueryPeriod(period_type="holding_reference"),
+            [],
+            years,
+            _date_semantics(date_role, date_marker, []),
+        )
     if year is not None and task_type == "holding_change":
-        return _whole_year_period(year, "date_range"), spans, years
+        period = _whole_year_period(year, "holding_reference_year")
+        return (
+            period,
+            [],
+            years,
+            _date_semantics(
+                "holding_reference",
+                "holding_change",
+                [period.from_date, period.to_date],
+            ),
+        )
     if task_type == "financial_metric" or "periodic" in routes:
         return (
             QueryPeriod(
@@ -387,16 +478,90 @@ def _period_from_query(
             ),
             spans,
             years,
+            _date_semantics("fiscal", None, [str(year)] if year else []),
         )
     if year is not None:
-        return QueryPeriod(year=year, period_type="reference_year"), spans, years
+        return (
+            QueryPeriod(year=year, period_type="reference_year"),
+            spans,
+            years,
+            _date_semantics("reference", None, [str(year)]),
+        )
     if quarter is not None:
-        return QueryPeriod(quarter=quarter, period_type="fiscal_quarter"), spans, years
+        return (
+            QueryPeriod(quarter=quarter, period_type="fiscal_quarter"),
+            spans,
+            years,
+            _date_semantics("fiscal", None, []),
+        )
     if task_type == "holding_change":
-        return QueryPeriod(period_type="latest_holding"), spans, years
+        return (
+            QueryPeriod(period_type="latest_holding"),
+            spans,
+            years,
+            _date_semantics(None, None, []),
+        )
     if task_type == "corporate_event":
-        return QueryPeriod(period_type="latest_event"), spans, years
-    return QueryPeriod(), spans, years
+        return (
+            QueryPeriod(period_type="latest_event"),
+            spans,
+            years,
+            _date_semantics(None, None, []),
+        )
+    return QueryPeriod(), spans, years, _date_semantics(None, None, [])
+
+
+def _date_semantic_role(query: str, task_type: str) -> tuple[str | None, str | None]:
+    receipt = re.search(
+        r"(?:공시(?:한|된|일|시점)?|접수(?:한|된|일)?|제출(?:한|된|일)?)",
+        query,
+    )
+    if receipt:
+        return "receipt", receipt.group(0)
+    if task_type == "holding_change":
+        reference = re.search(
+            r"(?:현재|기준일|기준|변동일|보유일)",
+            query,
+        )
+        if reference:
+            return "holding_reference", reference.group(0)
+        if re.search(r"(?<!\d)20\d{2}(?!\d)", query):
+            return "holding_reference", "holding_change_date"
+    return None, None
+
+
+def _date_semantics(
+    role: str | None,
+    marker: str | None,
+    values: Sequence[str | None],
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "marker": marker,
+        "values": [value for value in values if value],
+    }
+
+
+def _single_year_month(
+    query: str,
+    *,
+    excluded_spans: Sequence[tuple[int, int]],
+) -> tuple[int, int, tuple[int, int]] | None:
+    for match in re.finditer(
+        r"(20\d{2})\s*(?:년|[.\-/])\s*(\d{1,2})\s*(?:월)?"
+        r"(?!\s*(?:일|[.\-/])\s*\d)",
+        query,
+    ):
+        if any(
+            match.start() < excluded_end and excluded_start < match.end()
+            for excluded_start, excluded_end in excluded_spans
+        ):
+            continue
+        year = int(match.group(1))
+        month = int(match.group(2))
+        if 1 <= month <= 12:
+            return year, month, match.span()
+    return None
 
 
 def _whole_year_period(year: int, period_type: str) -> QueryPeriod:

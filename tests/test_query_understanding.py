@@ -172,6 +172,54 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.comparison, {"type": "before_after"})
         self.assertEqual(plan.period.from_date, "2024-01-01")
 
+    def test_holding_reference_dates_do_not_become_receipt_filters(self) -> None:
+        queries = (
+            "파마리서치 국민연금 2022년 12월 5일 현재 보유 비율",
+            "파마리서치 국민연금 2023년 3월 10일 기준 보유 주식수",
+            "파마리서치 국민연금 변동일 2024년 1월 2일 보유 비율",
+            "파마리서치 국민연금 2024년 1월 2일 현재 보유 비율",
+            "파마리서치 국민연금 기준일 현재 보유 비율",
+            "파마리서치 국민연금 보유일 기준 보유 주식수",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                plan = QueryUnderstanding().understand(query)
+                route = QueryRouter().route(plan)
+                self.assertEqual(plan.task_type, "holding_change")
+                self.assertNotIn("rcept_dt", route.hard_filters)
+                self.assertIsNone(route.date_range)
+                self.assertEqual(
+                    plan.evidence["date_semantics"]["role"],
+                    "holding_reference",
+                )
+
+    def test_explicit_disclosure_dates_keep_receipt_filtering(self) -> None:
+        cases = (
+            (
+                "2023년에 공시한 국민연금 보고서",
+                ("2023-01-01", "2023-12-31"),
+            ),
+            (
+                "파마리서치 2023년 제출된 보고서",
+                ("2023-01-01", "2023-12-31"),
+            ),
+            (
+                "LS ELECTRIC 2024년 3월 공시 신규시설투자",
+                ("2024-03-01", "2024-03-31"),
+            ),
+            (
+                "두산로보틱스 2024년 1월 2일 접수된 유상증자 보고서",
+                ("2024-01-02", "2024-01-02"),
+            ),
+        )
+        for query, expected in cases:
+            with self.subTest(query=query):
+                plan = QueryUnderstanding().understand(query)
+                route = QueryRouter().route(plan)
+                self.assertEqual(plan.period.period_type, "receipt_date")
+                self.assertEqual(route.hard_filters["rcept_dt"], expected)
+                self.assertEqual(plan.evidence["date_semantics"]["role"], "receipt")
+
     def test_ambiguous_merger_keeps_multiple_routes(self) -> None:
         plan = QueryUnderstanding(self.aliases).understand("삼성전자 흡수합병 합병기일")
         self.assertEqual(plan.disclosure_route, ("major", "periodic"))

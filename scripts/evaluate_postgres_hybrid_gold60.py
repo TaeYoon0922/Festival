@@ -44,6 +44,7 @@ def main() -> None:
     parser.add_argument("--vector-weight", type=float, default=1.0)
     parser.add_argument("--fusion-weight", type=float, default=0.60)
     parser.add_argument("--deterministic-weight", type=float, default=0.40)
+    parser.add_argument("--rerank-window-size", type=int, default=2)
     args = parser.parse_args()
 
     embedding_config = EmbeddingConfig.from_env()
@@ -57,6 +58,7 @@ def main() -> None:
         final_top_k=args.top_k,
         fusion_weight=args.fusion_weight,
         deterministic_weight=args.deterministic_weight,
+        rerank_window_size=args.rerank_window_size,
         rrf=RRFConfig(
             k=args.rrf_k,
             lexical_weight=args.lexical_weight,
