@@ -76,6 +76,9 @@ def validate_completed_execution(
     draft_before_generation = _object_snapshot(agent_result.answer_draft)
 
     generated = renderer.generate(agent_result.answer_draft)
+    unsupported_fact_diagnostics = _unsupported_fact_diagnostics(
+        agent_result.answer_draft, generated
+    )
 
     resolution_after_generation = _object_snapshot(agent_result.resolution)
     draft_after_generation = _object_snapshot(agent_result.answer_draft)
@@ -124,7 +127,9 @@ def validate_completed_execution(
             agent_result.answer_draft, generated
         ),
         "unsupported_facts_not_generated": _unsupported_facts_absent(
-            agent_result.answer_draft, generated
+            agent_result.answer_draft,
+            generated,
+            diagnostics=unsupported_fact_diagnostics,
         ),
     }
     validations["all_invariants_preserved"] = all(validations.values())
@@ -149,6 +154,9 @@ def validate_completed_execution(
         "citation_count": len(generated.citations),
         "warnings": list(warnings),
         "failed_invariants": failed_invariants,
+        "validation_diagnostics": {
+            "unsupported_facts_not_generated": unsupported_fact_diagnostics,
+        },
         "evidence": {
             "raw_candidate_count": agent_result.evidence_set.raw_candidate_count,
             "selected_evidence_count": agent_result.evidence_set.selected_evidence_count,
@@ -426,23 +434,65 @@ def _no_evidence_state_consistent(draft: Any, generated: Any) -> bool:
     )
 
 
-def _unsupported_facts_absent(draft: Any, generated: Any) -> bool:
+def _unsupported_facts_absent(
+    draft: Any,
+    generated: Any,
+    *,
+    diagnostics: Sequence[Mapping[str, Any]] | None = None,
+) -> bool:
+    failures = (
+        list(diagnostics)
+        if diagnostics is not None
+        else _unsupported_fact_diagnostics(draft, generated)
+    )
+    return not failures
+
+
+def _unsupported_fact_diagnostics(
+    draft: Any, generated: Any
+) -> list[dict[str, Any]]:
     draft_text = json.dumps(draft.to_dict(), ensure_ascii=False, default=str)
     generated_sections = "\n".join(section.content for section in generated.sections)
+    failures: list[dict[str, Any]] = []
     for phrase in _UNSUPPORTED_ADDITIONS:
         if phrase in generated.answer_text and phrase not in draft_text:
-            return False
+            failures.append({"reason": "unsupported_phrase", "token": phrase})
     for pattern in _FACT_PATTERNS:
         for match in pattern.findall(generated_sections):
-            if not _fact_token_supported(str(match).strip(), draft_text):
-                return False
+            token = str(match).strip()
+            if not _fact_token_supported(token, draft_text):
+                failures.append(
+                    {"reason": "token_not_in_answer_draft", "token": token}
+                )
     valid_markers = {citation.citation_id for citation in generated.citations}
     for section in generated.sections:
-        for line in section.content.splitlines():
-            if any(pattern.search(line) for pattern in _FACT_PATTERNS):
-                if not any(marker in line for marker in valid_markers):
-                    return False
-    return True
+        section_tokens = tuple(
+            dict.fromkeys(
+                str(match).strip()
+                for pattern in _FACT_PATTERNS
+                for match in pattern.findall(section.content)
+            )
+        )
+        if not section_tokens:
+            continue
+        declared = set(section.citations).intersection(valid_markers)
+        rendered = {
+            marker for marker in declared if marker in section.content
+        }
+        if not declared or not rendered:
+            failures.extend(
+                {
+                    "reason": "missing_citation_scope",
+                    "token": token,
+                    "section": section.title,
+                }
+                for token in section_tokens
+            )
+    unique: dict[str, dict[str, Any]] = {}
+    for failure in failures:
+        key = json.dumps(failure, ensure_ascii=False, sort_keys=True)
+        unique.setdefault(key, failure)
+    return list(unique.values())
 
 
 def _fact_token_supported(token: str, draft_text: str) -> bool:
@@ -491,6 +541,7 @@ def _concise_report(report: Mapping[str, Any], output_path: Path) -> dict[str, A
                 "citation_count": row.get("citation_count"),
                 "warnings": row.get("warnings", []),
                 "failed_invariants": row.get("failed_invariants", []),
+                "validation_diagnostics": row.get("validation_diagnostics", {}),
             }
             for row in report["queries"]
         ],

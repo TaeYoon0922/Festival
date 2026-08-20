@@ -208,6 +208,44 @@ class AgentEndToEndSmokeTests(unittest.TestCase):
         self.assertTrue(row["validation"]["provenance_preserved"])
         self.assertTrue(row["validation"]["all_invariants_preserved"])
 
+    def test_periodic_multiline_fact_uses_section_citation_scope(self):
+        pair = _candidate(
+            "p24:ch_products",
+            "p24",
+            rank=1,
+            doc_group="periodic",
+            content=(
+                "DX 부문의 주요 제품\n"
+                "TV 판매량 100,000대\n"
+                "스마트폰 매출 비중 42.5%"
+            ),
+            section="주요 제품 및 서비스",
+            fiscal_year=2024,
+            period_type="fiscal_year",
+            source_refs=[{"table_id": "t24", "row_start": 1, "row_end": 3}],
+        )
+        plan = QueryPlan(
+            query="삼성전자 DX 부문의 주요 제품은 무엇인가",
+            task_type="disclosure_lookup",
+            disclosure_route=("periodic",),
+            evidence={"periodic_intent": "business_product"},
+        )
+        execution = _execution(plan, pair)
+
+        row = _run_full_pipeline(plan.raw_query, plan, execution)
+
+        content = row["generated_answer"]["sections"][0]["content"]
+        numeric_line = next(
+            line for line in content.splitlines() if "100,000" in line
+        )
+        self.assertNotIn("[1]", numeric_line)
+        self.assertEqual(
+            row["validation_diagnostics"]["unsupported_facts_not_generated"],
+            [],
+        )
+        self.assertTrue(row["validation"]["unsupported_facts_not_generated"])
+        self.assertTrue(row["validation"]["all_invariants_preserved"])
+
     def test_general_evidence_path_uses_no_resolver(self):
         pair = _candidate(
             "m1:ch_event",
