@@ -10,7 +10,7 @@ from app.reasoning.hybrid_evaluation import (
 )
 from app.reasoning.query_plan import QueryPlan
 from app.retrieval.embeddings import DeterministicHashEmbedder, EmbeddingConfig
-from app.retrieval.hybrid import HybridQueryExecutor
+from app.retrieval.hybrid import HybridQueryExecutor, HybridRetrievalConfig
 from app.retrieval.interfaces import (
     CandidateChunk,
     CandidateDocument,
@@ -83,6 +83,61 @@ class EvaluationHybridBackend:
 
     def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
         return {"gold"}.intersection(chunk_ids)
+
+
+class DeepVectorGoldBackend:
+    def __init__(self, *, gold_rank: int, result_count: int) -> None:
+        self.gold_rank = gold_rank
+        self.documents = [
+            CandidateDocument("d1", {"doc_group": "periodic"}, MetadataMatch())
+        ]
+        self.vector_ids = [
+            "gold" if rank == gold_rank else f"noise-{rank:03d}"
+            for rank in range(1, result_count + 1)
+        ]
+        self.chunks = [
+            CandidateChunk(
+                chunk_id,
+                "d1",
+                {
+                    "chunk_id": chunk_id,
+                    "section_id": "s1" if chunk_id == "gold" else "noise",
+                    "section_path": (
+                        ["II. 사업의 내용", "1. 사업의 개요"]
+                        if chunk_id == "gold"
+                        else ["III. 재무에 관한 사항"]
+                    ),
+                    "chunk_type": "text",
+                    "content": (
+                        "gold evidence rights offering"
+                        if chunk_id == "gold"
+                        else chunk_id
+                    ),
+                    "retrieval_text": chunk_id,
+                },
+                MetadataMatch(),
+            )
+            for chunk_id in self.vector_ids
+        ]
+
+    def get_candidate_documents(self, **_filters):
+        return self.documents
+
+    def get_candidate_chunks(self, _documents):
+        return self.chunks
+
+    def retrieve(self, _query, _candidates, *, top_k=None):
+        return []
+
+    def vector_search(self, _embedding, _candidates, **kwargs):
+        results = [
+            VectorRetrievalResult(chunk_id, "d1", 1.0 / rank, rank)
+            for rank, chunk_id in enumerate(self.vector_ids, start=1)
+        ]
+        return results[: kwargs["top_k"]]
+
+    def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
+        return set(chunk_ids)
 
 
 class QueryPlanHybridEvaluatorTests(unittest.TestCase):
@@ -192,6 +247,51 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertEqual(comparison["new_failures"], [])
         rank_change = comparison["question_rank_changes"][0]
         self.assertEqual(rank_change["hybrid_rank"], {"before": None, "after": 1})
+
+    def test_vector_rank_uses_production_top_n_not_implicit_top10(self):
+        for gold_rank, expected_production_rank in ((25, 25), (107, None)):
+            with self.subTest(gold_rank=gold_rank):
+                config = EmbeddingConfig(model="mock", version="v1", dimensions=8)
+                backend = DeepVectorGoldBackend(gold_rank=gold_rank, result_count=120)
+                executor = HybridQueryExecutor(
+                    backend,
+                    DeterministicHashEmbedder(config),
+                    config,
+                    config=HybridRetrievalConfig(
+                        vector_top_n=50,
+                        diagnostic_top_n=120,
+                    ),
+                )
+                evaluator = QueryPlanHybridEvaluator(
+                    StubUnderstanding(), executor, top_k=10
+                )
+
+                row = evaluator.evaluate(self.question_sets)["questions"][0]
+
+                self.assertEqual(row["vector_gold_rank"], expected_production_rank)
+                self.assertIsNone(row["vector_top10_gold_rank"])
+                self.assertEqual(row["vector_diagnostic_gold_rank"], gold_rank)
+                production_matches = row["vector_gold_matches"]["production"]
+                diagnostic_matches = row["vector_gold_matches"]["diagnostic"]
+                self.assertEqual(bool(production_matches), gold_rank <= 50)
+                self.assertEqual(diagnostic_matches[0]["rank"], gold_rank)
+                self.assertEqual(diagnostic_matches[0]["chunk_id"], "gold")
+                self.assertEqual(len(row["vector_production_top_n"]), 50)
+                rank_debug = row["vector_rank_diagnostic"]
+                self.assertEqual(
+                    rank_debug["production_contains_gold"], gold_rank <= 50
+                )
+                self.assertEqual(
+                    rank_debug["reason"],
+                    (
+                        "consistent_in_production_top_n"
+                        if gold_rank <= 50
+                        else "outside_production_top_n"
+                    ),
+                )
+                self.assertTrue(rank_debug["same_query_filter_execution"])
+                self.assertFalse(rank_debug["section_boost_applied_to_raw_vector"])
+                self.assertEqual(rank_debug["rank_level"], "chunk")
 
     def test_rejects_top_k_below_recall_cutoff(self):
         with self.assertRaises(ValueError):
