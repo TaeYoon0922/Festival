@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -17,6 +18,35 @@ from app.reasoning.lexical_evaluation import (
 
 ProgressCallback = Callable[[int, int, str], None]
 _CUTOFFS = (1, 5, 10)
+_EVIDENCE_STOPWORDS = {
+    "무엇인가",
+    "무엇인가요",
+    "알려줘",
+    "알려주세요",
+    "설명",
+    "조회",
+}
+_KOREAN_PARTICLE_SUFFIXES = (
+    "으로부터",
+    "에서부터",
+    "에게서",
+    "에서는",
+    "으로",
+    "에서",
+    "에게",
+    "까지",
+    "부터",
+    "에는",
+    "의",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "와",
+    "과",
+)
 
 
 class QueryPlanHybridEvaluator:
@@ -119,6 +149,7 @@ class QueryPlanHybridEvaluator:
     ) -> dict[str, Any]:
         raw_query = str(question["query"])
         plan = self.understanding.understand(raw_query, top_k=self.top_k)
+        evidence_profile = _query_evidence_profile(plan)
         execution = self.executor.execute(plan)
         chunks_by_id = {candidate.chunk_id: candidate.chunk for candidate in execution.chunks}
         candidate_doc_ids = {document.doc_id for document in execution.documents}
@@ -162,6 +193,21 @@ class QueryPlanHybridEvaluator:
             chunks_by_id,
             question,
         )
+        if gold_fusion_diagnostic is not None:
+            gold_chunk = chunks_by_id.get(gold_fusion_diagnostic["chunk_id"], {})
+            gold_fusion_diagnostic = _enrich_fusion_diagnostic(
+                gold_fusion_diagnostic,
+                gold_chunk,
+                evidence_profile,
+                task_type=plan.task_type,
+            )
+        hybrid_top10 = _hybrid_summaries(
+            execution.results,
+            chunks_by_id,
+            question,
+            evidence_profile=evidence_profile,
+            task_type=plan.task_type,
+        )
 
         if gold_doc_id not in candidate_doc_ids:
             failure_class = "metadata_filter_failure"
@@ -196,7 +242,12 @@ class QueryPlanHybridEvaluator:
                 "evidence_terms": list(question.get("evidence_terms") or []),
                 "candidate_relevant_chunk_ids": relevant_candidates,
                 "relevant_chunks": [
-                    _gold_chunk_summary(candidate.chunk_id, candidate.chunk)
+                    _gold_chunk_summary(
+                        candidate.chunk_id,
+                        candidate.chunk,
+                        evidence_profile=evidence_profile,
+                        task_type=plan.task_type,
+                    )
                     for candidate in relevant_candidate_chunks
                 ],
             },
@@ -221,6 +272,10 @@ class QueryPlanHybridEvaluator:
                 "vector": len(execution.diagnostic_vector_results),
             },
             "gold_fusion_diagnostic": gold_fusion_diagnostic,
+            "query_evidence_diagnostic": evidence_profile,
+            "score_component_comparison": _score_component_comparison(
+                gold_fusion_diagnostic, hybrid_top10
+            ),
             "lexical_top10": _retrieval_summaries(
                 execution.lexical_final_results, chunks_by_id, question
             ),
@@ -247,9 +302,7 @@ class QueryPlanHybridEvaluator:
                 chunks_by_id,
                 question,
             ),
-            "hybrid_top10": _hybrid_summaries(
-                execution.results, chunks_by_id, question
-            ),
+            "hybrid_top10": hybrid_top10,
             "section_path_diagnostic": _section_path_diagnostic(
                 relevant_candidate_chunks,
                 lexical_results=execution.lexical_final_results,
@@ -504,17 +557,185 @@ def _vector_rank_diagnostic(
     }
 
 
-def _gold_chunk_summary(chunk_id: str, chunk: Mapping[str, Any]) -> dict[str, Any]:
+def _query_evidence_profile(plan: Any) -> dict[str, Any]:
+    lexical_query = str(plan.lexical_query or "").strip()
+    raw_tokens = re.findall(r"[0-9A-Za-z]+(?:[-_.][0-9A-Za-z]+)*|[가-힣]+", lexical_query)
+    core_terms: list[str] = []
+    for raw_token in raw_tokens:
+        token = _strip_korean_particle(raw_token)
+        if not token or token.casefold() in _EVIDENCE_STOPWORDS:
+            continue
+        if token not in core_terms:
+            core_terms.append(token)
+    requested_holding_fields = (
+        _requested_holding_fields(lexical_query)
+        if plan.task_type == "holding_change"
+        else []
+    )
+    return {
+        "lexical_query": lexical_query,
+        "whitespace_normalized_query": _whitespace_normalize(lexical_query),
+        "compact_normalized_query": _alignment_normalize(lexical_query),
+        "core_terms": core_terms,
+        "requested_holding_fields": requested_holding_fields,
+        "reporter": plan.reporter,
+        "metric": plan.metric,
+        "event_type": plan.event_type,
+        "periodic_intent": plan.evidence.get("periodic_intent"),
+    }
+
+
+def _query_alignment(
+    profile: Mapping[str, Any], chunk: Mapping[str, Any]
+) -> dict[str, Any]:
+    text = " ".join(
+        str(value or "")
+        for value in (chunk.get("retrieval_text"), chunk.get("content"))
+    )
+    whitespace_text = _whitespace_normalize(text)
+    compact_text = _alignment_normalize(text)
+    query = str(profile.get("lexical_query") or "")
+    core_terms = [str(term) for term in profile.get("core_terms") or []]
+    matched_terms = [
+        term for term in core_terms if _alignment_normalize(term) in compact_text
+    ]
+    return {
+        "exact_phrase_match": bool(
+            query and _whitespace_normalize(query) in whitespace_text
+        ),
+        "normalized_phrase_match": bool(
+            query and _alignment_normalize(query) in compact_text
+        ),
+        "matched_core_terms": matched_terms,
+        "missing_core_terms": [term for term in core_terms if term not in matched_terms],
+        "core_term_coverage_ratio": (
+            round(len(matched_terms) / len(core_terms), 6) if core_terms else 0.0
+        ),
+    }
+
+
+def _holding_structure(
+    chunk: Mapping[str, Any], profile: Mapping[str, Any]
+) -> dict[str, Any]:
+    projection_fields = dict(chunk.get("projection_fields") or {})
+    available_fields = set(projection_fields)
+    if not available_fields:
+        content = str(chunk.get("content") or chunk.get("retrieval_text") or "")
+        for canonical, patterns in _HOLDING_FIELD_PATTERNS.items():
+            if any(re.search(pattern, content) for pattern in patterns):
+                available_fields.add(canonical)
+    requested_fields = [
+        str(field) for field in profile.get("requested_holding_fields") or []
+    ]
+    matched_fields = [field for field in requested_fields if field in available_fields]
+    change_value = str(projection_fields.get("증감주식수") or "").strip()
+    change_direction = None
+    if change_value:
+        change_direction = "decrease" if change_value.startswith("-") else "increase"
+    return {
+        "chunk_type": chunk.get("chunk_type"),
+        "is_projection": chunk.get("chunk_type") == "table_projection",
+        "projection_type": chunk.get("projection_type"),
+        "projection_state": chunk.get("projection_state"),
+        "projection_fields": projection_fields,
+        "projection_field_refs": dict(chunk.get("projection_field_refs") or {}),
+        "source_table_ids": list(chunk.get("source_table_ids") or []),
+        "source_refs": list(chunk.get("source_refs") or []),
+        "reporter": (
+            projection_fields.get("보고자/보유자")
+            or chunk.get("reporter")
+        ),
+        "reference_date": projection_fields.get("기준일/보고일"),
+        "before_shares": projection_fields.get("직전 보유주식수"),
+        "change_shares": projection_fields.get("증감주식수"),
+        "after_shares": projection_fields.get("보유주식수"),
+        "holding_ratio": projection_fields.get("보유비율"),
+        "change_ratio": projection_fields.get("증감비율"),
+        "change_direction": change_direction,
+        "requested_fields": requested_fields,
+        "available_fields": sorted(available_fields),
+        "matched_fields": matched_fields,
+        "field_alignment_ratio": (
+            round(len(matched_fields) / len(requested_fields), 6)
+            if requested_fields
+            else 0.0
+        ),
+    }
+
+
+_HOLDING_FIELD_PATTERNS: dict[str, tuple[str, ...]] = {
+    "보고자/보유자": (r"보고자", r"보유자", r"성명\s*\(명칭\)"),
+    "기준일/보고일": (r"변동\s*일", r"기준\s*일", r"보고\s*일"),
+    "직전 보유주식수": (r"변동\s*전", r"직전.{0,8}주식\s*수"),
+    "증감주식수": (r"증감.{0,6}주식\s*수", r"변동\s*내역\s*/\s*증감"),
+    "보유주식수": (r"변동\s*후", r"보유\s*주식\s*수"),
+    "보유비율": (r"보유\s*비율", r"지분\s*율"),
+    "증감비율": (r"증감\s*비율",),
+}
+
+
+def _requested_holding_fields(query: str) -> list[str]:
+    fields: list[str] = []
+    patterns = {
+        "보고자/보유자": (r"국민연금", r"보고자", r"보유자"),
+        "기준일/보고일": (r"변동\s*일", r"기준\s*일", r"보고\s*일"),
+        "직전 보유주식수": (r"변동\s*전", r"직전.{0,8}주식\s*수"),
+        "증감주식수": (r"증감", r"증가", r"감소"),
+        "보유주식수": (
+            r"변동\s*후",
+            r"(?:증가|감소)\s*후\s*주식\s*수",
+            r"보유\s*주식\s*수",
+        ),
+        "보유비율": (r"비율", r"지분\s*율"),
+    }
+    for field, field_patterns in patterns.items():
+        if any(re.search(pattern, query) for pattern in field_patterns):
+            fields.append(field)
+    return fields
+
+
+def _strip_korean_particle(token: str) -> str:
+    if not re.fullmatch(r"[가-힣]+", token):
+        return token
+    for suffix in _KOREAN_PARTICLE_SUFFIXES:
+        if token.endswith(suffix) and len(token) > len(suffix) + 1:
+            return token[: -len(suffix)]
+    return token
+
+
+def _whitespace_normalize(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _alignment_normalize(value: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
+
+
+def _gold_chunk_summary(
+    chunk_id: str,
+    chunk: Mapping[str, Any],
+    *,
+    evidence_profile: Mapping[str, Any] | None = None,
+    task_type: str | None = None,
+) -> dict[str, Any]:
     section_path = chunk.get("section_path") or []
     if isinstance(section_path, str):
         section_path = [section_path]
     preview = " ".join(str(chunk.get("retrieval_text") or "").split())[:500]
-    return {
+    summary = {
         "chunk_id": chunk_id,
+        "doc_id": chunk.get("doc_id"),
         "chunk_type": chunk.get("chunk_type"),
         "section_path": list(section_path),
         "retrieval_text_preview": preview,
     }
+    if evidence_profile is not None:
+        summary["query_alignment"] = _query_alignment(evidence_profile, chunk)
+    if task_type == "holding_change":
+        summary["holding_structure"] = _holding_structure(
+            chunk, evidence_profile or {}
+        )
+    return summary
 
 
 def _section_path_diagnostic(
@@ -583,11 +804,135 @@ def _hybrid_summaries(
     results: Sequence[Any],
     chunks_by_id: Mapping[str, Mapping[str, Any]],
     question: Mapping[str, Any],
+    *,
+    evidence_profile: Mapping[str, Any] | None = None,
+    task_type: str | None = None,
 ) -> list[dict[str, Any]]:
     output = _retrieval_summaries(results, chunks_by_id, question)
     for item, result in zip(output, results[:10]):
-        item["hybrid"] = dict(result.metadata_match.get("hybrid") or {})
+        chunk = chunks_by_id.get(result.chunk_id, {})
+        hybrid = dict(result.metadata_match.get("hybrid") or {})
+        item["hybrid"] = hybrid
+        item["score_diagnostic"] = _score_diagnostic(
+            hybrid,
+            dict(result.metadata_match.get("score_components") or {}),
+        )
+        if evidence_profile is not None:
+            item["query_alignment"] = _query_alignment(evidence_profile, chunk)
+        if task_type == "holding_change":
+            item["holding_structure"] = _holding_structure(
+                chunk, evidence_profile or {}
+            )
     return output
+
+
+def _enrich_fusion_diagnostic(
+    diagnostic: Mapping[str, Any],
+    chunk: Mapping[str, Any],
+    evidence_profile: Mapping[str, Any],
+    *,
+    task_type: str | None,
+) -> dict[str, Any]:
+    enriched = dict(diagnostic)
+    section_path = chunk.get("section_path") or []
+    if isinstance(section_path, str):
+        section_path = [section_path]
+    enriched.update(
+        {
+            "chunk_type": chunk.get("chunk_type"),
+            "section_path": list(section_path),
+            "retrieval_text_preview": " ".join(
+                str(chunk.get("retrieval_text") or "").split()
+            )[:500],
+            "query_alignment": _query_alignment(evidence_profile, chunk),
+        }
+    )
+    if task_type == "holding_change":
+        enriched["holding_structure"] = _holding_structure(
+            chunk, evidence_profile
+        )
+    return enriched
+
+
+def _score_diagnostic(
+    hybrid: Mapping[str, Any], components: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "lexical_rank": hybrid.get("lexical_rank"),
+        "vector_rank": hybrid.get("vector_rank"),
+        "vector_score": hybrid.get("vector_score"),
+        "rrf_score": hybrid.get("rrf_score"),
+        "normalized_rrf_score": hybrid.get("normalized_rrf_score"),
+        "deterministic_rerank_score": hybrid.get("deterministic_rerank_score"),
+        "final_score": hybrid.get("final_score"),
+        "final_rank": hybrid.get("final_rank"),
+        "components": {
+            key: float(value)
+            for key, value in components.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        },
+    }
+
+
+def _score_component_comparison(
+    gold: Mapping[str, Any] | None,
+    hybrid_top10: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if gold is None:
+        return None
+    top_score_rows = [
+        dict(row.get("score_diagnostic") or {}) for row in hybrid_top10
+    ]
+    gold_components = {
+        key: float(value)
+        for key, value in dict(gold.get("score_components") or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    top_components = [dict(row.get("components") or {}) for row in top_score_rows]
+    component_names = sorted(
+        set(gold_components).union(
+            *(set(components) for components in top_components)
+        )
+    )
+    components = {
+        name: _gold_top10_numeric_comparison(
+            gold_components.get(name),
+            [row.get(name) for row in top_components],
+        )
+        for name in component_names
+    }
+    score_fields = (
+        "normalized_rrf_score",
+        "deterministic_rerank_score",
+        "final_score",
+    )
+    scores = {
+        field: _gold_top10_numeric_comparison(
+            gold.get(field),
+            [row.get(field) for row in top_score_rows],
+        )
+        for field in score_fields
+    }
+    return {"components": components, "scores": scores}
+
+
+def _gold_top10_numeric_comparison(
+    gold: Any, values: Sequence[Any]
+) -> dict[str, float | None]:
+    numeric = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    return {
+        "gold": (
+            float(gold)
+            if isinstance(gold, (int, float)) and not isinstance(gold, bool)
+            else None
+        ),
+        "top10_mean": round(sum(numeric) / len(numeric), 8) if numeric else None,
+        "top10_max": max(numeric) if numeric else None,
+    }
 
 
 def _gold_fusion_diagnostic(
@@ -823,6 +1168,8 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "vector_diagnostic_gold_rank",
         "diagnostic_source_top_n",
         "gold_fusion_diagnostic",
+        "query_evidence_diagnostic",
+        "score_component_comparison",
         "vector_status",
         "vector_error",
         "failure_class",
@@ -852,6 +1199,8 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "diagnostic_source_top_n",
         "section_path_diagnostic",
         "gold_fusion_diagnostic",
+        "query_evidence_diagnostic",
+        "score_component_comparison",
     }
     with path.open("w", encoding="utf-8-sig", newline="") as target:
         writer = csv.DictWriter(target, fieldnames=fields, extrasaction="ignore")
