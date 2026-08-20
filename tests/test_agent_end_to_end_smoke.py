@@ -201,7 +201,7 @@ class AgentEndToEndSmokeTests(unittest.TestCase):
 
         row = _run_full_pipeline(plan.raw_query, plan, execution)
 
-        self.assertEqual(row["task_decision"]["task_type"], "general_evidence")
+        self.assertEqual(row["task_decision"]["task_type"], "corporate_event")
         self.assertIsNone(row["task_decision"]["resolver_type"])
         self.assertEqual(
             row["execution_trace"],

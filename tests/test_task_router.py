@@ -42,7 +42,7 @@ class TaskRouterTests(unittest.TestCase):
     def test_general_evidence_and_unknown_are_distinct(self):
         general = route_task(
             "합병 공시 내용",
-            QueryPlan(query="합병 공시 내용", task_type="corporate_event"),
+            QueryPlan(query="합병 공시 내용", task_type="general_evidence"),
         )
         unknown = route_task("오늘 점심은 무엇인가")
 
@@ -51,6 +51,20 @@ class TaskRouterTests(unittest.TestCase):
         self.assertEqual(unknown.task_type, "unknown")
         self.assertIsNone(unknown.resolver_type)
         self.assertIn("no_task_signal", unknown.warnings)
+
+    def test_corporate_event_query_plan_task_is_preserved(self):
+        decision = route_task(
+            "삼성전자 유상증자 공시 내용",
+            QueryPlan(
+                query="삼성전자 유상증자 공시 내용",
+                task_type="corporate_event",
+                disclosure_route=("major",),
+            ),
+        )
+
+        self.assertEqual(decision.task_type, "corporate_event")
+        self.assertIsNone(decision.resolver_type)
+        self.assertIn("plan:task_type=corporate_event", decision.matched_signals)
 
     def test_router_source_contains_no_evaluation_id_special_cases(self):
         source = inspect.getsource(inspect.getmodule(route_task))

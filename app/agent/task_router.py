@@ -45,10 +45,12 @@ _PERIODIC_PLAN_TASKS = {
     "listing_history",
     "merger_history",
 }
-_GENERAL_PLAN_TASKS = {"general_evidence", "corporate_event", "exchange_event"}
+_PASSTHROUGH_PLAN_TASKS = {"corporate_event"}
+_GENERAL_PLAN_TASKS = {"general_evidence", "exchange_event"}
 _RESOLVERS = {
     "holding_event": "holding_event_resolver",
     "periodic_fact": "periodic_fact_resolver",
+    "corporate_event": None,
     "general_evidence": None,
     "unknown": None,
 }
@@ -111,6 +113,9 @@ def route_task(question: str, query_plan: Any | None = None) -> TaskDecision:
     elif plan_task == "disclosure_lookup" and "periodic" in routes:
         plan_decision = "periodic_fact"
         plan_signals.append("plan:route=periodic")
+    elif plan_task in _PASSTHROUGH_PLAN_TASKS:
+        plan_decision = plan_task
+        plan_signals.append(f"plan:task_type={plan_task}")
     elif plan_task in _GENERAL_PLAN_TASKS or (
         plan_task == "disclosure_lookup" and bool(plan)
     ):
