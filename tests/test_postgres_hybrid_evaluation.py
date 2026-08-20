@@ -143,6 +143,60 @@ class DeepVectorGoldBackend:
         return set(chunk_ids)
 
 
+class SameDocumentChunkIdentityBackend:
+    def __init__(self) -> None:
+        self.documents = [CandidateDocument("d1", {}, MetadataMatch())]
+        self.chunks = [
+            CandidateChunk(
+                "d1:ch_alpha",
+                "d1",
+                {
+                    "chunk_id": "payload-must-not-override-alpha",
+                    "section_id": "other",
+                    "section_path": ["III. 재무에 관한 사항"],
+                    "content": "unrelated alpha",
+                    "retrieval_text": "unrelated alpha",
+                    "chunk_type": "text",
+                },
+                MetadataMatch(),
+            ),
+            CandidateChunk(
+                "d1:ch_gold",
+                "d1",
+                {
+                    "chunk_id": "payload-must-not-override-gold",
+                    "section_id": "s1",
+                    "section_path": ["II. 사업의 내용", "1. 사업의 개요"],
+                    "content": "gold evidence rights offering",
+                    "retrieval_text": "gold evidence rights offering",
+                    "chunk_type": "text",
+                },
+                MetadataMatch(),
+            ),
+        ]
+
+    def get_candidate_documents(self, **_filters):
+        return self.documents
+
+    def get_candidate_chunks(self, _documents):
+        return self.chunks
+
+    def retrieve(self, _query, _candidates, *, top_k=None):
+        return [
+            RetrievalResult("d1:ch_alpha", "d1", 1.0, 1, {}),
+            RetrievalResult("d1:ch_gold", "d1", 0.9, 2, {}),
+        ][:top_k]
+
+    def vector_search(self, _embedding, _candidates, **kwargs):
+        return [
+            VectorRetrievalResult("d1:ch_gold", "d1", 0.95, 1),
+            VectorRetrievalResult("d1:ch_alpha", "d1", 0.90, 2),
+        ][: kwargs["top_k"]]
+
+    def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
+        return set(chunk_ids)
+
+
 class QueryPlanHybridEvaluatorTests(unittest.TestCase):
     def setUp(self):
         config = EmbeddingConfig(model="mock", version="v1", dimensions=8)
@@ -370,6 +424,66 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertEqual(structure["change_direction"], "decrease")
         self.assertEqual(structure["after_shares"], "2,202,050")
         self.assertEqual(structure["field_alignment_ratio"], 1.0)
+
+    def test_diagnostics_keep_unique_chunk_ids_separate_from_shared_doc_id(self):
+        config = EmbeddingConfig(model="mock", version="v1", dimensions=8)
+        backend = SameDocumentChunkIdentityBackend()
+        executor = HybridQueryExecutor(
+            backend,
+            DeterministicHashEmbedder(config),
+            config,
+        )
+        evaluator = QueryPlanHybridEvaluator(
+            StubUnderstanding(), executor, top_k=10
+        )
+
+        execution = executor.execute(
+            StubUnderstanding().understand("rights offering", top_k=10)
+        )
+        production_order = [result.chunk_id for result in execution.results]
+        report = evaluator.evaluate(self.question_sets)
+        row = report["questions"][0]
+
+        self.assertEqual(production_order, ["d1:ch_gold", "d1:ch_alpha"])
+        self.assertEqual(report["hybrid"]["overall"]["recall_at_1"], 1.0)
+        self.assertEqual(
+            row["gold"]["candidate_relevant_chunk_ids"], ["d1:ch_gold"]
+        )
+        self.assertEqual(
+            row["gold"]["relevant_chunks"][0]["chunk_id"], "d1:ch_gold"
+        )
+        self.assertEqual(row["gold"]["relevant_chunks"][0]["doc_id"], "d1")
+        self.assertEqual(row["gold_fusion_diagnostic"]["chunk_id"], "d1:ch_gold")
+        self.assertEqual(row["gold_fusion_diagnostic"]["doc_id"], "d1")
+        for field in (
+            "lexical_top10",
+            "vector_top10",
+            "vector_production_top_n",
+            "hybrid_top10",
+        ):
+            identities = {
+                (item["chunk_id"], item["doc_id"]) for item in row[field]
+            }
+            self.assertEqual(
+                identities,
+                {("d1:ch_alpha", "d1"), ("d1:ch_gold", "d1")},
+            )
+        self.assertEqual(
+            row["lexical_gold_matches"]["production"][0]["chunk_id"],
+            "d1:ch_gold",
+        )
+        self.assertEqual(
+            row["lexical_gold_matches"]["diagnostic"][0]["chunk_id"],
+            "d1:ch_gold",
+        )
+        self.assertEqual(
+            row["vector_gold_matches"]["production"][0]["chunk_id"],
+            "d1:ch_gold",
+        )
+        self.assertEqual(
+            row["vector_gold_matches"]["diagnostic"][0]["chunk_id"],
+            "d1:ch_gold",
+        )
 
     def test_rejects_top_k_below_recall_cutoff(self):
         with self.assertRaises(ValueError):
