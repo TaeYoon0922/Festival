@@ -88,6 +88,14 @@ class QueryPlanHybridEvaluator:
                     "compare legacy and bounded rankings"
                 ),
                 "rerank_mode": rerank_mode,
+                "rank_semantics": {
+                    "lexical_raw_gold_rank": "raw production lexical Top-N",
+                    "lexical_gold_rank": "deterministically reranked lexical Top-10",
+                    "vector_gold_rank": "raw production vector Top-N",
+                    "vector_top10_gold_rank": "raw vector Top-10 cutoff",
+                    "hybrid_gold_rank": "final hybrid Top-10",
+                    "vector_diagnostic_gold_rank": "opt-in diagnostic vector Top-N",
+                },
                 "gold_judgment": "app.parsing.final_validation._is_relevant",
                 "top_k": self.top_k,
             },
@@ -125,12 +133,17 @@ class QueryPlanHybridEvaluator:
         ]
 
         lexical_raw_rank = _gold_rank(
-            execution.lexical_results, chunks_by_id, question
+            execution.lexical_results, chunks_by_id, question, limit=None
         )
         lexical_rank = _gold_rank(
             execution.lexical_final_results, chunks_by_id, question
         )
-        vector_rank = _gold_rank(execution.vector_results, chunks_by_id, question)
+        vector_rank = _gold_rank(
+            execution.vector_results, chunks_by_id, question, limit=None
+        )
+        vector_top10_rank = _gold_rank(
+            execution.vector_results, chunks_by_id, question
+        )
         hybrid_rank = _gold_rank(execution.results, chunks_by_id, question)
         lexical_diagnostic_rank = _gold_rank(
             execution.diagnostic_lexical_results,
@@ -199,6 +212,7 @@ class QueryPlanHybridEvaluator:
             "lexical_raw_gold_rank": lexical_raw_rank,
             "lexical_gold_rank": lexical_rank,
             "vector_gold_rank": vector_rank,
+            "vector_top10_gold_rank": vector_top10_rank,
             "hybrid_gold_rank": hybrid_rank,
             "lexical_diagnostic_gold_rank": lexical_diagnostic_rank,
             "vector_diagnostic_gold_rank": vector_diagnostic_rank,
@@ -212,6 +226,26 @@ class QueryPlanHybridEvaluator:
             ),
             "vector_top10": _vector_summaries(
                 execution.vector_results, chunks_by_id, question
+            ),
+            "vector_production_top_n": _vector_summaries(
+                execution.vector_results,
+                chunks_by_id,
+                question,
+                limit=None,
+            ),
+            "vector_gold_matches": {
+                "production": _vector_gold_matches(
+                    execution.vector_results, chunks_by_id, question
+                ),
+                "diagnostic": _vector_gold_matches(
+                    execution.diagnostic_vector_results, chunks_by_id, question
+                ),
+            },
+            "vector_rank_diagnostic": _vector_rank_diagnostic(
+                execution.vector_results,
+                execution.diagnostic_vector_results,
+                chunks_by_id,
+                question,
             ),
             "hybrid_top10": _hybrid_summaries(
                 execution.results, chunks_by_id, question
@@ -385,9 +419,12 @@ def _vector_summaries(
     results: Sequence[Any],
     chunks_by_id: Mapping[str, Mapping[str, Any]],
     question: Mapping[str, Any],
+    *,
+    limit: int | None = 10,
 ) -> list[dict[str, Any]]:
     output = []
-    for result in results[:10]:
+    selected = results if limit is None else results[:limit]
+    for result in selected:
         chunk = chunks_by_id.get(result.chunk_id, {})
         section_path = chunk.get("section_path") or []
         if isinstance(section_path, str):
@@ -406,6 +443,65 @@ def _vector_summaries(
             }
         )
     return output
+
+
+def _vector_gold_matches(
+    results: Sequence[Any],
+    chunks_by_id: Mapping[str, Mapping[str, Any]],
+    question: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for result in results:
+        chunk = chunks_by_id.get(result.chunk_id, {})
+        if not _candidate_is_relevant(chunk, result.doc_id, question):
+            continue
+        section_path = chunk.get("section_path") or []
+        if isinstance(section_path, str):
+            section_path = [section_path]
+        matches.append(
+            {
+                "rank": int(result.rank),
+                "chunk_id": result.chunk_id,
+                "doc_id": result.doc_id,
+                "vector_score": float(result.vector_score),
+                "section_path": list(section_path),
+            }
+        )
+    return matches
+
+
+def _vector_rank_diagnostic(
+    production_results: Sequence[Any],
+    diagnostic_results: Sequence[Any],
+    chunks_by_id: Mapping[str, Mapping[str, Any]],
+    question: Mapping[str, Any],
+) -> dict[str, Any]:
+    production = _vector_gold_matches(
+        production_results, chunks_by_id, question
+    )
+    diagnostic = _vector_gold_matches(
+        diagnostic_results, chunks_by_id, question
+    )
+    diagnostic_rank = diagnostic[0]["rank"] if diagnostic else None
+    if production:
+        reason = "consistent_in_production_top_n"
+    elif diagnostic_rank is not None and diagnostic_rank > len(production_results):
+        reason = "outside_production_top_n"
+    elif diagnostic:
+        reason = "inconsistent_production_and_diagnostic_results"
+    else:
+        reason = "gold_not_returned_by_vector_search"
+    return {
+        "production_top_n": len(production_results),
+        "diagnostic_top_n": len(diagnostic_results),
+        "production_contains_gold": bool(production),
+        "production_raw_rank": production[0]["rank"] if production else None,
+        "diagnostic_rank": diagnostic_rank,
+        "reason": reason,
+        "same_query_filter_execution": True,
+        "section_boost_applied_to_raw_vector": False,
+        "rank_level": "chunk",
+    }
 
 
 def _gold_chunk_summary(chunk_id: str, chunk: Mapping[str, Any]) -> dict[str, Any]:
@@ -664,9 +760,12 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                 "",
                 f"- Question: {row['question']}",
                 f"- Gold: `{row['gold']['doc_id']}` / `{row['gold']['target_id']}`",
-                f"- Ranks (lexical/vector/hybrid): "
+                f"- Ranks (lexical-final/vector-raw/hybrid): "
                 f"{row['lexical_gold_rank']} / {row['vector_gold_rank']} / "
                 f"{row['hybrid_gold_rank']}",
+                f"- Vector Top10/diagnostic ranks: "
+                f"{row['vector_top10_gold_rank']} / "
+                f"{row['vector_diagnostic_gold_rank']}",
                 "- Gold fusion diagnostic: "
                 + json.dumps(
                     row["gold_fusion_diagnostic"],
@@ -718,6 +817,7 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "lexical_raw_gold_rank",
         "lexical_gold_rank",
         "vector_gold_rank",
+        "vector_top10_gold_rank",
         "hybrid_gold_rank",
         "lexical_diagnostic_gold_rank",
         "vector_diagnostic_gold_rank",
@@ -732,6 +832,9 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "gold",
         "lexical_top10",
         "vector_top10",
+        "vector_production_top_n",
+        "vector_gold_matches",
+        "vector_rank_diagnostic",
         "hybrid_top10",
         "section_path_diagnostic",
     ]
@@ -742,6 +845,9 @@ def _write_question_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "gold",
         "lexical_top10",
         "vector_top10",
+        "vector_production_top_n",
+        "vector_gold_matches",
+        "vector_rank_diagnostic",
         "hybrid_top10",
         "diagnostic_source_top_n",
         "section_path_diagnostic",
