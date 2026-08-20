@@ -114,6 +114,110 @@ class QueryUnderstandingTests(unittest.TestCase):
             "NAVER": {"네이버"},
         }
 
+    def test_business_product_intent_preserves_terms_and_adds_section_boosts(self) -> None:
+        understanding = QueryUnderstanding(
+            {
+                **self.aliases,
+                "레인보우로보틱스": {"레인보우로보틱스"},
+                "한미반도체": {"한미반도체"},
+            }
+        )
+        cases = (
+            ("삼성전자 DX 부문의 주요 제품은 무엇인가", "DX"),
+            ("레인보우로보틱스 HUBO 이족보행 로봇 사업 설명", "HUBO"),
+            ("한미반도체 TC BONDER 반도체 제조 장비 사업", "TC BONDER"),
+        )
+        for query, retained_term in cases:
+            with self.subTest(query=query):
+                plan = understanding.understand(query)
+                self.assertEqual(plan.evidence["periodic_intent"], "business_product")
+                self.assertIn(retained_term, plan.lexical_query)
+                self.assertEqual(plan.section_boosts["사업의 개요"], 1.0)
+                self.assertEqual(plan.section_boosts["주요 제품 및 서비스"], 1.0)
+                self.assertIsNone(plan.backend_filters()["section_path"])
+
+    def test_listing_history_intent_uses_company_overview_soft_boost(self) -> None:
+        plan = QueryUnderstanding({"시프트업": {"시프트업"}}).understand(
+            "시프트업 유가증권시장 상장일"
+        )
+        route = QueryRouter().route(plan)
+
+        self.assertEqual(plan.evidence["periodic_intent"], "listing_history")
+        self.assertEqual(plan.section_boosts, {"회사의 개요": 1.0})
+        self.assertEqual(route.section_boosts, plan.section_boosts)
+        self.assertNotIn("section_path", route.hard_routes)
+
+    def test_periodic_intent_section_relevance_is_soft_and_discriminative(self) -> None:
+        plan = QueryUnderstanding({"한미반도체": {"한미반도체"}}).understand(
+            "한미반도체 TC BONDER 반도체 제조 장비 사업"
+        )
+        router = QueryRouter()
+        route = router.route(plan)
+        relevant = router.deterministic_components(
+            route,
+            chunk={"section_path": ["II. 사업의 내용", "1. 사업의 개요"]},
+            metadata_match={},
+        )
+        unrelated = router.deterministic_components(
+            route,
+            chunk={"section_path": ["III. 재무에 관한 사항", "재무제표 주석"]},
+            metadata_match={},
+        )
+
+        self.assertEqual(relevant["section"], 1.0)
+        self.assertEqual(unrelated["section"], 0.0)
+        self.assertNotIn("section_path", route.hard_routes)
+
+    def test_merger_history_intent_keeps_existing_ambiguous_routes(self) -> None:
+        plan = QueryUnderstanding({"시프트업": {"시프트업"}}).understand(
+            "시프트업 테이블원 흡수합병 합병기일"
+        )
+
+        self.assertEqual(plan.evidence["periodic_intent"], "merger_history")
+        self.assertEqual(plan.task_type, "corporate_event")
+        self.assertEqual(plan.disclosure_route, ("major", "periodic"))
+        self.assertEqual(plan.section_boosts["회사의 연혁"], 1.0)
+
+    def test_periodic_intent_does_not_fire_for_unrelated_or_other_routes(self) -> None:
+        understanding = QueryUnderstanding(
+            {
+                "고려아연": {"고려아연"},
+                "파마리서치": {"파마리서치"},
+            }
+        )
+        unrelated = understanding.understand("고려아연 감사의견 조회")
+        holding = understanding.understand(
+            "파마리서치 국민연금 2022년 12월 5일 현재 보유 비율"
+        )
+        holding_overlap = understanding.understand(
+            "파마리서치 주요 제품 관련 국민연금 보유 비율"
+        )
+        major = understanding.understand("고려아연 유상증자 신주 수")
+        exchange = understanding.understand("고려아연 단일판매 공급계약 금액")
+        major_overlap = understanding.understand("고려아연 유상증자 장비 사업 설명")
+        exchange_overlap = understanding.understand(
+            "고려아연 장비 사업 단일판매 공급계약"
+        )
+
+        self.assertIsNone(unrelated.evidence["periodic_intent"])
+        self.assertEqual(unrelated.section_boosts, {})
+        self.assertEqual(holding.disclosure_route, ("holding",))
+        self.assertIsNone(holding.evidence["periodic_intent"])
+        self.assertEqual(holding_overlap.disclosure_route, ("holding",))
+        self.assertIsNone(holding_overlap.evidence["periodic_intent"])
+        self.assertEqual(holding_overlap.section_boosts["보유 주식"], 1.0)
+        self.assertNotIn("사업의 개요", holding_overlap.section_boosts)
+        self.assertEqual(major.disclosure_route, ("major",))
+        self.assertIsNone(major.evidence["periodic_intent"])
+        self.assertEqual(exchange.disclosure_route, ("exchange",))
+        self.assertIsNone(exchange.evidence["periodic_intent"])
+        self.assertEqual(major_overlap.disclosure_route, ("major",))
+        self.assertIsNone(major_overlap.evidence["periodic_intent"])
+        self.assertEqual(major_overlap.section_boosts, {})
+        self.assertEqual(exchange_overlap.disclosure_route, ("exchange",))
+        self.assertIsNone(exchange_overlap.evidence["periodic_intent"])
+        self.assertEqual(exchange_overlap.section_boosts, {})
+
     def test_fixed_korea_zinc_revenue_regression_plan(self) -> None:
         plan = QueryUnderstanding(self.aliases).understand(
             "고려아연 2024년 매출액"

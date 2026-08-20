@@ -165,6 +165,8 @@ class SingleSourcePreservationBackend:
         ]
         self.lexical_ids = lexical_ids
         self.vector_ids = vector_ids
+        self.lexical_top_k = None
+        self.vector_top_k = None
 
     def get_candidate_documents(self, **_filters):
         return self.documents
@@ -173,16 +175,20 @@ class SingleSourcePreservationBackend:
         return self.chunks
 
     def retrieve(self, _query, _candidates, *, top_k=None):
-        return [
+        self.lexical_top_k = top_k
+        results = [
             RetrievalResult(chunk_id, "d1", 1.0 / rank, rank, {})
             for rank, chunk_id in enumerate(self.lexical_ids, start=1)
         ]
+        return results[:top_k] if top_k is not None else results
 
     def vector_search(self, _embedding, _candidates, **_kwargs):
-        return [
+        self.vector_top_k = _kwargs.get("top_k")
+        results = [
             VectorRetrievalResult(chunk_id, "d1", 1.0 / rank, rank)
             for rank, chunk_id in enumerate(self.vector_ids, start=1)
         ]
+        return results[: self.vector_top_k] if self.vector_top_k is not None else results
 
     def existing_embedding_chunk_ids(self, chunk_ids, **_identity):
         return set(chunk_ids)
@@ -377,6 +383,33 @@ class HybridExecutorTests(unittest.TestCase):
     def test_rejects_unknown_rerank_mode(self) -> None:
         with self.assertRaises(ValueError):
             HybridRetrievalConfig(rerank_mode="experimental")
+
+    def test_diagnostic_top_n_does_not_expand_production_fusion_lists(self) -> None:
+        ids = [f"chunk-{rank}" for rank in range(1, 7)]
+        backend = SingleSourcePreservationBackend(ids, ids, ids[-1])
+        execution = HybridQueryExecutor(
+            backend,
+            DeterministicHashEmbedder(self.embedding_config),
+            self.embedding_config,
+            router=ControlledDeterministicRouter(),
+            config=HybridRetrievalConfig(
+                lexical_top_n=2,
+                vector_top_n=2,
+                diagnostic_top_n=5,
+            ),
+        ).execute(QueryPlan(query="diagnostic", top_k=10))
+
+        self.assertEqual(backend.lexical_top_k, 5)
+        self.assertEqual(backend.vector_top_k, 5)
+        self.assertEqual(len(execution.diagnostic_lexical_results), 5)
+        self.assertEqual(len(execution.diagnostic_vector_results), 5)
+        self.assertEqual(len(execution.lexical_results), 2)
+        self.assertEqual(len(execution.vector_results), 2)
+        self.assertEqual(len(execution.fused_candidates), 2)
+
+    def test_rejects_non_positive_diagnostic_top_n(self) -> None:
+        with self.assertRaises(ValueError):
+            HybridRetrievalConfig(diagnostic_top_n=0)
 
 
 if __name__ == "__main__":

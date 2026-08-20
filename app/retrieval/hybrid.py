@@ -52,6 +52,7 @@ class HybridRetrievalConfig:
     fallback_on_vector_error: bool = True
     rrf: RRFConfig = field(default_factory=RRFConfig)
     rerank_mode: str = "legacy"
+    diagnostic_top_n: int | None = None
 
     def __post_init__(self) -> None:
         if min(self.lexical_top_n, self.vector_top_n, self.final_top_k) <= 0:
@@ -60,6 +61,8 @@ class HybridRetrievalConfig:
             raise ValueError("hybrid rerank window size must be positive")
         if self.rerank_mode not in {"legacy", "bounded"}:
             raise ValueError("hybrid rerank mode must be 'legacy' or 'bounded'")
+        if self.diagnostic_top_n is not None and self.diagnostic_top_n <= 0:
+            raise ValueError("hybrid diagnostic top-n must be positive when set")
         if self.fusion_weight < 0.0 or self.deterministic_weight < 0.0:
             raise ValueError("hybrid final weights must be non-negative")
         total = self.fusion_weight + self.deterministic_weight
@@ -76,6 +79,7 @@ class HybridRetrievalConfig:
             "fusion_weight": self.fusion_weight,
             "deterministic_weight": self.deterministic_weight,
             "rerank_mode": self.rerank_mode,
+            "diagnostic_top_n": self.diagnostic_top_n,
             "rerank_window_size": self.rerank_window_size,
             "fallback_on_vector_error": self.fallback_on_vector_error,
             "diagnostic_weight_grid": [list(pair) for pair in DIAGNOSTIC_WEIGHT_GRID],
@@ -127,6 +131,8 @@ class HybridQueryExecution:
     vector_coverage: Mapping[str, Any] = field(default_factory=dict)
     embedded_candidate_ids: Sequence[str] = ()
     rerank_diagnostics: Sequence[Mapping[str, Any]] = ()
+    diagnostic_lexical_results: Sequence[RetrievalResult] = ()
+    diagnostic_vector_results: Sequence[VectorRetrievalResult] = ()
 
 
 def reciprocal_rank_fusion(
@@ -218,11 +224,16 @@ class HybridQueryExecutor:
         document_metadata = {document.doc_id: document.metadata for document in documents}
         embedded_candidate_ids, vector_coverage = self._vector_coverage(chunks)
 
-        lexical_results = self._lexical_retriever.retrieve(
+        lexical_request_limit = max(
+            self.config.lexical_top_n,
+            self.config.diagnostic_top_n or self.config.lexical_top_n,
+        )
+        diagnostic_lexical_results = self._lexical_retriever.retrieve(
             plan.lexical_query,
             chunks,
-            top_k=self.config.lexical_top_n,
+            top_k=lexical_request_limit,
         )
+        lexical_results = list(diagnostic_lexical_results[: self.config.lexical_top_n])
         lexical_final = self.router.rerank(
             lexical_results,
             route,
@@ -232,6 +243,7 @@ class HybridQueryExecutor:
         )
 
         vector_results: list[VectorRetrievalResult] = []
+        diagnostic_vector_results: Sequence[VectorRetrievalResult] = ()
         vector_status = "ok"
         vector_error: str | None = None
         if vector_coverage.get("available") and not vector_coverage.get(
@@ -241,12 +253,19 @@ class HybridQueryExecutor:
         else:
             try:
                 query_embedding = self._embedder.embed_query(plan.lexical_query)
-                vector_results = self._vector_retriever.vector_search(
+                vector_request_limit = max(
+                    self.config.vector_top_n,
+                    self.config.diagnostic_top_n or self.config.vector_top_n,
+                )
+                diagnostic_vector_results = self._vector_retriever.vector_search(
                     query_embedding,
                     chunks,
                     embedding_model=self.embedding_config.model,
                     embedding_version=self.embedding_config.version,
-                    top_k=self.config.vector_top_n,
+                    top_k=vector_request_limit,
+                )
+                vector_results = list(
+                    diagnostic_vector_results[: self.config.vector_top_n]
                 )
                 if not vector_results:
                     vector_status = "empty"
@@ -298,6 +317,8 @@ class HybridQueryExecutor:
             vector_coverage=vector_coverage,
             embedded_candidate_ids=embedded_candidate_ids,
             rerank_diagnostics=rerank_diagnostics,
+            diagnostic_lexical_results=diagnostic_lexical_results,
+            diagnostic_vector_results=diagnostic_vector_results,
         )
 
     def _vector_coverage(

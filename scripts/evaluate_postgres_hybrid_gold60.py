@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.parsing.final_validation import GOLD_QUESTIONS, HOLDING_ADDITIONAL_QUESTIONS
 from app.reasoning.hybrid_evaluation import (
     QueryPlanHybridEvaluator,
+    compare_hybrid_evaluation_reports,
     write_hybrid_evaluation_report,
 )
 from app.reasoning.query_understanding import QueryUnderstanding
@@ -36,6 +37,12 @@ def main() -> None:
         type=Path,
         default=PROJECT_ROOT / "data" / "processed" / "postgres_hybrid_gold60",
     )
+    parser.add_argument(
+        "--baseline-report",
+        type=Path,
+        default=None,
+        help="Optional prior postgres_hybrid_gold60.json for generic before/after comparison.",
+    )
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--lexical-top-n", type=int, default=50)
     parser.add_argument("--vector-top-n", type=int, default=50)
@@ -51,6 +58,15 @@ def main() -> None:
         help="Final ranking mode; bounded remains an opt-in evaluation experiment.",
     )
     parser.add_argument("--rerank-window-size", type=int, default=2)
+    parser.add_argument(
+        "--diagnostic-top-n",
+        type=int,
+        default=None,
+        help=(
+            "Optionally retrieve wider lexical/vector source lists for diagnostics; "
+            "production fusion limits remain unchanged."
+        ),
+    )
     args = parser.parse_args()
 
     embedding_config = EmbeddingConfig.from_env()
@@ -66,6 +82,7 @@ def main() -> None:
         deterministic_weight=args.deterministic_weight,
         rerank_mode=args.rerank_mode,
         rerank_window_size=args.rerank_window_size,
+        diagnostic_top_n=args.diagnostic_top_n,
         rrf=RRFConfig(
             k=args.rrf_k,
             lexical_weight=args.lexical_weight,
@@ -94,6 +111,11 @@ def main() -> None:
         print(f"[{index:02d}/{total:02d}] {question_id}", flush=True)
 
     report = evaluator.evaluate(question_sets, progress=progress)
+    if args.baseline_report is not None:
+        baseline_report = json.loads(args.baseline_report.read_text(encoding="utf-8"))
+        report["baseline_comparison"] = compare_hybrid_evaluation_reports(
+            baseline_report, report
+        )
     write_hybrid_evaluation_report(report, args.output_dir)
     print(
         json.dumps(
@@ -104,6 +126,7 @@ def main() -> None:
                 "failure_counts": report["failure_counts"],
                 "vector_status_counts": report["vector_status_counts"],
                 "vector_coverage": report["vector_coverage"],
+                "baseline_comparison": report.get("baseline_comparison"),
                 "output_dir": str(args.output_dir),
             },
             ensure_ascii=False,

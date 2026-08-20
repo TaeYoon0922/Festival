@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.reasoning.hybrid_evaluation import (
     QueryPlanHybridEvaluator,
+    compare_hybrid_evaluation_reports,
     write_hybrid_evaluation_report,
 )
 from app.reasoning.query_plan import QueryPlan
@@ -38,7 +39,12 @@ class EvaluationHybridBackend:
             CandidateChunk(
                 "noise",
                 "d1",
-                {"chunk_id": "noise", "section_id": "other", "content": "noise"},
+                {
+                    "chunk_id": "noise",
+                    "section_id": "other",
+                    "section_path": ["III. 재무에 관한 사항"],
+                    "content": "noise",
+                },
                 MetadataMatch(),
             ),
             CandidateChunk(
@@ -47,6 +53,8 @@ class EvaluationHybridBackend:
                 {
                     "chunk_id": "gold",
                     "section_id": "s1",
+                    "section_path": ["II. 사업의 내용", "1. 사업의 개요"],
+                    "chunk_type": "text",
                     "content": "gold evidence rights offering",
                     "retrieval_text": "gold evidence rights offering",
                 },
@@ -130,6 +138,27 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertIn("final_rank", diagnostic)
         self.assertEqual(diagnostic["rerank_mode"], "legacy")
         self.assertEqual(len(diagnostic["weight_grid"]), 4)
+        self.assertEqual(row["lexical_diagnostic_gold_rank"], None)
+        self.assertEqual(row["vector_diagnostic_gold_rank"], 1)
+        gold_chunk = row["gold"]["relevant_chunks"][0]
+        self.assertEqual(gold_chunk["chunk_id"], "gold")
+        self.assertEqual(gold_chunk["chunk_type"], "text")
+        self.assertEqual(
+            gold_chunk["section_path"], ["II. 사업의 내용", "1. 사업의 개요"]
+        )
+        self.assertLessEqual(len(gold_chunk["retrieval_text_preview"]), 500)
+        section_debug = row["section_path_diagnostic"]
+        self.assertEqual(
+            section_debug["gold_section_paths"],
+            ["II. 사업의 내용 > 1. 사업의 개요"],
+        )
+        self.assertEqual(
+            section_debug["vector_top10"][0]["section_path"],
+            "II. 사업의 내용 > 1. 사업의 개요",
+        )
+        self.assertTrue(
+            section_debug["dominant_gap"]["vector_top10"]["matches_gold_section"]
+        )
 
     def test_writes_json_markdown_and_csv(self):
         report = self.evaluator.evaluate(self.question_sets)
@@ -149,6 +178,20 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
             self.assertIn(
                 "Overall comparison", markdown_path.read_text(encoding="utf-8")
             )
+
+    def test_compares_baseline_metrics_and_question_ranks_generically(self):
+        current = self.evaluator.evaluate(self.question_sets)
+        baseline = json.loads(json.dumps(current))
+        baseline["hybrid"]["overall"]["recall_at_1"] = 0.0
+        baseline["questions"][0]["hybrid_gold_rank"] = None
+
+        comparison = compare_hybrid_evaluation_reports(baseline, current)
+
+        self.assertEqual(comparison["metrics"]["overall"]["delta"]["recall_at_1"], 1.0)
+        self.assertEqual(comparison["recovered"], ["M01"])
+        self.assertEqual(comparison["new_failures"], [])
+        rank_change = comparison["question_rank_changes"][0]
+        self.assertEqual(rank_change["hybrid_rank"], {"before": None, "after": 1})
 
     def test_rejects_top_k_below_recall_cutoff(self):
         with self.assertRaises(ValueError):
