@@ -108,6 +108,13 @@ def select_periodic_evidence(
                     (score, source.retrieval_rank, source.chunk_id, fact, source)
                 )
 
+    annual_report_preferred = False
+    if _is_fiscal_year_query(plan):
+        annual_candidates = [row for row in candidates if _is_annual_source(row[4])]
+        if annual_candidates:
+            candidates = annual_candidates
+            annual_report_preferred = True
+
     candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
     if candidates:
         seed = candidates[0][4]
@@ -152,6 +159,8 @@ def select_periodic_evidence(
         warnings.append("irrelevant_periodic_evidence_excluded")
     if len(candidates) > max_evidence:
         warnings.append(f"periodic_evidence_limited:max={max_evidence}")
+    if annual_report_preferred:
+        warnings.append("annual_report_source_preferred")
     if explicit_period and not selected_facts:
         warnings.append("explicit_period_evidence_unmatched")
 
@@ -259,6 +268,38 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "phrases": phrases,
         "core_terms": tuple(dict.fromkeys(core_terms)),
+    }
+
+
+def _is_fiscal_year_query(plan: Mapping[str, Any]) -> bool:
+    period = plan.get("period")
+    period = dict(period) if isinstance(period, Mapping) else {}
+    year = period.get("year")
+    quarter = period.get("quarter")
+    period_type = _normalize(period.get("period_type"))
+    return bool(
+        year is not None
+        and quarter is None
+        and period_type in {"", "fiscalyear", "year", "annual"}
+    )
+
+
+def _is_annual_source(source: PeriodicFactSource) -> bool:
+    report_name = _normalize(source.report_name)
+    if report_name:
+        if "분기보고서" in report_name or "반기보고서" in report_name:
+            return False
+        if "사업보고서" in report_name:
+            return True
+    period_type = _normalize(
+        source.reporting_period.get("period_type")
+        or source.reporting_period.get("basis_period")
+    )
+    quarter = source.reporting_period.get("quarter")
+    return period_type in {"annual", "year", "fiscalyear"} and quarter in {
+        None,
+        4,
+        "4",
     }
 
 
