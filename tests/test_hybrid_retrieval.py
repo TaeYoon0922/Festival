@@ -293,6 +293,7 @@ class HybridExecutorTests(unittest.TestCase):
             DeterministicHashEmbedder(self.embedding_config),
             self.embedding_config,
             router=ControlledDeterministicRouter(),
+            config=HybridRetrievalConfig(rerank_mode="bounded"),
         ).execute(QueryPlan(query="listing date", top_k=10))
 
         diagnostic = next(
@@ -305,6 +306,8 @@ class HybridExecutorTests(unittest.TestCase):
         self.assertGreater(diagnostic["legacy_final_rank"], 10)
         self.assertEqual(diagnostic["preservation_rank"], 9)
         self.assertLessEqual(diagnostic["final_rank"], 10)
+        self.assertEqual(diagnostic["final_rank"], diagnostic["bounded_final_rank"])
+        self.assertEqual(diagnostic["rerank_mode"], "bounded")
         self.assertEqual(len(diagnostic["weight_grid"]), 4)
         self.assertIn("gold-vector", [result.chunk_id for result in execution.results])
 
@@ -324,6 +327,7 @@ class HybridExecutorTests(unittest.TestCase):
             DeterministicHashEmbedder(self.embedding_config),
             self.embedding_config,
             router=ControlledDeterministicRouter(),
+            config=HybridRetrievalConfig(rerank_mode="bounded"),
         ).execute(QueryPlan(query="merger effective date", top_k=10))
 
         diagnostic = next(
@@ -337,6 +341,42 @@ class HybridExecutorTests(unittest.TestCase):
         self.assertEqual(diagnostic["preservation_rank"], 6)
         self.assertLessEqual(diagnostic["final_rank"], 10)
         self.assertIn("gold-lexical", [result.chunk_id for result in execution.results])
+
+    def test_legacy_is_default_and_bounded_rank_remains_diagnostic(self) -> None:
+        common = [f"common-{rank:02d}" for rank in range(1, 9)]
+        lexical_ids = [*common, *[f"lex-{rank:02d}" for rank in range(10, 22)]]
+        vector_ids = [
+            *common,
+            "gold-vector",
+            *[f"vec-{rank:02d}" for rank in range(10, 22)],
+        ]
+        backend = SingleSourcePreservationBackend(
+            lexical_ids, vector_ids, "gold-vector"
+        )
+        execution = HybridQueryExecutor(
+            backend,
+            DeterministicHashEmbedder(self.embedding_config),
+            self.embedding_config,
+            router=ControlledDeterministicRouter(),
+        ).execute(QueryPlan(query="listing date", top_k=10))
+
+        diagnostic = next(
+            item
+            for item in execution.rerank_diagnostics
+            if item["chunk_id"] == "gold-vector"
+        )
+        self.assertEqual(execution.routing["hybrid"]["config"]["rerank_mode"], "legacy")
+        self.assertEqual(diagnostic["rerank_mode"], "legacy")
+        self.assertEqual(diagnostic["final_rank"], diagnostic["legacy_final_rank"])
+        self.assertGreater(diagnostic["final_rank"], 10)
+        self.assertLessEqual(diagnostic["bounded_final_rank"], 10)
+        self.assertNotIn(
+            "gold-vector", [result.chunk_id for result in execution.results]
+        )
+
+    def test_rejects_unknown_rerank_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            HybridRetrievalConfig(rerank_mode="experimental")
 
 
 if __name__ == "__main__":

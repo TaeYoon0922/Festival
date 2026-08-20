@@ -51,12 +51,15 @@ class HybridRetrievalConfig:
     rerank_window_size: int = 2
     fallback_on_vector_error: bool = True
     rrf: RRFConfig = field(default_factory=RRFConfig)
+    rerank_mode: str = "legacy"
 
     def __post_init__(self) -> None:
         if min(self.lexical_top_n, self.vector_top_n, self.final_top_k) <= 0:
             raise ValueError("hybrid retrieval limits must be positive")
         if self.rerank_window_size <= 0:
             raise ValueError("hybrid rerank window size must be positive")
+        if self.rerank_mode not in {"legacy", "bounded"}:
+            raise ValueError("hybrid rerank mode must be 'legacy' or 'bounded'")
         if self.fusion_weight < 0.0 or self.deterministic_weight < 0.0:
             raise ValueError("hybrid final weights must be non-negative")
         total = self.fusion_weight + self.deterministic_weight
@@ -72,6 +75,7 @@ class HybridRetrievalConfig:
             "final_top_k": self.final_top_k,
             "fusion_weight": self.fusion_weight,
             "deterministic_weight": self.deterministic_weight,
+            "rerank_mode": self.rerank_mode,
             "rerank_window_size": self.rerank_window_size,
             "fallback_on_vector_error": self.fallback_on_vector_error,
             "diagnostic_weight_grid": [list(pair) for pair in DIAGNOSTIC_WEIGHT_GRID],
@@ -363,7 +367,7 @@ class HybridQueryExecutor:
             normalized_rrf = candidate.rrf_score / max_rrf if max_rrf > 0.0 else 0.0
             source_rank_score = _best_source_rank_score(candidate, self.config.rrf.k)
             retrieval_score = max(normalized_rrf, source_rank_score)
-            final_score = (
+            bounded_final_score = (
                 self.config.fusion_weight * retrieval_score
                 + self.config.deterministic_weight * deterministic_score
             )
@@ -378,7 +382,7 @@ class HybridQueryExecutor:
                     "source_rank_score": source_rank_score,
                     "retrieval_score": retrieval_score,
                     "deterministic_score": deterministic_score,
-                    "final_score": final_score,
+                    "bounded_final_score": bounded_final_score,
                     "legacy_final_score": legacy_final_score,
                     "components": components,
                 }
@@ -410,7 +414,7 @@ class HybridQueryExecutor:
         unbounded_order = sorted(
             scored,
             key=lambda row: (
-                -float(row["final_score"]),
+                -float(row["bounded_final_score"]),
                 int(row["preservation_rank"]),
                 row["candidate"].chunk_id,
             ),
@@ -418,13 +422,24 @@ class HybridQueryExecutor:
         for rank, row in enumerate(unbounded_order, start=1):
             row["unbounded_final_rank"] = rank
 
-        final_order = _windowed_order(
+        bounded_order = _windowed_order(
             retrieval_order,
-            score_key="final_score",
+            score_key="bounded_final_score",
             window_size=self.config.rerank_window_size,
         )
+        for rank, row in enumerate(bounded_order, start=1):
+            row["bounded_final_rank"] = rank
+
+        if self.config.rerank_mode == "legacy":
+            final_order = legacy_order
+            selected_score_key = "legacy_final_score"
+        else:
+            final_order = bounded_order
+            selected_score_key = "bounded_final_score"
         for rank, row in enumerate(final_order, start=1):
             row["final_rank"] = rank
+            row["final_score"] = row[selected_score_key]
+            row["rerank_mode"] = self.config.rerank_mode
         _attach_weight_grid(scored, retrieval_order, self.config.rerank_window_size)
 
         output: list[RetrievalResult] = []
@@ -442,9 +457,12 @@ class HybridQueryExecutor:
                 "deterministic_rerank_score": row["deterministic_score"],
                 "legacy_final_score": row["legacy_final_score"],
                 "legacy_final_rank": row["legacy_final_rank"],
+                "bounded_final_score": row["bounded_final_score"],
+                "bounded_final_rank": row["bounded_final_rank"],
                 "unbounded_final_rank": row["unbounded_final_rank"],
                 "final_score": row["final_score"],
                 "final_rank": final_rank,
+                "rerank_mode": self.config.rerank_mode,
                 "fusion_weight": self.config.fusion_weight,
                 "deterministic_weight": self.config.deterministic_weight,
                 "rerank_window_size": self.config.rerank_window_size,
@@ -556,9 +574,12 @@ def _rerank_diagnostic(row: Mapping[str, Any]) -> dict[str, Any]:
         "deterministic_rerank_score": row["deterministic_score"],
         "legacy_final_score": row["legacy_final_score"],
         "legacy_final_rank": row["legacy_final_rank"],
+        "bounded_final_score": row["bounded_final_score"],
+        "bounded_final_rank": row["bounded_final_rank"],
         "unbounded_final_rank": row["unbounded_final_rank"],
         "final_score": row["final_score"],
         "final_rank": row["final_rank"],
+        "rerank_mode": row["rerank_mode"],
         "score_components": dict(row["components"]),
         "weight_grid": list(row["weight_grid"]),
     }

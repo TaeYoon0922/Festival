@@ -76,14 +76,18 @@ class QueryPlanHybridEvaluator:
                 else None
             ),
         }
+        rerank_mode = getattr(
+            getattr(self.executor, "config", None), "rerank_mode", "legacy"
+        )
         return {
             "method": {
                 "flow": (
                     "Question -> QueryUnderstanding -> QueryPlan/Router -> shared "
                     "metadata candidate scope -> lexical Top-N + vector Top-N -> RRF "
-                    "-> source-rank preservation -> bounded deterministic rerank "
-                    "-> Top-10"
+                    f"-> {rerank_mode} deterministic rerank -> Top-10; diagnostics "
+                    "compare legacy and bounded rankings"
                 ),
+                "rerank_mode": rerank_mode,
                 "gold_judgment": "app.parsing.final_validation._is_relevant",
                 "top_k": self.top_k,
             },

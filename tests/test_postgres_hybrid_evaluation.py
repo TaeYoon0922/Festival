@@ -106,6 +106,7 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
     def test_compares_same_run_lexical_and_hybrid_and_records_debug(self):
         report = self.evaluator.evaluate(self.question_sets)
 
+        self.assertEqual(report["method"]["rerank_mode"], "legacy")
         self.assertEqual(report["hybrid"]["overall"]["recall_at_1"], 1.0)
         self.assertEqual(report["lexical_only"]["overall"]["recall_at_10"], 0.0)
         self.assertEqual(report["improvement"]["overall"]["recall_at_1"], 1.0)
@@ -125,7 +126,9 @@ class QueryPlanHybridEvaluatorTests(unittest.TestCase):
         self.assertIn("normalized_rrf_score", diagnostic)
         self.assertIn("deterministic_rerank_score", diagnostic)
         self.assertIn("legacy_final_rank", diagnostic)
+        self.assertIn("bounded_final_rank", diagnostic)
         self.assertIn("final_rank", diagnostic)
+        self.assertEqual(diagnostic["rerank_mode"], "legacy")
         self.assertEqual(len(diagnostic["weight_grid"]), 4)
 
     def test_writes_json_markdown_and_csv(self):
