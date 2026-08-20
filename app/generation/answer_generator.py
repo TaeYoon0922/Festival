@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -88,6 +89,13 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
         sections, render_warnings, factual_supported = _periodic_sections(
             draft, registry
         )
+        sections, scope_warnings, scope_valid = validate_periodic_citation_scope(
+            draft,
+            sections,
+            registry.citations,
+        )
+        render_warnings.extend(scope_warnings)
+        factual_supported = factual_supported and scope_valid
     else:
         sections, render_warnings, factual_supported = _general_sections(
             draft, registry
@@ -414,6 +422,110 @@ def _periodic_alternative_lines(
                 metadata.append(f"대안 {index} 보고 기간: {label}")
         used_ids.extend(ids)
     return lines, metadata, used_ids, supported
+
+
+def validate_periodic_citation_scope(
+    draft: AnswerDraft,
+    sections: Sequence[GeneratedSection],
+    citations: Sequence[GeneratedCitation],
+) -> tuple[list[GeneratedSection], list[str], bool]:
+    """Remove periodic claims not copied from their selected cited sources."""
+
+    source_text_by_chunk = _selected_periodic_source_text(draft)
+    chunk_by_citation = {
+        citation.citation_id: citation.chunk_id for citation in citations
+    }
+    output: list[GeneratedSection] = []
+    warnings: list[str] = []
+    valid = True
+    for section_index, section in enumerate(sections, start=1):
+        if not section.citations:
+            output.append(section)
+            continue
+        kept_lines = []
+        for line_index, line in enumerate(section.content.splitlines(), start=1):
+            payload = _periodic_claim_payload(line)
+            if payload is None:
+                kept_lines.append(line)
+                continue
+            inline_ids = tuple(
+                f"[{value}]" for value in re.findall(r"\[(\d+)\]", line)
+            )
+            citation_ids = inline_ids or section.citations
+            allowed_text = "\n".join(
+                source_text_by_chunk.get(chunk_by_citation.get(citation_id, ""), "")
+                for citation_id in citation_ids
+            )
+            if _claim_in_selected_source(payload, allowed_text):
+                kept_lines.append(line)
+                continue
+            valid = False
+            warnings.append(
+                "unsupported_periodic_claim_removed:"
+                f"section={section_index}:line={line_index}"
+            )
+        output.append(
+            GeneratedSection(
+                title=section.title,
+                content="\n".join(kept_lines),
+                citations=section.citations,
+                metadata=section.metadata,
+            )
+        )
+    return output, list(dict.fromkeys(warnings)), valid
+
+
+def _selected_periodic_source_text(draft: AnswerDraft) -> dict[str, str]:
+    selected = set(draft.evidence_references)
+    output: dict[str, list[str]] = {}
+    for section in draft.answer_sections:
+        fact = section.content.get("fact")
+        if not isinstance(fact, Mapping):
+            continue
+        sources = _mapping_list(fact.get("sources"))
+        for source in sources:
+            chunk_ids = _string_list(source.get("chunk_id"))
+            fact_text = _text(source.get("fact_text"))
+            for chunk_id in chunk_ids:
+                if chunk_id in selected and fact_text:
+                    output.setdefault(chunk_id, []).append(fact_text)
+        if not sources:
+            fact_text = _text(fact.get("fact_text"))
+            if fact_text:
+                for chunk_id in section.supporting_evidence_ids:
+                    if chunk_id in selected:
+                        output.setdefault(chunk_id, []).append(fact_text)
+    return {
+        chunk_id: "\n".join(dict.fromkeys(values))
+        for chunk_id, values in output.items()
+    }
+
+
+def _periodic_claim_payload(line: str) -> str | None:
+    text = re.sub(r"\[(\d+)\]", "", str(line)).strip()
+    text = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", text).strip()
+    if not text or text.endswith(":"):
+        return None
+    if any(
+        marker in text
+        for marker in (
+            "확인된 사업 또는 공시 내용",
+            "provenance가 없어",
+            "확인되지 않은 정보가 있습니다",
+        )
+    ):
+        return None
+    return re.sub(r"^(?:내용|대안\s+\d+):\s*", "", text).strip() or None
+
+
+def _claim_in_selected_source(claim: str, source_text: str) -> bool:
+    normalized_claim = re.sub(
+        r"[^0-9a-z가-힣]+", "", str(claim).casefold()
+    )
+    normalized_source = re.sub(
+        r"[^0-9a-z가-힣]+", "", str(source_text).casefold()
+    )
+    return bool(normalized_claim and normalized_claim in normalized_source)
 
 
 def _general_sections(

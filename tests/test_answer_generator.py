@@ -6,6 +6,7 @@ from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
     generate_answer,
+    validate_periodic_citation_scope,
 )
 from app.reasoning.answer_composer import (
     AnswerDraft,
@@ -144,6 +145,29 @@ class AnswerGeneratorTests(unittest.TestCase):
         ]
         self.assertTrue(factual_lines)
         self.assertTrue(all("[" in line for line in factual_lines))
+
+    def test_periodic_citation_validator_removes_claim_outside_selected_source(self):
+        draft = _repeated_periodic_draft()
+        generated = generate_answer(draft)
+        unsafe_section = replace(
+            generated.sections[0],
+            content=(
+                generated.sections[0].content
+                + "\n내용: 선택된 근거에 없는 매출액 999억원 [1]"
+            ),
+        )
+
+        sections, warnings, valid = validate_periodic_citation_scope(
+            draft,
+            (unsafe_section,),
+            generated.citations,
+        )
+
+        self.assertFalse(valid)
+        self.assertNotIn("999억원", sections[0].content)
+        self.assertTrue(
+            any(value.startswith("unsupported_periodic_claim_removed") for value in warnings)
+        )
 
     def test_periodic_conflict_alternatives_are_preserved(self):
         first = _periodic_item(
