@@ -1,3 +1,4 @@
+import json
 import math
 import unittest
 from io import BytesIO
@@ -10,6 +11,7 @@ from app.retrieval.embeddings import (
     HttpEmbeddingSettings,
     OpenAICompatibleEmbeddingProvider,
     UrllibJsonTransport,
+    _split_embedding_text,
     chunk_embedding_text,
     create_embedding_provider,
 )
@@ -185,6 +187,107 @@ class EmbeddingTests(unittest.TestCase):
             ["first", "second"],
         )
 
+    def test_clova_40003_embeds_all_segments_and_mean_pools(self) -> None:
+        class LongTextTransport:
+            def __init__(self):
+                self.calls = []
+
+            def post_json(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                if len(self.calls) == 1:
+                    raise EmbeddingHttpError(
+                        "embedding endpoint returned HTTP 400 (error code 40003)",
+                        status_code=400,
+                        transient=False,
+                        response_error_code="40003",
+                        response_error_message="Context length exceeded",
+                    )
+                vector = [0.0] * 1024
+                vector[len(self.calls) - 2] = 1.0
+                return {"data": [{"index": 0, "embedding": vector}]}
+
+        text = "aaaa\n\nbbbb"
+        transport = LongTextTransport()
+        config = EmbeddingConfig(
+            provider="clova_studio",
+            model="bge-m3",
+            version="clova-bge-m3-2026-08-20",
+            dimensions=1024,
+            batch_size=1,
+        )
+        provider = create_embedding_provider(
+            config,
+            environment={
+                "FESTIVAL_EMBEDDING_API_URL": "https://embedding.invalid/v1",
+                "FESTIVAL_EMBEDDING_API_KEY": "secret",
+                "FESTIVAL_EMBEDDING_LONG_TEXT_SEGMENT_CHARS": "8",
+            },
+            transport=transport,
+        )
+
+        result = provider.embed_query(text)
+
+        segment_inputs = [call[1]["payload"]["input"] for call in transport.calls[1:]]
+        self.assertEqual(len(transport.calls), 3)
+        self.assertEqual("".join(segment_inputs), text)
+        self.assertEqual(segment_inputs, ["aaaa\n\n", "bbbb"])
+        self.assertTrue(all(isinstance(value, str) for value in segment_inputs))
+        self.assertAlmostEqual(result[0], 1 / math.sqrt(2))
+        self.assertAlmostEqual(result[1], 1 / math.sqrt(2))
+        self.assertAlmostEqual(math.sqrt(sum(value * value for value in result)), 1.0)
+        self.assertEqual(len(result), 1024)
+        self.assertEqual(
+            provider.embedding_statistics(),
+            {"long_text_fallbacks": 1, "long_text_segments": 2},
+        )
+
+    def test_long_single_paragraph_is_split_without_truncation(self) -> None:
+        text = "가" * 31_173
+        segments = _split_embedding_text(text, max_chars=1800)
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(all(0 < len(segment) <= 1800 for segment in segments))
+        self.assertEqual("".join(segments), text)
+
+    def test_clova_non_40003_http_400_does_not_fallback(self) -> None:
+        class InvalidRequestTransport:
+            def __init__(self):
+                self.calls = []
+
+            def post_json(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                raise EmbeddingHttpError(
+                    "embedding endpoint returned HTTP 400 (error code 40001)",
+                    status_code=400,
+                    transient=False,
+                    response_error_code="40001",
+                )
+
+        transport = InvalidRequestTransport()
+        provider = create_embedding_provider(
+            EmbeddingConfig(
+                provider="clova_studio",
+                model="bge-m3",
+                version="clova-bge-m3-2026-08-20",
+                dimensions=1024,
+                batch_size=1,
+            ),
+            environment={
+                "FESTIVAL_EMBEDDING_API_URL": "https://embedding.invalid/v1",
+                "FESTIVAL_EMBEDDING_API_KEY": "secret",
+                "FESTIVAL_EMBEDDING_LONG_TEXT_SEGMENT_CHARS": "8",
+            },
+            transport=transport,
+        )
+
+        with self.assertRaises(EmbeddingHttpError):
+            provider.embed_query("aaaa\n\nbbbb")
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(
+            provider.embedding_statistics(),
+            {"long_text_fallbacks": 0, "long_text_segments": 0},
+        )
+
     def test_clova_hostname_does_not_change_generic_batch_contract(self) -> None:
         config = EmbeddingConfig(
             provider="openai_compatible",
@@ -287,6 +390,36 @@ class EmbeddingTests(unittest.TestCase):
             )
         self.assertFalse(raised.exception.transient)
         self.assertEqual(raised.exception.status_code, 400)
+
+    def test_transport_preserves_sanitized_clova_error_details(self) -> None:
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "40003",
+                    "message": "Context length exceeded.\nAdjust the input length.",
+                },
+                "request": "raw retrieval text must not be retained",
+            }
+        ).encode("utf-8")
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 400, "bad request", {}, BytesIO(body))
+
+        with self.assertRaises(EmbeddingHttpError) as raised:
+            UrllibJsonTransport(opener=opener).post_json(
+                "https://embedding.invalid/v1",
+                headers={"Authorization": "Bearer secret"},
+                payload={"input": "private retrieval text"},
+                timeout_seconds=1,
+            )
+        error = raised.exception
+        self.assertEqual(error.response_error_code, "40003")
+        self.assertEqual(
+            error.response_error_message,
+            "Context length exceeded. Adjust the input length.",
+        )
+        self.assertNotIn("private retrieval text", str(error))
+        self.assertNotIn("raw retrieval text", str(error))
 
     def test_transport_marks_5xx_and_timeout_transient(self) -> None:
         def unavailable(request, **_kwargs):

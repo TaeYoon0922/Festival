@@ -82,6 +82,7 @@ export FESTIVAL_EMBEDDING_API_URL='https://clovastudio.stream.ntruss.com/v1/open
 export FESTIVAL_EMBEDDING_API_KEY='<secret>'
 export FESTIVAL_EMBEDDING_API_KEY_HEADER='Authorization'
 export FESTIVAL_EMBEDDING_API_KEY_PREFIX='Bearer'
+export FESTIVAL_EMBEDDING_LONG_TEXT_SEGMENT_CHARS=1800
 ```
 
 The CLOVA request mode sends `input` as a single string together with
@@ -91,6 +92,21 @@ single-string HTTP request per document, returned in the original order. A failu
 reported to the existing pipeline retry boundary, so resume, retry, validation, and DB
 upsert contracts remain unchanged. The generic `openai_compatible` provider continues
 to send one list-valued batch request and does not infer behavior from the hostname.
+
+If and only if CLOVA returns HTTP 400 with `error.code=40003`, the adapter retries the
+input through the long-text path. It splits the in-memory embedding input at paragraph,
+line, sentence, or whitespace boundaries, with a conservative default ceiling of 1,800
+characters; an oversized single paragraph is hard-split without dropping any range.
+Every segment is embedded through the same endpoint, element-wise mean pooled, then L2
+normalized into one 1024-dimensional vector. The frozen `retrieval_text`, chunk row,
+chunk ID, and DB schema are never changed. Other HTTP 4xx errors still fail, while 429,
+5xx, and transport timeouts retain the existing pipeline retry behavior.
+
+Benchmark and subset-pipeline summaries expose only aggregate
+`provider_statistics.long_text_fallbacks` and `long_text_segments`; input text,
+response bodies, and credentials are not logged. The transport retains a sanitized
+response error code/message as exception metadata, but exception text contains only the
+HTTP status and sanitized error code.
 
 ## Server commands
 

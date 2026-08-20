@@ -183,6 +183,10 @@ class SubsetEmbeddingPipeline:
         state["processed"] = state["unique_chunk_ids"]
         state["skipped"] = state["already_embedded"]
         state["dimension"] = state["dimensions"]
+        statistics = getattr(self.provider, "embedding_statistics", None)
+        state["provider_statistics"] = (
+            dict(statistics()) if callable(statistics) else {}
+        )
         return state
 
     def _process_batch(
