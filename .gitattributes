@@ -1,0 +1,4 @@
+# Preserved evaluation artifacts are verified by SHA256SUMS, so git must never
+# rewrite their line endings. Without this, core.autocrlf=true checkouts hand
+# back CRLF files whose checksums no longer match the frozen run.
+reports/evaluation/** -text

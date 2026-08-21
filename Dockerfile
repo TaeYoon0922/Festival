@@ -13,4 +13,6 @@ COPY app ./app
 COPY scripts ./scripts
 COPY data/corpus ./data/corpus
 
-CMD ["python", "-m", "app"]
+# The corpus check stays available as `docker run <image> python -m app`.
+EXPOSE 8000
+CMD ["python", "-m", "app.api"]

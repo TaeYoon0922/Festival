@@ -16,6 +16,7 @@ from app.parsing.final_validation import (
     HOLDING_ADDITIONAL_QUESTIONS,
     _evaluation_document,
     _is_relevant,
+    rerank_bm25_candidates,
 )
 from app.parsing.sampling import load_manifest
 
@@ -311,7 +312,8 @@ def run_metadata_filtered_bm25(
         gold_included = str(question["doc_id"]) in candidate_ids
         relevant = [chunk for chunk in candidate_chunks if _is_relevant(chunk, question)]
         if candidate_chunks:
-            ranked = BM25Index(candidate_chunks).search(str(question["query"]))
+            raw_ranked = BM25Index(candidate_chunks).search(str(question["query"]))
+            ranked = rerank_bm25_candidates(raw_ranked, str(question["query"]))
             relevant_ranked = [
                 (rank, chunk)
                 for rank, (_, chunk) in enumerate(ranked, start=1)
@@ -369,12 +371,17 @@ def run_metadata_filtered_bm25(
     global_holding = json.loads((global_baseline_dir / "bm25_holding_20.json").read_text(encoding="utf-8"))
     report = {
         "method": {
-            "flow": "Question -> Metadata Filter -> Candidate disclosures -> Candidate chunks -> BM25 -> Top-K",
+            "flow": "Question -> Metadata Filter -> Candidate disclosures -> Candidate chunks -> BM25 -> Shared reranker -> Top-K",
             "allowed_filters": ["company mentions (OR)", "year/period", "doc_group", "doc_subtype when clear"],
             "gold_metadata_used_for_filtering": False,
             "company_extraction": "all exact normalized corp/listed-name mentions from manifest vocabulary, combined with OR",
             "year_policy": "base_year filter only when available; disabled for holding reference dates",
             "bm25": {"k1": 1.5, "b": 0.75, "tokenizer": "same as global baseline"},
+            "reranker": {
+                "shared_with_final_release_gate": True,
+                "raw_bm25_score_preserved": True,
+                "scope": "query-classified table intent only",
+            },
         },
         "gold_40": _metrics(gold_rows),
         "holding_20": _metrics(holding_rows),

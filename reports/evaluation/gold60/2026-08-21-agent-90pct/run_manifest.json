@@ -1,0 +1,158 @@
+{
+  "schema_version": "1.0",
+  "artifact_status": "preserved_verbatim",
+  "preserved_at_utc": "2026-08-21T05:26:27+00:00",
+  "source": {
+    "server_path": "/srv/festival/app/data/processed/postgres_agent_gold60_holding_answerability_fix",
+    "transfer": "scp byte-for-byte copy; not regenerated locally"
+  },
+  "code": {
+    "evaluation_commit": "d8a5f743c6784994ed6f0b625e0faf589ccf79bd",
+    "evaluation_tag": "agent-gold60-90pct-2026-08-21",
+    "tags_at_head": [
+      "agent-gold60-90pct-2026-08-21"
+    ],
+    "branch": "taeyoon",
+    "preservation_worktree_clean": false
+  },
+  "evaluation_version": "1",
+  "execution_parameters": {
+    "deterministic_weight": 0.4,
+    "diagnostic_top_n": null,
+    "diagnostic_weight_grid": [
+      [
+        0.6,
+        0.4
+      ],
+      [
+        0.7,
+        0.3
+      ],
+      [
+        0.75,
+        0.25
+      ],
+      [
+        0.8,
+        0.2
+      ]
+    ],
+    "fallback_on_vector_error": true,
+    "final_top_k": 10,
+    "fusion_weight": 0.6,
+    "lexical_top_n": 50,
+    "rerank_mode": "legacy",
+    "rerank_window_size": 2,
+    "rrf": {
+      "k": 60,
+      "lexical_weight": 1.0,
+      "vector_weight": 1.0
+    },
+    "vector_top_n": 50
+  },
+  "embedding": {
+    "dimensions": 1024,
+    "model": "bge-m3",
+    "provider": "clova_studio",
+    "version": "clova-bge-m3-2026-08-20"
+  },
+  "vector_status_counts": {
+    "ok": 60
+  },
+  "method": {
+    "flow": "Question -> QueryUnderstanding -> QueryPlan/Router -> shared metadata candidate scope -> lexical Top-N + vector Top-N -> RRF -> legacy deterministic rerank -> Top-10; diagnostics compare legacy and bounded rankings",
+    "rerank_mode": "legacy",
+    "rank_semantics": {
+      "lexical_raw_gold_rank": "raw production lexical Top-N",
+      "lexical_gold_rank": "deterministically reranked lexical Top-10",
+      "vector_gold_rank": "raw production vector Top-N",
+      "vector_top10_gold_rank": "raw vector Top-10 cutoff",
+      "hybrid_gold_rank": "final hybrid Top-10",
+      "vector_diagnostic_gold_rank": "opt-in diagnostic vector Top-N"
+    },
+    "gold_judgment": "app.parsing.final_validation._is_relevant",
+    "top_k": 10,
+    "agent_flow": "same HybridExecution -> AgentOrchestrator -> TaskRouter -> EvidenceBuilder -> optional resolver -> AnswerComposer -> CitationAwareAnswerGenerator",
+    "answer_gold_comparison": {
+      "gold_doc_cited": "a generated citation references the gold document",
+      "gold_chunk_cited": "a cited chunk satisfies the frozen gold judgment",
+      "all_evidence_terms_present": "every frozen gold evidence term is present in the generated answer after deterministic normalization",
+      "end_to_end_success": "retrieval hit@10, answerable answer, gold document citation, and all gold evidence terms present"
+    }
+  },
+  "corpus_fingerprint": {
+    "docs": 4204,
+    "source_files": 4619,
+    "chunks": 1363336,
+    "text_chunks": 229725,
+    "table_chunks": 1071368,
+    "projection_chunks": 62243
+  },
+  "metrics": {
+    "question_count": 60,
+    "retrieval": {
+      "recall_at_1": 0.483333,
+      "recall_at_5": 0.783333,
+      "recall_at_10": 0.9,
+      "miss_count": 6
+    },
+    "agent": {
+      "answerable_rate": 1.0,
+      "gold_doc_citation_rate": 0.916667,
+      "gold_chunk_citation_rate": 0.883333,
+      "all_evidence_terms_rate": 0.95,
+      "end_to_end_success_rate": 0.9
+    },
+    "failure_counts": {
+      "retrieval_miss": 6,
+      "success": 54
+    },
+    "end_to_end_failures": [
+      "P01",
+      "P06",
+      "P13",
+      "HX08",
+      "HX16",
+      "HX20"
+    ]
+  },
+  "known_evaluation_mismatch": [
+    "P01",
+    "P06",
+    "P13",
+    "HX08",
+    "HX16",
+    "HX20"
+  ],
+  "secret_scan": {
+    "status": "clean",
+    "pattern_count": 21
+  },
+  "files": [
+    {
+      "name": "gold60_agent_evaluation.json",
+      "sha256": "1774441501c5a1dca02c760a60c1aa840fc70c2127c268740be6da5b6a7904a5",
+      "bytes": 27806225
+    },
+    {
+      "name": "gold60_agent_evaluation.md",
+      "sha256": "e80f8266e29cef444111ce7f3f65614a6f8cc9bca6f332f9f106900fb6cd86f1",
+      "bytes": 363
+    },
+    {
+      "name": "gold60_agent_questions.jsonl",
+      "sha256": "2d90957a6ac6def9fa70da44b09d67215044e7bbe0b126d6d2eb31c658e8bca2",
+      "bytes": 13914141
+    },
+    {
+      "name": "failure_analysis.json",
+      "sha256": "f0ec8eb7811d22440c1884086f0c9f838fa7656cacbe1cfafd5b05f9d6e565ae",
+      "bytes": 2212201
+    },
+    {
+      "name": "failure_analysis.md",
+      "sha256": "7270f4f5da7e5e28f7dd73ea5c6f9690965d0020f1a563eca2d76c8685337662",
+      "bytes": 1787
+    }
+  ]
+}

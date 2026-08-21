@@ -8,5 +8,9 @@ __pycache__
 *.zip
 data/corpus/raw
 data/processed
+reports
 __MACOSX/
 .DS_Store
+data/exports
+.env.*
+data/db_export

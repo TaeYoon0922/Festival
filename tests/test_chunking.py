@@ -90,6 +90,24 @@ class StructuralChunkingTests(unittest.TestCase):
         self.assertEqual(table_chunks[0]["column_headers"], ["구분", "금액"])
         self.assertIn("제품", table_chunks[0]["content"])
         self.assertIn("서비스", table_chunks[0]["content"])
+        self.assertEqual(table_chunks[0]["source_table_id"], "t0001")
+        self.assertEqual(table_chunks[0]["source_table_ids"], ["t0001"])
+        self.assertEqual(
+            table_chunks[0]["source_refs"],
+            [{"table_id": "t0001", "row_start": 1, "row_end": 2}],
+        )
+        self.assertEqual(
+            table_chunks[0]["source_refs"][0]["row_start"],
+            table_chunks[0]["row_start"],
+        )
+        self.assertEqual(
+            table_chunks[0]["source_refs"][0]["row_end"],
+            table_chunks[0]["row_end"],
+        )
+        self.assertEqual(
+            table_chunks[0]["chunk_id"],
+            "periodic_20250101000001:ch_aca78c0eee8732fa2af0",
+        )
 
     def test_large_table_repeats_headers_without_row_overlap(self) -> None:
         rows = "".join(

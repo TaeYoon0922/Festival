@@ -14,6 +14,18 @@ from app.retrieval.interfaces import (
 )
 
 
+_EVENT_DOCUMENT_TERMS: dict[str, tuple[str, ...]] = {
+    "capital_increase": ("유상증자",),
+    "convertible_bond": ("전환사채",),
+    "treasury_share_disposal": ("자기주식처분", "자사주처분"),
+    "spin_off": ("회사분할", "분할신설"),
+    "merger": ("회사합병", "흡수합병"),
+    "supply_contract": ("단일판매공급계약", "공급계약", "수주계약"),
+    "contract_termination": ("단일판매공급계약해지", "공급계약해지", "계약해지"),
+    "facility_investment": ("신규시설투자", "시설투자"),
+}
+
+
 @dataclass(frozen=True)
 class RouteDecision:
     field: str
@@ -126,6 +138,26 @@ class QueryRouter:
             decisions["doc_group"] = decision
             (hard_routes if mode == "hard" else soft_boosts)["doc_group"] = top_route
 
+        event_type = plan.event_type
+        if (
+            plan.task_type == "corporate_event"
+            and event_type in _EVENT_DOCUMENT_TERMS
+            and len(route_candidates) == 1
+        ):
+            confidence = max(route_candidates.values())
+            mode = "hard" if confidence >= self.hard_threshold else "soft"
+            decision = RouteDecision(
+                field="event_type",
+                value=event_type,
+                confidence=confidence,
+                mode=mode,
+                evidence=plan.evidence.get("event_type"),
+            )
+            decisions["event_type"] = decision
+            (hard_routes if mode == "hard" else soft_boosts)[
+                "event_type"
+            ] = event_type
+
         correction_value = plan.is_correction
         if correction_value is None and plan.route_confidence.get("is_correction", 0.0) > 0:
             correction_value = True
@@ -169,6 +201,7 @@ class QueryRouter:
                 "fiscal_year": plan.period.year,
                 "fiscal_quarter": plan.period.quarter,
                 "periodic_intent": plan.evidence.get("periodic_intent"),
+                "event_type": plan.event_type,
             },
             retrieval_limit=retrieval_limit,
         )
@@ -190,6 +223,10 @@ class QueryRouter:
                 continue
             if "is_correction" in hard and bool(metadata.get("is_correction")) is not bool(
                 hard["is_correction"]
+            ):
+                continue
+            if "event_type" in hard and not _document_event_matches(
+                metadata, hard["event_type"]
             ):
                 continue
             if "rcept_dt" in route.hard_filters and not _date_in_range(
@@ -221,6 +258,10 @@ class QueryRouter:
                 value = route.decisions["basis"].value
                 soft["basis"] = _chunk_basis_matches(candidate.chunk, value)
                 soft_inputs["basis"] = value
+            if "event_type" in route.decisions:
+                value = route.decisions["event_type"].value
+                soft["event_type"] = _document_event_matches(candidate.chunk, value)
+                soft_inputs["event_type"] = value
             if "section_path" in route.hard_routes and not _chunk_section_matches(
                 candidate.chunk, route.hard_routes["section_path"]
             ):
@@ -358,6 +399,19 @@ def _normalized(value: Any) -> str:
 
 def _same(left: Any, right: Any) -> bool:
     return _normalized(left) == _normalized(right)
+
+
+def _document_event_matches(metadata: Mapping[str, Any], event_type: Any) -> bool:
+    terms = _EVENT_DOCUMENT_TERMS.get(str(event_type), ())
+    if not terms:
+        return False
+    text = _normalized(
+        " ".join(
+            str(metadata.get(field) or "")
+            for field in ("report_nm", "doc_subtype")
+        )
+    )
+    return any(_normalized(term) in text for term in terms)
 
 
 def _date_in_range(value: Any, start: str, end: str) -> bool:

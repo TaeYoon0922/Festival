@@ -1253,6 +1253,503 @@ def _tokens(value: str) -> list[str]:
     return [token.casefold() for token in _TOKEN.findall(value)]
 
 
+_TABLE_INTENT_TERMS = (
+    "주요제품",
+    "제품",
+    "보유주식",
+    "보유수량",
+    "보유비율",
+    "주식수",
+    "수량",
+    "비율",
+    "증감",
+    "현황",
+    "목록",
+    "내역",
+    "구성",
+    "금액",
+    "총액",
+    "매출액",
+    "평가일",
+    "상장일",
+    "합병기일",
+    "만기일",
+    "종료일",
+    "계약기간",
+    "생산능력",
+    "생산실적",
+    "가동률",
+    "가격",
+    "이자율",
+    "분할비율",
+    "회사수",
+    "종속회사",
+    "유상증자",
+    "신주",
+    "조달액",
+    "전환사채",
+    "자기주식",
+    "합병",
+    "분할",
+    "계약상대방",
+    "상대방",
+    "시설투자",
+    "투자금액",
+    "계약해지",
+    "해지금액",
+    "목적",
+    "사유",
+)
+_EXPLANATION_INTENT_TERMS = (
+    "이유",
+    "전망",
+    "위험",
+    "영향",
+    "전략",
+    "배경",
+    "설명",
+    "특징",
+)
+_LEGAL_DISPOSITION_TERMS = (
+    "과태료",
+    "과징금",
+    "벌금",
+    "시정명령",
+    "시정조치",
+    "작업중지",
+    "영업정지",
+    "허가취소",
+    "경고",
+    "기소",
+    "처벌",
+)
+_LEGAL_VIOLATION_TERMS = (
+    "위반",
+    "제재",
+    "행정처분",
+)
+_LEGAL_INSTITUTION_SUFFIXES = (
+    "위원회",
+    "감독원",
+    "검찰청",
+    "법원",
+    "공단",
+    "부",
+    "청",
+)
+_ALIGNMENT_STOPWORDS = {
+    "무엇인가",
+    "무엇인지",
+    "알려줘",
+    "공시",
+    "보고서",
+    "이번",
+    "현재",
+    "대한",
+}
+_ALIGNMENT_SUFFIXES = (
+    "으로부터",
+    "에게서",
+    "에서는",
+    "으로",
+    "에서",
+    "에게",
+    "부터",
+    "까지",
+    "이나",
+    "에는",
+    "와",
+    "과",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "로",
+)
+
+
+@dataclass(frozen=True)
+class BM25RerankPolicy:
+    table_intent: bool
+    query_terms: tuple[str, ...]
+    query_phrases: tuple[str, ...]
+    matched_signals: tuple[str, ...]
+    query_compact: str
+    preferred_doc_group: str | None
+    fiscal_year: int | None
+    preferred_doc_subtype: str | None
+    legal_law_signals: tuple[str, ...]
+    legal_institution_signals: tuple[str, ...]
+    legal_disposition_signals: tuple[str, ...]
+    legal_violation_signals: tuple[str, ...]
+
+
+_BM25_RERANK_RAW_WEIGHT = 1.25
+
+
+def _preferred_doc_group(compact: str) -> str | None:
+    if any(
+        term in compact
+        for term in (
+            "국민연금",
+            "보유주식",
+            "보유수량",
+            "지분율",
+            "직전보고",
+            "이번보고",
+            "변동일",
+            "변동전",
+            "변동후",
+            "풋옵션",
+        )
+    ):
+        return "holding"
+    if any(
+        term in compact
+        for term in (
+            "시설투자",
+            "계약해지",
+            "계약상대방",
+            "우선협상",
+            "수주계약",
+            "계약금액",
+            "계약기간",
+            "투자금액",
+            "투자목적",
+            "해지금액",
+        )
+    ):
+        return "exchange"
+    if any(
+        term in compact
+        for term in (
+            "유상증자",
+            "전환사채",
+            "자기주식",
+            "분할신설",
+            "분할대상",
+            "분할비율",
+            "존속회사",
+            "소멸회사",
+            "합병목적",
+        )
+    ):
+        return "major"
+    return "periodic"
+
+
+def _alignment_compact(value: Any) -> str:
+    return re.sub(r"[^0-9a-z가-힣]+", "", str(value or "").casefold())
+
+
+def _alignment_term(value: Any) -> str:
+    normalized = _alignment_compact(value)
+    if normalized in _ALIGNMENT_STOPWORDS:
+        return ""
+    for suffix in _ALIGNMENT_SUFFIXES:
+        if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 2:
+            normalized = normalized[: -len(suffix)]
+            break
+    if len(normalized) < 2 or re.fullmatch(r"20\d{2}", normalized):
+        return ""
+    return normalized
+
+
+def _legal_entity_signals(
+    query: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    tokens = tuple(
+        dict.fromkeys(
+            normalized
+            for token in _tokens(query)
+            if (normalized := _alignment_compact(token))
+        )
+    )
+    laws = tuple(
+        token
+        for token in tokens
+        if len(token) >= 3 and token.endswith(("법", "법률", "법령"))
+    )
+    dispositions = tuple(
+        term for term in _LEGAL_DISPOSITION_TERMS if term in _alignment_compact(query)
+    )
+    violations = tuple(
+        term for term in _LEGAL_VIOLATION_TERMS if term in _alignment_compact(query)
+    )
+    legal_context = bool(laws or dispositions or violations)
+    institutions = tuple(
+        token
+        for token in tokens
+        if legal_context
+        and len(token) >= 3
+        and token.endswith(_LEGAL_INSTITUTION_SUFFIXES)
+    )
+    return laws, institutions, dispositions, violations
+
+
+def build_bm25_rerank_policy(query: str) -> BM25RerankPolicy:
+    compact = _alignment_compact(query)
+    explanation_signals = tuple(
+        term for term in _EXPLANATION_INTENT_TERMS if term in compact
+    )
+    table_signals = tuple(term for term in _TABLE_INTENT_TERMS if term in compact)
+    table_intent = bool(table_signals and not explanation_signals)
+    preferred_doc_group = _preferred_doc_group(compact) if table_intent else None
+    years = re.findall(r"(?<!\d)(20\d{2})(?!\d)", query)
+    fiscal_year = (
+        int(years[0])
+        if years and preferred_doc_group != "holding"
+        else None
+    )
+    if "분기" in compact:
+        preferred_doc_subtype = "quarter"
+    elif "반기" in compact:
+        preferred_doc_subtype = "half"
+    elif "사업보고서" in compact:
+        preferred_doc_subtype = "annual"
+    else:
+        preferred_doc_subtype = None
+    terms = tuple(
+        dict.fromkeys(
+            term
+            for token in _tokens(query)
+            if (term := _alignment_term(token))
+        )
+    )
+    phrases = tuple(
+        dict.fromkeys(
+            "".join(terms[index : index + width])
+            for width in (2, 3)
+            for index in range(len(terms) - width + 1)
+        )
+    )
+    laws, institutions, dispositions, violations = _legal_entity_signals(query)
+    return BM25RerankPolicy(
+        table_intent=table_intent,
+        query_terms=terms,
+        query_phrases=phrases,
+        matched_signals=table_signals or explanation_signals,
+        query_compact=compact,
+        preferred_doc_group=preferred_doc_group,
+        fiscal_year=fiscal_year,
+        preferred_doc_subtype=preferred_doc_subtype,
+        legal_law_signals=laws,
+        legal_institution_signals=institutions,
+        legal_disposition_signals=dispositions,
+        legal_violation_signals=violations,
+    )
+
+
+def _alignment_matches(
+    policy: BM25RerankPolicy, value: Any
+) -> tuple[int, bool]:
+    compact = _alignment_compact(value)
+    if not compact:
+        return 0, False
+    term_count = sum(term in compact for term in policy.query_terms)
+    phrase_match = any(
+        len(phrase) >= 4 and phrase in compact for phrase in policy.query_phrases
+    )
+    return term_count, phrase_match
+
+
+def _legal_entity_alignment_bonus(
+    chunk: dict[str, Any], policy: BM25RerankPolicy
+) -> float:
+    if not (
+        policy.legal_law_signals
+        or policy.legal_institution_signals
+        or policy.legal_disposition_signals
+        or policy.legal_violation_signals
+    ):
+        return 0.0
+    searchable_fields = tuple(
+        _alignment_compact(value)
+        for value in (
+            chunk.get("retrieval_text"),
+            chunk.get("content"),
+            chunk.get("report_nm"),
+            chunk.get("table_title"),
+            *(chunk.get("column_headers") or []),
+            chunk.get("section_title"),
+            *(chunk.get("section_path") or []),
+        )
+        if value
+    )
+    law_occurrences = tuple(
+        max((field.count(signal) for field in searchable_fields), default=0)
+        for signal in policy.legal_law_signals
+    )
+    law_matches = sum(count > 0 for count in law_occurrences)
+    institution_matches = sum(
+        any(signal in field for field in searchable_fields)
+        for signal in policy.legal_institution_signals
+    )
+    disposition_matches = sum(
+        any(signal in field for field in searchable_fields)
+        for signal in policy.legal_disposition_signals
+    )
+    violation_matches = sum(
+        any(signal in field for field in searchable_fields)
+        for signal in policy.legal_violation_signals
+    )
+    repeated_law_bonus = min(
+        sum(max(count - 1, 0) * 2.0 for count in law_occurrences),
+        8.0,
+    )
+    return (
+        min(law_matches * 10.0, 10.0)
+        + repeated_law_bonus
+        + min(institution_matches * 4.0, 4.0)
+        + min(disposition_matches * 3.0, 3.0)
+        + min(violation_matches * 1.5, 1.5)
+    )
+
+
+def bm25_rerank_bonus(
+    chunk: dict[str, Any], policy: BM25RerankPolicy
+) -> float:
+    """Return a bounded structural bonus without mutating the chunk or BM25 score."""
+
+    if not policy.table_intent:
+        return 0.0
+    chunk_type = str(chunk.get("chunk_type") or "")
+    if chunk_type == "table":
+        type_bonus = 2.5
+    elif chunk_type == "table_projection":
+        type_bonus = 1.0
+    else:
+        return 0.0
+
+    header_text = " ".join(
+        [
+            str(chunk.get("report_nm") or ""),
+            str(chunk.get("table_title") or ""),
+            *(str(value) for value in chunk.get("column_headers") or []),
+        ]
+    )
+    section_text = " ".join(
+        [
+            str(chunk.get("section_title") or ""),
+            *(str(value) for value in chunk.get("section_path") or []),
+        ]
+    )
+    content_text = str(chunk.get("content") or "")
+    header_terms, header_phrase = _alignment_matches(policy, header_text)
+    section_terms, section_phrase = _alignment_matches(policy, section_text)
+    content_terms, content_phrase = _alignment_matches(policy, content_text)
+    company_names = (
+        _alignment_compact(chunk.get("corp_name")),
+        _alignment_compact(chunk.get("listed_name")),
+    )
+    company_bonus = (
+        80.0
+        if any(name and name in policy.query_compact for name in company_names)
+        else 0.0
+    )
+    compact_report_name = _alignment_compact(chunk.get("report_nm"))
+    report_signal_bonus = (
+        15.0
+        if compact_report_name
+        and any(signal in compact_report_name for signal in policy.matched_signals)
+        else 0.0
+    )
+    doc_group = str(chunk.get("doc_group") or "")
+    group_bonus = 100.0 if doc_group == policy.preferred_doc_group else 0.0
+    projection_type = str(chunk.get("projection_type") or "")
+    if projection_type == "holding_report" and any(
+        term in policy.query_compact
+        for term in ("이번보고", "직전보고", "보유비율", "지분율")
+    ):
+        projection_bonus = 10.0
+    elif projection_type == "holding_detail_row" and any(
+        term in policy.query_compact
+        for term in ("변동일", "변동전", "변동후", "취득일", "취득수량", "풋옵션")
+    ):
+        projection_bonus = 10.0
+    elif chunk_type == "table" and doc_group == "holding" and any(
+        term in policy.query_compact
+        for term in ("변동일", "변동전", "변동후", "취득일", "취득수량", "풋옵션")
+    ) and "세부변동내역" in _alignment_compact(section_text):
+        projection_bonus = 10.0
+    else:
+        projection_bonus = 0.0
+    doc_subtype = str(chunk.get("doc_subtype") or "")
+    if policy.preferred_doc_subtype:
+        subtype_bonus = 8.0 if doc_subtype == policy.preferred_doc_subtype else 0.0
+    elif policy.preferred_doc_group == "periodic":
+        subtype_bonus = 4.0 if doc_subtype == "annual" else 0.0
+    else:
+        subtype_bonus = 0.0
+    try:
+        base_year = int(chunk.get("base_year"))
+    except (TypeError, ValueError):
+        base_year = None
+    year_bonus = (
+        10.0
+        if policy.fiscal_year is not None and policy.fiscal_year == base_year
+        else 0.0
+    )
+    return (
+        type_bonus
+        + company_bonus
+        + report_signal_bonus
+        + group_bonus
+        + projection_bonus
+        + subtype_bonus
+        + year_bonus
+        + min(header_terms * 3.0, 12.0)
+        + (10.0 if header_phrase else 0.0)
+        + min(section_terms * 1.5, 4.5)
+        + (5.0 if section_phrase else 0.0)
+        + min(content_terms * 1.0, 4.0)
+        + (4.0 if content_phrase else 0.0)
+        + _legal_entity_alignment_bonus(chunk, policy)
+    )
+
+
+def bm25_rerank_score(
+    raw_score: float,
+    chunk: dict[str, Any],
+    policy: BM25RerankPolicy,
+) -> float:
+    """Combine raw lexical evidence with query-derived structural alignment."""
+
+    return combine_bm25_rerank_score(
+        raw_score,
+        bm25_rerank_bonus(chunk, policy),
+    )
+
+
+def combine_bm25_rerank_score(
+    raw_score: float,
+    rerank_bonus: float,
+) -> float:
+    return raw_score * _BM25_RERANK_RAW_WEIGHT + rerank_bonus
+
+
+def rerank_bm25_candidates(
+    ranked_chunks: list[tuple[float, dict[str, Any]]],
+    query: str,
+) -> list[tuple[float, dict[str, Any]]]:
+    """Reorder BM25 results while preserving every raw score and chunk object."""
+
+    policy = build_bm25_rerank_policy(query)
+    if not policy.table_intent:
+        return list(ranked_chunks)
+    return sorted(
+        ranked_chunks,
+        key=lambda row: (
+            -bm25_rerank_score(row[0], row[1], policy),
+            -row[0],
+            str(row[1].get("chunk_id") or ""),
+        ),
+    )
+
+
 class BM25Index:
     def __init__(self, documents: list[dict[str, Any]], k1: float = 1.5, b: float = 0.75):
         self.documents = documents
@@ -1315,6 +1812,7 @@ def _evaluation_document(
         **chunk,
         "doc_id": row["doc_id"],
         "doc_group": row["doc_group"],
+        "listed_name": row.get("listed_name") or chunk.get("listed_name"),
         "evaluation_text": evaluation_text,
     }
 
