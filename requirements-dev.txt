@@ -1,0 +1,5 @@
+# Development and test dependencies. Not installed into the submission image:
+# the Dockerfile only copies requirements.txt.
+-r requirements.txt
+
+pytest>=8

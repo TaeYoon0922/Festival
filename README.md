@@ -358,14 +358,12 @@ curl -sG http://localhost:8000/answer \
 
 `.dockerignore`가 다음을 제외합니다: `.git`, `.gitignore`, `.env`, `.env.*`, `.venv`,
 `venv`, `__pycache__`, `*.py[cod]`, `*.zip`, `data/corpus/raw`, `data/processed`,
-`data/exports`, `reports`, `__MACOSX/`, `.DS_Store`.
+`data/exports`, `data/db_export`, `reports`, `__MACOSX/`, `.DS_Store`.
 
 빌드 산출물과 평가 산출물, 그리고 모든 `.env` 계열 파일이 컨텍스트에 들어가지 않습니다.
-이미지에는 `app/`, `scripts/`, `data/corpus`의 메타데이터만 복사됩니다.
-
-> **주의** — 로컬에서 COPY export를 돌려 `data/db_export`를 생성한 경우 이 디렉터리는
-> `.dockerignore`에 없어 빌드 컨텍스트에 포함됩니다. 빌드 전에 비우거나 `.dockerignore`에
-> 추가하십시오. 제출 이미지는 이 산출물을 필요로 하지 않습니다.
+로컬에서 COPY export를 돌려 생성한 `data/db_export`도 제외되므로, 제출 이미지를 빌드하기 전에
+따로 비울 필요가 없습니다. 이미지에는 `app/`, `scripts/`, `data/corpus`의 메타데이터만
+복사됩니다.
 
 ### Docker smoke 검증 (내부 기록)
 
@@ -563,6 +561,12 @@ CLOVA Studio 설정과 40003 분할 폴백 동작은 `docs/embedding_pilot.md`�
 
 ### 테스트
 
+테스트 의존성은 `requirements-dev.txt`에 분리되어 있습니다. `Dockerfile`은 `requirements.txt`만
+복사하므로 제출 이미지에는 포함되지 않습니다.
+
 ```bash
-python -m unittest discover
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
+
+전체 스위트는 PostgreSQL·임베딩·HCX 자격증명 없이 통과합니다.
