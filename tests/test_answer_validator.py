@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from collections import Counter
 
 from app.generation.answer_validator import (
     ValidationPolicy,
@@ -84,12 +85,80 @@ class NumericPreservationTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertEqual(result.reason, "numeric_token_changed")
 
-    def test_repeating_a_number_is_allowed(self) -> None:
+    def test_repeating_a_number_is_rejected(self) -> None:
         candidate = REFERENCE + " 다시 정리하면 655,490주입니다."
 
         result = _validate(candidate)
 
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "numeric_token_changed")
+        self.assertIn("655,490", result.changed_tokens)
+
+    def test_dropping_one_occurrence_of_a_repeated_number_is_rejected(self) -> None:
+        result = validate_verbalized_answer(
+            "값은 10과 20입니다.",
+            reference="값은 10, 10, 20입니다.",
+        )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "numeric_token_changed")
+        self.assertIn("10", result.changed_tokens)
+
+    def test_numeric_token_order_may_change(self) -> None:
+        result = validate_verbalized_answer(
+            "두 값은 20과 10입니다.",
+            reference="두 값은 10과 20입니다.",
+        )
+
         self.assertTrue(result.valid)
+
+    def test_trailing_date_punctuation_is_not_a_numeric_change(self) -> None:
+        result = validate_verbalized_answer(
+            "변동일은 2023-01-01입니다.",
+            reference="변동일은 2023-01-01,",
+        )
+
+        self.assertTrue(result.valid)
+
+    def test_four_event_date_punctuation_case_passes(self) -> None:
+        reference, candidate = _multi_event_punctuation_pair(4)
+
+        result = validate_verbalized_answer(candidate, reference=reference)
+
+        self.assertTrue(result.valid)
+
+    def test_six_event_date_punctuation_case_passes(self) -> None:
+        reference, candidate = _multi_event_punctuation_pair(6)
+
+        result = validate_verbalized_answer(candidate, reference=reference)
+
+        self.assertTrue(result.valid)
+
+
+class NumericTokenizerTests(unittest.TestCase):
+    def test_thousands_commas_are_preserved(self) -> None:
+        self.assertEqual(
+            extract_numeric_tokens("137,411 1,099,288"),
+            Counter({"137,411": 1, "1,099,288": 1}),
+        )
+
+    def test_negative_thousands_value_is_preserved(self) -> None:
+        self.assertEqual(
+            extract_numeric_tokens("-283,151"),
+            Counter({"-283,151": 1}),
+        )
+
+    def test_decimal_and_percent_are_preserved(self) -> None:
+        self.assertEqual(
+            extract_numeric_tokens("12.45 12.45%"),
+            Counter({"12.45": 1, "12.45%": 1}),
+        )
+
+    def test_occurrence_counts_are_preserved(self) -> None:
+        self.assertEqual(
+            extract_numeric_tokens("10 10 20"),
+            Counter({"10": 2, "20": 1}),
+        )
 
 
 class CitationPreservationTests(unittest.TestCase):
@@ -113,7 +182,10 @@ class CitationPreservationTests(unittest.TestCase):
 
     def test_citation_digits_are_not_read_as_facts(self) -> None:
         self.assertEqual(extract_citation_markers("값 5건입니다.[1][2]"), {"1", "2"})
-        self.assertEqual(extract_numeric_tokens("값 5건입니다.[1][2]"), {"5"})
+        self.assertEqual(
+            extract_numeric_tokens("값 5건입니다.[1][2]"),
+            Counter({"5": 1}),
+        )
 
 
 class LanguageAndEntityTests(unittest.TestCase):
@@ -168,6 +240,23 @@ class BoundsTests(unittest.TestCase):
     def test_policy_rejects_a_non_positive_ratio(self) -> None:
         with self.assertRaises(ValueError):
             ValidationPolicy(max_length_ratio=0.0)
+
+
+def _multi_event_punctuation_pair(event_count: int) -> tuple[str, str]:
+    dates = [
+        f"2023-{(index % 12) + 1:02d}-{((index * 7) % 28) + 1:02d}"
+        for index in range(event_count)
+    ]
+    values = [f"{(index + 1) * 137_411:,}" for index in range(event_count)]
+    reference = ", ".join(
+        f"변동일 {date}, 변동 후 주식수 {value}주"
+        for date, value in zip(dates, values, strict=True)
+    )
+    candidate = " ".join(
+        f"변동일 {date} 변동 후 주식수 {value}주"
+        for date, value in zip(dates, values, strict=True)
+    )
+    return reference, candidate
 
 
 if __name__ == "__main__":

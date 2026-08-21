@@ -447,13 +447,13 @@ def _evaluate_detached_candidate(
     ]
     record.update(
         {
-            "reference_numeric_tokens": sorted(reference_numeric_tokens),
-            "candidate_numeric_tokens": sorted(candidate_numeric_tokens),
+            "reference_numeric_tokens": sorted(reference_numeric_tokens.elements()),
+            "candidate_numeric_tokens": sorted(candidate_numeric_tokens.elements()),
             "numbers_only_in_reference": sorted(
-                reference_numeric_tokens - candidate_numeric_tokens
+                (reference_numeric_tokens - candidate_numeric_tokens).elements()
             ),
             "numbers_only_in_candidate": sorted(
-                candidate_numeric_tokens - reference_numeric_tokens
+                (candidate_numeric_tokens - reference_numeric_tokens).elements()
             ),
             "reference_citations": _citation_markers(detached.text),
             "candidate_citations": _citation_markers(restored),
@@ -513,7 +513,7 @@ def _unprotected_numeric_tokens(raw: str, protection: Any) -> list[str]:
     remainder = raw
     for placeholder in protection.placeholders:
         remainder = remainder.replace(placeholder, " ")
-    return sorted(extract_numeric_tokens(remainder))
+    return sorted(extract_numeric_tokens(remainder).elements())
 
 
 def _citation_markers(text: str) -> list[str]:

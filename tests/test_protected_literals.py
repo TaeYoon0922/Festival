@@ -102,7 +102,7 @@ class PlaceholderInvisibilityTests(unittest.TestCase):
         ).masked
 
     def test_validator_sees_no_numbers_in_masked_text(self) -> None:
-        self.assertEqual(extract_numeric_tokens(self.masked), set())
+        self.assertFalse(extract_numeric_tokens(self.masked))
 
     def test_validator_sees_no_citations_in_masked_text(self) -> None:
         self.assertEqual(extract_citation_markers(self.masked), set())

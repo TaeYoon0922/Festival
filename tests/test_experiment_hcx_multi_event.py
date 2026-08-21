@@ -516,7 +516,7 @@ class DetachedCitationTests(unittest.TestCase):
         self.assertEqual(record["numbers_only_in_candidate"], ["99,999"])
         self.assertFalse(record["final_answer_valid"])
 
-    def test_diagnostics_expose_punctuation_sensitive_set_collision(self) -> None:
+    def test_punctuation_hardening_removes_the_four_six_ten_inconsistency(self) -> None:
         def respond(masked: str) -> str:
             dates = [
                 token
@@ -537,18 +537,12 @@ class DetachedCitationTests(unittest.TestCase):
             for count in (4, 6, 10)
         }
 
-        self.assertEqual(records[4]["numbers_only_in_reference"], ["-01,", "-08,"])
-        self.assertEqual(records[4]["numbers_only_in_candidate"], ["-08"])
-        self.assertEqual(records[6]["numbers_only_in_reference"], [])
-        self.assertEqual(records[6]["numbers_only_in_candidate"], ["-08"])
-        self.assertEqual(records[10]["numbers_only_in_reference"], [])
-        self.assertEqual(records[10]["numbers_only_in_candidate"], [])
-        self.assertFalse(records[4]["candidate_valid_before_citation_attachment"])
-        self.assertFalse(records[6]["candidate_valid_before_citation_attachment"])
-        self.assertTrue(records[10]["candidate_valid_before_citation_attachment"])
         for record in records.values():
             self.assertTrue(record["field_placeholder_integrity_valid"])
             self.assertTrue(record["all_events_kept"])
+            self.assertEqual(record["numbers_only_in_reference"], [])
+            self.assertEqual(record["numbers_only_in_candidate"], [])
+            self.assertTrue(record["candidate_valid_before_citation_attachment"])
             self.assertEqual(
                 record["unprotected_numeric_tokens_in_masked_candidate"],
                 [],

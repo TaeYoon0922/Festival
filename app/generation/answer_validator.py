@@ -9,6 +9,7 @@ callers fall back to the deterministic answer.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -18,7 +19,7 @@ CITATION_MARKER_PATTERN = re.compile(r"\[(\d+)\]")
 
 #: Numbers keep their rendered form: separators, leading zeros, and percent
 #: signs are all part of the token, so "2,967,759" never becomes "약 297만".
-NUMERIC_TOKEN_PATTERN = re.compile(r"-?\d[\d,]*(?:\.\d+)?%?")
+NUMERIC_TOKEN_PATTERN = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?%?")
 
 #: Forecast and recommendation language.  Only flagged when the verbalizer
 #: introduces it; wording already present in the deterministic answer is kept.
@@ -108,11 +109,16 @@ def validate_verbalized_answer(
     candidate_numbers = extract_numeric_tokens(candidate)
     reference_numbers = extract_numeric_tokens(reference)
     if candidate_numbers != reference_numbers:
+        changed = {
+            token
+            for token in candidate_numbers.keys() | reference_numbers.keys()
+            if candidate_numbers[token] != reference_numbers[token]
+        }
         return ValidationResult(
             False,
             "numeric_token_changed",
             "numbers or dates differ from the deterministic answer",
-            tuple(sorted(candidate_numbers ^ reference_numbers)),
+            tuple(sorted(changed)),
         )
 
     missing = _missing_required_terms(candidate, reference, required_terms)
@@ -140,11 +146,18 @@ def extract_citation_markers(text: str) -> set[str]:
     return set(CITATION_MARKER_PATTERN.findall(text))
 
 
-def extract_numeric_tokens(text: str) -> set[str]:
-    """Collect rendered numbers, ignoring digits that belong to citation markers."""
+def extract_numeric_tokens(text: str) -> Counter[str]:
+    """Count numbers while ignoring citation digits and trailing punctuation.
+
+    A comma belongs to a number only when it introduces a three-digit
+    thousands group.  Natural-language punctuation after a value is excluded,
+    while values such as ``1,099,288`` remain distinct from ``1099288``.
+    Occurrence counts are retained so dropping or repeating an identical value
+    is a factual mutation; token order remains free for natural rewording.
+    """
 
     without_markers = CITATION_MARKER_PATTERN.sub(" ", text)
-    return set(NUMERIC_TOKEN_PATTERN.findall(without_markers))
+    return Counter(NUMERIC_TOKEN_PATTERN.findall(without_markers))
 
 
 def _missing_required_terms(
