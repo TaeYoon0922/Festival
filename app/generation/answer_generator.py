@@ -174,21 +174,36 @@ def _holding_sections(
         for section in draft.answer_sections
         for event in _mapping_list(section.content.get("events"))
     ]
-    lines = ["확인된 보유 변동 내역은 다음과 같습니다."]
+    requested_fields = _unique(
+        [
+            value
+            for section in draft.answer_sections
+            for value in _string_list(section.content.get("requested_fields"))
+        ]
+    )
+    single_event = len(events) == 1 and not draft.ambiguity.get("temporal_ambiguity")
+    lines = [] if single_event else ["확인된 보유 변동 내역은 다음과 같습니다."]
     section_citations: list[str] = []
     warnings: list[str] = []
     supported = bool(events)
     for index, event in enumerate(events, start=1):
         chunk_ids = _string_list(event.get("evidence_chunk_ids"))
         citation_ids = registry.ids_for(chunk_ids)
-        lines.append(f"{index}.")
+        if not single_event:
+            lines.append(f"{index}.")
         if not citation_ids:
             lines.append("이 이벤트는 provenance가 없어 표시할 수 없습니다.")
             warnings.append(f"missing_provenance:holding_event:{index}")
             supported = False
             continue
         marker = " ".join(citation_ids)
-        factual_lines = _holding_fact_lines(event, marker)
+        factual_lines = None
+        if single_event:
+            # Prose only when it provably states every verified value; the
+            # record form is the fallback, never a silent partial answer.
+            factual_lines = _holding_prose_lines(event, marker, requested_fields)
+        if factual_lines is None:
+            factual_lines = _holding_fact_lines(event, marker, requested_fields)
         if not factual_lines:
             lines.append("확인되지 않은 정보가 있습니다.")
             warnings.append(f"missing_fact_content:holding_event:{index}")
@@ -218,35 +233,307 @@ def _holding_sections(
     return sections, warnings, supported
 
 
-def _holding_fact_lines(event: Mapping[str, Any], marker: str) -> list[str]:
-    lines = []
-    text_fields = (
-        ("corp_name", "회사"),
-        ("reporter", "보고자"),
-        ("reference_date", "변동일"),
-        ("report_date", "보고일"),
-        ("receipt_date", "접수일"),
+#: Rendered first, always: they say whose holding this is and as of when.
+HOLDING_IDENTITY_FIELDS = ("corp_name", "reporter", "reference_date")
+
+#: Share counts and ratios read differently in a sentence, so each carries its
+#: own unit and its own verb.
+_SHARE_UNIT = "주"
+_RATIO_UNIT = "%"
+
+#: A change in ratio is the difference between two percentages, so it is stated
+#: in percentage points.  Gold evidence terms are compared after every
+#: non-alphanumeric character is stripped, so the trailing "p" cannot hide the
+#: value: "1.05%" and "1.05%p" both reduce to "105".
+_RATIO_CHANGE_UNIT = "%p"
+
+#: Predicates for a movement, per direction.  "unchanged" is absent on purpose:
+#: it has no natural transition phrasing that still contains the word the
+#: record form prints, so those events keep the record form.
+_DIRECTION_PREDICATES = {
+    "increase": ("증가했습니다", "상승했습니다"),
+    "decrease": ("감소했습니다", "하락했습니다"),
+}
+
+_SHARES = 0
+_RATIO = 1
+
+
+def _holding_prose_lines(
+    event: Mapping[str, Any],
+    marker: str,
+    requested_fields: Sequence[str] = (),
+) -> list[str] | None:
+    """State one verified event as sentences, or return ``None``.
+
+    The record form is accurate but reads like a table dump: eleven labelled
+    lines, each repeating the same citation.  One verified event is small
+    enough to say in prose, led by whatever the question actually asked.
+
+    ``None`` means prose could not carry every verified value, and the caller
+    falls back to the record form.  That check is the whole safety story here:
+    an earlier tuning round dropped unasked fields and cost the evaluation set
+    its evidence coverage, so completeness is verified rather than assumed.
+    """
+
+    subject = _holding_subject(event)
+    if subject is None:
+        return None
+    direction = _text(event.get("change_direction"))
+    if direction and direction not in _DIRECTION_PREDICATES:
+        return None
+
+    stated: set[str] = set()
+    sentences = [
+        sentence
+        for sentence in (
+            _holding_lead_sentence(event, subject, requested_fields, stated),
+            _holding_movement_sentence(event, _SHARES, stated),
+            _holding_movement_sentence(event, _RATIO, stated),
+            _holding_filing_sentence(event, stated),
+        )
+        if sentence
+    ]
+    if not sentences:
+        return None
+
+    prose = " ".join(sentences)
+    if not _holding_prose_states_every_value(event, prose):
+        return None
+    return [f"{sentence} {marker}" for sentence in sentences]
+
+
+def _holding_prose_states_every_value(
+    event: Mapping[str, Any], prose: str
+) -> bool:
+    """Require every value the record form would print to appear in the prose."""
+
+    for entry in (*_HOLDING_TEXT_FIELDS, *_HOLDING_NUMERIC_FIELDS, _HOLDING_DIRECTION):
+        value = _holding_fact_value(event, entry)
+        if value and value not in prose:
+            return False
+    return True
+
+
+def _holding_subject(event: Mapping[str, Any]) -> str | None:
+    corp = _text(event.get("corp_name"))
+    date = _text(event.get("reference_date"))
+    if not corp or not date:
+        return None
+    reporter = _text(event.get("reporter"))
+    holder = f"{reporter}의 " if reporter else ""
+    return f"{date} 기준 {holder}{corp}"
+
+
+def _holding_lead_sentence(
+    event: Mapping[str, Any],
+    subject: str,
+    requested_fields: Sequence[str],
+    stated: set[str],
+) -> str | None:
+    """Answer what was asked, before anything else is said."""
+
+    clauses = []
+    for field in _holding_lead_fields(event, requested_fields):
+        clause = _holding_lead_clause(event, field, stated)
+        if clause:
+            clauses.append(clause)
+    if not clauses:
+        return None
+    return f"{subject} {'. '.join(clauses)}."
+
+
+def _holding_lead_fields(
+    event: Mapping[str, Any], requested_fields: Sequence[str]
+) -> list[str]:
+    """Requested fields lead; otherwise the holding as of the reference date."""
+
+    preference = (
+        "after_ratio",
+        "after_shares",
+        "change_shares",
+        "change_ratio",
+        "before_shares",
+        "before_ratio",
     )
-    for field, label in text_fields:
+    requested = [
+        field
+        for field in preference
+        if field in requested_fields and event.get(field) is not None
+    ]
+    if requested:
+        return requested
+    return [
+        field
+        for field in ("after_shares", "after_ratio")
+        if event.get(field) is not None
+    ]
+
+
+def _holding_lead_clause(
+    event: Mapping[str, Any], field: str, stated: set[str]
+) -> str | None:
+    templates = {
+        "after_ratio": ("보유 비율은 {value}입니다", _RATIO_UNIT, None),
+        "after_shares": ("보유 주식수는 {value}입니다", _SHARE_UNIT, None),
+        "before_shares": ("직전 보유 주식수는 {value}였습니다", _SHARE_UNIT, None),
+        "before_ratio": ("직전 보유 비율은 {value}였습니다", _RATIO_UNIT, None),
+        "change_shares": ("직전 보고 대비 {value} {verb}", _SHARE_UNIT, _SHARES),
+        "change_ratio": ("보유 비율은 {value} {verb}", _RATIO_CHANGE_UNIT, _RATIO),
+    }
+    entry = templates.get(field)
+    if entry is None:
+        return None
+    template, unit, kind = entry
+    value = _numeric_text(event.get(field), unit)
+    if not value:
+        return None
+    stated.add(value)
+    verb = "변동했습니다" if kind is None else _holding_predicate(event, kind)
+    return template.format(value=value, verb=verb)
+
+
+def _holding_movement_sentence(
+    event: Mapping[str, Any], kind: int, stated: set[str]
+) -> str | None:
+    """Say a before/after movement once, keeping all three of its values."""
+
+    if kind == _SHARES:
+        # The topic particle is carried with the label: Korean picks 은 or 는
+        # from the preceding syllable, and both labels here are fixed.
+        label, particle = "보유 주식수", "는"
+        unit, change_unit = _SHARE_UNIT, _SHARE_UNIT
+        fields = ("before_shares", "after_shares", "change_shares")
+    else:
+        label, particle = "보유 비율", "은"
+        unit, change_unit = _RATIO_UNIT, _RATIO_CHANGE_UNIT
+        fields = ("before_ratio", "after_ratio", "change_ratio")
+
+    before = _numeric_text(event.get(fields[0]), unit)
+    after = _numeric_text(event.get(fields[1]), unit)
+    change = _numeric_text(event.get(fields[2]), change_unit)
+    values = [value for value in (before, after, change) if value]
+    if not values or all(value in stated for value in values):
+        return None
+
+    predicate = _holding_predicate(event, kind)
+    if before and after:
+        # The change figure is left out when the lead already gave it, so the
+        # same number is not repeated in consecutive sentences.
+        middle = f"{change} " if change and change not in stated else ""
+        stated.update(values)
+        return f"{label}{particle} {before}에서 {after}로 {middle}{predicate}."
+
+    remaining = [value for value in values if value not in stated]
+    stated.update(values)
+    return f"{label}{particle} " + ", ".join(remaining) + "로 확인됩니다."
+
+
+def _holding_filing_sentence(
+    event: Mapping[str, Any], stated: set[str]
+) -> str | None:
+    """Carry the filing dates without giving each one a line of its own."""
+
+    parts = []
+    for field, label in (("report_date", "보고일"), ("receipt_date", "접수일")):
         value = _text(event.get(field))
-        if value:
-            lines.append(f"{label}: {value} {marker}")
-    numeric_fields = (
-        ("before_shares", "변동 전 주식수", "주"),
-        ("change_shares", "증감 주식수", "주"),
-        ("after_shares", "변동 후 주식수", "주"),
-        ("before_ratio", "변동 전 비율", "%"),
-        ("after_ratio", "변동 후 비율", "%"),
-        ("change_ratio", "증감 비율", "%"),
-    )
-    for field, label, unit in numeric_fields:
-        value = _numeric_text(event.get(field), unit)
-        if value:
-            lines.append(f"{label}: {value} {marker}")
-    direction = _direction_text(event.get("change_direction"))
-    if direction:
-        lines.append(f"변동 방향: {direction} {marker}")
+        if value and value not in stated:
+            stated.add(value)
+            parts.append(f"{label}은 {value}")
+    if not parts:
+        return None
+    return ", ".join(parts) + "입니다."
+
+
+def _holding_predicate(event: Mapping[str, Any], kind: int) -> str:
+    predicates = _DIRECTION_PREDICATES.get(_text(event.get("change_direction")) or "")
+    return predicates[kind] if predicates else "변동했습니다"
+
+
+def _holding_fact_value(
+    event: Mapping[str, Any], entry: tuple[str, ...]
+) -> str | None:
+    field = entry[0]
+    if len(entry) == 3:
+        return _numeric_text(event.get(field), entry[2])
+    if field == "change_direction":
+        return _direction_text(event.get(field))
+    return _text(event.get(field))
+
+
+def _holding_fact_lines(
+    event: Mapping[str, Any],
+    marker: str,
+    requested_fields: Sequence[str] = (),
+) -> list[str]:
+    """Render every verified fact on an event, asked-for figures first.
+
+    ``requested_fields`` decides order, never membership.  An earlier version
+    dropped the fields the question did not name, which read well but deleted
+    verified facts a reader needs to interpret the one they asked for: a change
+    ratio without the share count it applies to, or an after value with nothing
+    to compare it against.  Ordering gives the same directness without losing
+    anything.
+    """
+
+    requested = tuple(dict.fromkeys(requested_fields))
+    identity = [
+        (field, label)
+        for field, label in _HOLDING_TEXT_FIELDS
+        if field in HOLDING_IDENTITY_FIELDS
+    ]
+    remaining = [
+        entry
+        for entry in (*_HOLDING_TEXT_FIELDS, *_HOLDING_NUMERIC_FIELDS, _HOLDING_DIRECTION)
+        if entry[0] not in HOLDING_IDENTITY_FIELDS
+    ]
+    # Hoist what the question named, keeping the canonical order inside each
+    # group so two questions never render the same event differently.
+    ordered = [
+        *identity,
+        *[entry for entry in remaining if entry[0] in requested],
+        *[entry for entry in remaining if entry[0] not in requested],
+    ]
+
+    lines = []
+    for entry in ordered:
+        line = _holding_fact_line(event, entry, marker)
+        if line:
+            lines.append(line)
     return lines
+
+
+_HOLDING_TEXT_FIELDS = (
+    ("corp_name", "회사"),
+    ("reporter", "보고자"),
+    ("reference_date", "변동일"),
+    ("report_date", "보고일"),
+    ("receipt_date", "접수일"),
+)
+
+_HOLDING_NUMERIC_FIELDS = (
+    ("before_shares", "변동 전 주식수", "주"),
+    ("change_shares", "증감 주식수", "주"),
+    ("after_shares", "변동 후 주식수", "주"),
+    ("before_ratio", "변동 전 비율", "%"),
+    ("after_ratio", "변동 후 비율", "%"),
+    ("change_ratio", "증감 비율", "%"),
+)
+
+_HOLDING_DIRECTION = ("change_direction", "변동 방향")
+
+
+def _holding_fact_line(
+    event: Mapping[str, Any], entry: tuple[str, ...], marker: str
+) -> str | None:
+    field, label = entry[0], entry[1]
+    if len(entry) == 3:
+        value = _numeric_text(event.get(field), entry[2])
+    elif field == "change_direction":
+        value = _direction_text(event.get(field))
+    else:
+        value = _text(event.get(field))
+    return f"{label}: {value} {marker}" if value else None
 
 
 def _periodic_sections(
