@@ -3,11 +3,26 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from app.generation.compact_claim import build_compact_claim
+from app.generation.compact_claim import (
+    ClaimCitation,
+    ClaimField,
+    CompactClaim,
+    _render,
+    build_compact_claim,
+)
 from app.generation.hcx_verbalizer import HcxSettings
-from app.generation.protected_literals import PLACEHOLDER_PATTERN
+from app.generation.protected_literals import (
+    PLACEHOLDER_PATTERN,
+    check_placeholder_integrity,
+    restore_literals,
+)
 from scripts.experiment_hcx_holding_live import (
     TARGET_QUESTION_IDS,
+    attach_live_detached_citations,
+    detach_live_claim_citations,
+    diagnose_prepare,
+    orchestrator_exception_stage,
+    placeholder_diagnostics,
     prepare_actual_question,
     run_prepared_question,
     summarize_live_runs,
@@ -77,6 +92,51 @@ def _prepared(events: int = 4):
     return prepared, production_claim, pipeline
 
 
+def _structured_claim(event_fields):
+    """Build a claim from already-structured field values, like ClaimBuilder."""
+
+    fields = []
+    citations = []
+    seen_markers = set()
+    for event_index, event in enumerate(event_fields):
+        for field_index, (name, label, value, marker) in enumerate(event):
+            chunk_id = f"doc-{event_index}:ch-{field_index}"
+            fields.append(
+                ClaimField(
+                    name=name,
+                    label=label,
+                    value=value,
+                    marker=marker,
+                    chunk_id=chunk_id,
+                )
+            )
+            if marker not in seen_markers:
+                seen_markers.add(marker)
+                citations.append(
+                    ClaimCitation(
+                        marker=marker,
+                        chunk_id=chunk_id,
+                        doc_id=f"doc-{event_index}",
+                        source_refs=(
+                            {
+                                "table_id": f"t{event_index}",
+                                "row_start": 1,
+                                "row_end": 1,
+                            },
+                        ),
+                    )
+                )
+    text = _render("테스트회사", "국민연금기금", fields)
+    return CompactClaim(
+        question="테스트 질문",
+        company="테스트회사",
+        reporter="국민연금기금",
+        fields=tuple(fields),
+        citations=tuple(citations),
+        deterministic_text=text,
+    )
+
+
 class ActualHoldingPreparationTests(unittest.TestCase):
     def test_target_list_is_the_requested_eleven_frozen_questions(self) -> None:
         rows = target_question_rows()
@@ -120,6 +180,245 @@ class ActualHoldingPreparationTests(unittest.TestCase):
         self.assertEqual(prepared.structure["multi_source_event_count"], 0)
         self.assertEqual(prepared.structure["duplicate_event_count"], 0)
 
+    def test_orchestrator_error_from_resolver_traceback_is_named_resolver(self) -> None:
+        try:
+            exec(
+                compile(
+                    "raise ValueError('resolver failed')",
+                    "app/reasoning/holding_event_resolver.py",
+                    "exec",
+                )
+            )
+        except ValueError as error:
+            self.assertEqual(orchestrator_exception_stage(error), "resolver")
+
+
+class TextFieldPlaceholderTests(unittest.TestCase):
+    def test_change_direction_increase_is_masked_and_restored(self) -> None:
+        claim = _structured_claim(
+            [[("change_direction", "증감 방향", "증가", "[1]")]]
+        )
+
+        detached = detach_live_claim_citations(claim)
+
+        self.assertIn("__FESTIVAL_TEXT_A__", detached.protection.masked)
+        self.assertNotIn("증가", detached.protection.masked)
+        self.assertEqual(
+            restore_literals(detached.protection.masked, detached.protection),
+            detached.text,
+        )
+
+    def test_change_direction_decrease_is_masked_and_restored(self) -> None:
+        claim = _structured_claim(
+            [[("change_direction", "증감 방향", "감소", "[1]")]]
+        )
+
+        detached = detach_live_claim_citations(claim)
+
+        self.assertIn("__FESTIVAL_TEXT_A__", detached.protection.masked)
+        self.assertNotIn("감소", detached.protection.masked)
+        self.assertEqual(detached.protection.mapping()["__FESTIVAL_TEXT_A__"], "감소")
+
+    def test_mixed_date_number_and_text_event_uses_all_placeholder_types(self) -> None:
+        claim = _structured_claim(
+            [[
+                ("reference_date", "변동일", "2024-01-02", "[1]"),
+                ("after_shares", "변동 후 주식수", "1,500주", "[1]"),
+                ("change_direction", "증감 방향", "증가", "[1]"),
+            ]]
+        )
+
+        detached = detach_live_claim_citations(claim)
+        breakdown = placeholder_diagnostics(
+            detached.protection,
+            PLACEHOLDER_PATTERN.findall(detached.protection.masked),
+        )
+
+        self.assertEqual(
+            {
+                kind: len(tokens)
+                for kind, tokens in breakdown[
+                    "expected_placeholders_by_type"
+                ].items()
+            },
+            {"date": 1, "number": 1, "text": 1},
+        )
+        self.assertTrue(breakdown["text_placeholders_all_preserved"])
+
+    def test_text_placeholder_missing_fails_integrity(self) -> None:
+        claim = _structured_claim(
+            [[("change_direction", "증감 방향", "감소", "[1]")]]
+        )
+        detached = detach_live_claim_citations(claim)
+        token = detached.protection.placeholders[0]
+
+        result = check_placeholder_integrity(
+            detached.protection.masked.replace(token, "", 1),
+            detached.protection,
+        )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "placeholder_missing")
+
+    def test_text_placeholder_duplicated_fails_integrity(self) -> None:
+        claim = _structured_claim(
+            [[("change_direction", "증감 방향", "감소", "[1]")]]
+        )
+        detached = detach_live_claim_citations(claim)
+        token = detached.protection.placeholders[0]
+
+        result = check_placeholder_integrity(
+            detached.protection.masked + token,
+            detached.protection,
+        )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "placeholder_duplicated")
+
+    def test_text_placeholder_reordered_fails_integrity(self) -> None:
+        claim = _structured_claim(
+            [[
+                ("reference_date", "변동일", "2024-01-02", "[1]"),
+                ("change_direction", "증감 방향", "감소", "[1]"),
+            ]]
+        )
+        detached = detach_live_claim_citations(claim)
+        first, second = detached.protection.placeholders
+        swapped = detached.protection.masked.replace(first, "__SWAP__", 1)
+        swapped = swapped.replace(second, first, 1).replace("__SWAP__", second, 1)
+
+        result = check_placeholder_integrity(swapped, detached.protection)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "placeholder_reordered")
+
+    def test_unrecognized_text_placeholder_fails_integrity(self) -> None:
+        claim = _structured_claim(
+            [[("change_direction", "증감 방향", "감소", "[1]")]]
+        )
+        detached = detach_live_claim_citations(claim)
+
+        result = check_placeholder_integrity(
+            detached.protection.masked + "__FESTIVAL_TEXT_Z__",
+            detached.protection,
+        )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "placeholder_unexpected")
+
+    def test_same_decrease_value_has_unique_placeholder_per_event(self) -> None:
+        claim = _structured_claim(
+            [
+                [("change_direction", "증감 방향", "감소", "[1]")],
+                [("change_direction", "증감 방향", "감소", "[2]")],
+            ]
+        )
+
+        detached = detach_live_claim_citations(claim)
+        text_tokens = [
+            literal.placeholder
+            for literal in detached.protection.literals
+            if literal.kind == "text"
+        ]
+
+        self.assertEqual(text_tokens, ["__FESTIVAL_TEXT_A__", "__FESTIVAL_TEXT_B__"])
+        self.assertEqual(len(set(text_tokens)), 2)
+        self.assertEqual(
+            [detached.protection.mapping()[token] for token in text_tokens],
+            ["감소", "감소"],
+        )
+
+    def test_citation_attachment_uses_text_field_event_ownership(self) -> None:
+        claim = _structured_claim(
+            [[
+                ("reference_date", "변동일", "2024-01-02", "[1]"),
+                ("change_direction", "증감 방향", "감소", "[2]"),
+            ]]
+        )
+        detached = detach_live_claim_citations(claim)
+
+        result = attach_live_detached_citations(
+            detached.protection.masked,
+            detached,
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.attached_citation_count, 2)
+        self.assertIn("감소 [1][2]", result.final_answer)
+
+    def test_hx07_like_three_requested_fields_keep_all_events(self) -> None:
+        claim = _structured_claim(
+            [
+                [
+                    (
+                        "change_shares",
+                        "증감 주식수",
+                        f"{index + 1},000주",
+                        f"[{index + 1}]",
+                    ),
+                    (
+                        "change_ratio",
+                        "증감 비율",
+                        f"{index + 1}.0%",
+                        f"[{index + 1}]",
+                    ),
+                    (
+                        "change_direction",
+                        "증감 방향",
+                        "증가",
+                        f"[{index + 1}]",
+                    ),
+                ]
+                for index in range(4)
+            ]
+        )
+
+        detached = detach_live_claim_citations(claim)
+
+        self.assertEqual(len(detached.attachments), 4)
+        self.assertEqual(len(detached.protection.placeholders), 12)
+        self.assertEqual(
+            [literal.kind for literal in detached.protection.literals].count("text"),
+            4,
+        )
+
+    def test_hx16_like_date_number_direction_attaches_for_six_events(self) -> None:
+        claim = _structured_claim(
+            [
+                [
+                    (
+                        "reference_date",
+                        "변동일",
+                        f"2024-01-{index + 1:02d}",
+                        f"[{index + 1}]",
+                    ),
+                    (
+                        "after_shares",
+                        "변동 후 주식수",
+                        f"{index + 1},500주",
+                        f"[{index + 1}]",
+                    ),
+                    (
+                        "change_direction",
+                        "증감 방향",
+                        "감소",
+                        f"[{index + 1}]",
+                    ),
+                ]
+                for index in range(6)
+            ]
+        )
+        detached = detach_live_claim_citations(claim)
+
+        result = attach_live_detached_citations(
+            detached.protection.masked,
+            detached,
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.attached_citation_count, 6)
+        self.assertEqual(len(detached.attachments), 6)
+
 
 class ActualHoldingLiveRunTests(unittest.TestCase):
     def test_clean_echo_passes_every_required_check(self) -> None:
@@ -148,6 +447,10 @@ class ActualHoldingLiveRunTests(unittest.TestCase):
         self.assertIsNone(record["hcx_failure_reason"])
         self.assertNotIn("raw_hcx_candidate", record)
         self.assertNotIn("secret-test-key", str(record))
+        self.assertEqual(
+            record["expected_field_placeholders"],
+            record["found_field_placeholders"],
+        )
 
     def test_show_output_is_the_only_mode_that_exposes_candidate_text(self) -> None:
         prepared, _, _ = _prepared(events=4)
