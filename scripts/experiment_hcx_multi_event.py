@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from collections.abc import Sequence
@@ -97,10 +98,21 @@ INFERENCE_MARKERS = (
 
 @dataclass(frozen=True)
 class EventCitationAttachment:
-    """Citation markers to insert after one event's last field placeholder."""
+    """One event's protected fields and citations kept outside HCX."""
 
-    anchor_text: str
+    field_placeholders: tuple[str, ...]
+    trailing_suffix: str
     markers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CitationAttachmentResult:
+    """Outcome of experimental placeholder-owned citation attachment."""
+
+    final_answer: str | None
+    valid: bool
+    attached_citation_count: int
+    reason: str | None
 
 
 @dataclass(frozen=True)
@@ -344,6 +356,7 @@ def detach_claim_citations(claim: CompactClaim) -> DetachedClaimInput:
     attachments: list[EventCitationAttachment] = []
     field_offset = 0
     for fields in event_fields:
+        event_field_offset = field_offset
         event_markers = {field.marker for field in fields}
         unknown = event_markers.difference(citation_order)
         if unknown:
@@ -358,7 +371,11 @@ def detach_claim_citations(claim: CompactClaim) -> DetachedClaimInput:
         suffix = last_field.value[literal_offset + len(last_literal.text) :]
         attachments.append(
             EventCitationAttachment(
-                anchor_text=last_literal.placeholder + suffix,
+                field_placeholders=tuple(
+                    literal.placeholder
+                    for literal in field_literals[event_field_offset:field_offset]
+                ),
+                trailing_suffix=suffix,
                 markers=markers,
             )
         )
@@ -372,18 +389,65 @@ def detach_claim_citations(claim: CompactClaim) -> DetachedClaimInput:
 def attach_detached_citations(
     masked_candidate: str,
     detached: DetachedClaimInput,
-) -> tuple[str | None, bool, int]:
-    """Attach preserved citations after each event, without inventing markers."""
+) -> CitationAttachmentResult:
+    """Attach citations using event-owned placeholder positions.
+
+    The model may rewrite labels, punctuation, bullets, and whitespace.  Event
+    identity therefore comes only from the protected placeholder sequence.  A
+    unit suffix is checked solely to place the citation after ``NUMBER 주``
+    rather than between the number and its unit.
+    """
+
+    integrity = check_placeholder_integrity(masked_candidate, detached.protection)
+    if not integrity.valid:
+        return CitationAttachmentResult(None, False, 0, integrity.reason)
+
+    owned_placeholders = tuple(
+        placeholder
+        for attachment in detached.attachments
+        for placeholder in attachment.field_placeholders
+    )
+    if owned_placeholders != detached.protection.placeholders:
+        return CitationAttachmentResult(None, False, 0, "event_count_mismatch")
+
+    insertions: list[tuple[int, str]] = []
+    for index, attachment in enumerate(detached.attachments):
+        if not attachment.field_placeholders:
+            return CitationAttachmentResult(None, False, 0, "event_span_not_found")
+        if not attachment.markers:
+            return CitationAttachmentResult(None, False, 0, "citation_mapping_missing")
+
+        last_placeholder = attachment.field_placeholders[-1]
+        placeholder_start = masked_candidate.find(last_placeholder)
+        if placeholder_start < 0:
+            return CitationAttachmentResult(None, False, 0, "event_span_not_found")
+        insertion_offset = placeholder_start + len(last_placeholder)
+
+        if attachment.trailing_suffix:
+            suffix_match = re.match(
+                rf"[ \t]*{re.escape(attachment.trailing_suffix)}",
+                masked_candidate[insertion_offset:],
+            )
+            if suffix_match is None:
+                return CitationAttachmentResult(
+                    None, False, 0, "event_field_text_mismatch"
+                )
+            insertion_offset += suffix_match.end()
+
+        if index + 1 < len(detached.attachments):
+            next_placeholder = detached.attachments[index + 1].field_placeholders[0]
+            next_event_offset = masked_candidate.find(next_placeholder)
+            if next_event_offset < 0 or insertion_offset >= next_event_offset:
+                return CitationAttachmentResult(None, False, 0, "event_span_not_found")
+
+        insertions.append((insertion_offset, " " + "".join(attachment.markers)))
 
     candidate = masked_candidate
-    for attachment in detached.attachments:
-        if candidate.count(attachment.anchor_text) != 1:
-            return None, False, 0
-        suffix = "".join(attachment.markers)
-        candidate = candidate.replace(
-            attachment.anchor_text,
-            f"{attachment.anchor_text} {suffix}",
-            1,
+    for insertion_offset, citation_text in reversed(insertions):
+        candidate = (
+            candidate[:insertion_offset]
+            + citation_text
+            + candidate[insertion_offset:]
         )
 
     final_answer = restore_literals(candidate, detached.protection)
@@ -391,7 +455,11 @@ def attach_detached_citations(
         match.group(0) for match in CITATION_MARKER_PATTERN.finditer(final_answer)
     )
     expected = detached.expected_citation_sequence
-    return final_answer, found == expected, len(found)
+    if found != expected:
+        return CitationAttachmentResult(
+            final_answer, False, len(found), "citation_sequence_mismatch"
+        )
+    return CitationAttachmentResult(final_answer, True, len(found), None)
 
 
 def _evaluate_detached_candidate(
@@ -431,6 +499,9 @@ def _evaluate_detached_candidate(
             "candidate_valid_before_citation_attachment": False,
             "deterministic_citations_attached": False,
             "attached_citation_count": 0,
+            "citation_attachment_reason": (
+                None if integrity.valid else integrity.reason
+            ),
             "final_answer_valid": False,
             "inference_markers": [],
             **breakdown,
@@ -488,11 +559,15 @@ def _evaluate_detached_candidate(
     if not candidate_valid:
         return record
 
-    final_answer, attached, attached_count = attach_detached_citations(raw, detached)
-    record["deterministic_citations_attached"] = attached
-    record["attached_citation_count"] = attached_count
-    if not attached or final_answer is None:
-        record["final_validator_reason"] = "citation_attachment_failed"
+    attachment = attach_detached_citations(raw, detached)
+    final_answer = attachment.final_answer
+    record["deterministic_citations_attached"] = attachment.valid
+    record["attached_citation_count"] = attachment.attached_citation_count
+    record["citation_attachment_reason"] = attachment.reason
+    if not attachment.valid or final_answer is None:
+        record["final_validator_reason"] = (
+            attachment.reason or "citation_attachment_failed"
+        )
         return record
 
     final_validation = validate_verbalized_answer(
@@ -527,13 +602,13 @@ def _citation_markers(text: str) -> list[str]:
 
 
 def _expected_attached_answer(detached: DetachedClaimInput) -> str:
-    expected, attached, _ = attach_detached_citations(
+    attachment = attach_detached_citations(
         detached.protection.masked,
         detached,
     )
-    if not attached or expected is None:
+    if not attachment.valid or attachment.final_answer is None:
         raise ValueError("deterministic citation plan cannot attach to its source")
-    return expected
+    return attachment.final_answer
 
 
 def _group_event_fields(

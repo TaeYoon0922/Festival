@@ -394,15 +394,15 @@ class DetachedCitationTests(unittest.TestCase):
         claim = build_experiment_claim(2)
         detached = detach_claim_citations(claim)
 
-        final, attached, count = attach_detached_citations(
+        result = attach_detached_citations(
             detached.protection.masked,
             detached,
         )
 
-        self.assertTrue(attached)
-        self.assertEqual(count, 2)
-        self.assertEqual(final.count("[1]"), 1)
-        self.assertEqual(final.count("[2]"), 1)
+        self.assertTrue(result.valid)
+        self.assertEqual(result.attached_citation_count, 2)
+        self.assertEqual(result.final_answer.count("[1]"), 1)
+        self.assertEqual(result.final_answer.count("[2]"), 1)
 
     def test_multi_source_event_uses_metadata_order(self) -> None:
         fields = (
@@ -438,14 +438,109 @@ class DetachedCitationTests(unittest.TestCase):
         )
         detached = detach_claim_citations(claim)
 
-        final, attached, count = attach_detached_citations(
+        result = attach_detached_citations(
             detached.protection.masked,
             detached,
         )
 
-        self.assertTrue(attached)
-        self.assertEqual(count, 2)
-        self.assertTrue(final.endswith("1,000주 [1][2]"))
+        self.assertTrue(result.valid)
+        self.assertEqual(result.attached_citation_count, 2)
+        self.assertTrue(result.final_answer.endswith("1,000주 [1][2]"))
+
+    def test_attachment_uses_placeholders_across_surface_formats(self) -> None:
+        detached = detach_claim_citations(build_experiment_claim(1))
+        date, number = detached.attachments[0].field_placeholders
+        unit = detached.attachments[0].trailing_suffix
+        candidates = (
+            f"변동일: {date}, 변동 후 주식수: {number}{unit}",
+            f"변동일: {date}\n변동 후 주식 수: {number} {unit}",
+            f"- 변동일 {date} / 변동 후 주식수 {number}{unit}",
+            f"* 변동일: {date}\n변동 후 주식 수: {number} {unit}",
+            f"확인된 변동 내역입니다.\n변동일: {date}, 주식 수: {number} {unit}",
+        )
+
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                result = attach_detached_citations(candidate, detached)
+                self.assertTrue(result.valid, result.reason)
+                self.assertEqual(result.attached_citation_count, 1)
+                self.assertIn(f"{unit} [1]", result.final_answer)
+
+    def test_attachment_rejects_duplicate_missing_and_reordered_placeholders(self) -> None:
+        detached = detach_claim_citations(build_experiment_claim(2))
+        masked = detached.protection.masked
+        first, second = detached.protection.placeholders[:2]
+
+        duplicated = attach_detached_citations(masked + first, detached)
+        missing = attach_detached_citations(masked.replace(first, "", 1), detached)
+        reordered_text = masked.replace(first, "__TEMP__", 1).replace(
+            second, first, 1
+        ).replace("__TEMP__", second, 1)
+        reordered = attach_detached_citations(reordered_text, detached)
+
+        self.assertFalse(duplicated.valid)
+        self.assertEqual(duplicated.reason, "placeholder_duplicated")
+        self.assertFalse(missing.valid)
+        self.assertEqual(missing.reason, "placeholder_missing")
+        self.assertFalse(reordered.valid)
+        self.assertEqual(reordered.reason, "placeholder_reordered")
+
+    def test_attachment_places_citation_before_the_next_event(self) -> None:
+        detached = detach_claim_citations(build_experiment_claim(2))
+        first_number = detached.attachments[0].field_placeholders[-1]
+        second_date = detached.attachments[1].field_placeholders[0]
+        unit = detached.attachments[0].trailing_suffix
+        candidate = detached.protection.masked.replace(
+            first_number + unit,
+            first_number + " " + unit,
+            1,
+        )
+
+        result = attach_detached_citations(candidate, detached)
+
+        self.assertTrue(result.valid, result.reason)
+        restored_second_date = detached.protection.mapping()[second_date]
+        citation_offset = result.final_answer.index("[1]")
+        self.assertLess(
+            citation_offset,
+            result.final_answer.index(restored_second_date, citation_offset + 1),
+        )
+        self.assertIn(f"{unit} [1]", result.final_answer)
+
+    def test_four_six_ten_event_attachment_survives_unit_whitespace(self) -> None:
+        records = {}
+        for event_count in (4, 6, 10):
+            def respond(masked: str, *, count: int = event_count) -> str:
+                detached = detach_claim_citations(build_experiment_claim(count))
+                for attachment in detached.attachments:
+                    anchor = (
+                        attachment.field_placeholders[-1]
+                        + attachment.trailing_suffix
+                    )
+                    masked = masked.replace(
+                        anchor,
+                        attachment.field_placeholders[-1]
+                        + " "
+                        + attachment.trailing_suffix,
+                        1,
+                    )
+                return masked
+
+            records[event_count] = run_once(
+                _Transport(respond),
+                _settings(),
+                event_count,
+                detach_citations=True,
+            )
+
+        for event_count, record in records.items():
+            with self.subTest(event_count=event_count):
+                self.assertTrue(record["field_placeholder_integrity_valid"])
+                self.assertTrue(record["candidate_valid_before_citation_attachment"])
+                self.assertTrue(record["deterministic_citations_attached"])
+                self.assertIsNone(record["citation_attachment_reason"])
+                self.assertEqual(record["attached_citation_count"], event_count)
+                self.assertTrue(record["final_answer_valid"])
 
     def test_field_placeholder_loss_fails_before_attachment(self) -> None:
         def respond(masked: str) -> str:
