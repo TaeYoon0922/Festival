@@ -10,13 +10,14 @@ from app.generation.compact_claim import (
     _render,
     build_compact_claim,
 )
-from app.generation.hcx_verbalizer import HcxSettings
+from app.generation.hcx_verbalizer import HcxSettings, SYSTEM_PROMPT
 from app.generation.protected_literals import (
     PLACEHOLDER_PATTERN,
     check_placeholder_integrity,
     restore_literals,
 )
 from scripts.experiment_hcx_holding_live import (
+    STRICT_EVENT_ORDER_SYSTEM_PROMPT,
     TARGET_QUESTION_IDS,
     attach_live_detached_citations,
     detach_live_claim_citations,
@@ -28,6 +29,7 @@ from scripts.experiment_hcx_holding_live import (
     summarize_live_runs,
     target_question_rows,
 )
+from scripts.experiment_hcx_multi_event import EXPERIMENT_SYSTEM_PROMPT
 from tests.test_compact_claim import _holding_case
 
 
@@ -421,6 +423,59 @@ class TextFieldPlaceholderTests(unittest.TestCase):
 
 
 class ActualHoldingLiveRunTests(unittest.TestCase):
+    def test_strict_prompt_requires_exact_once_placeholder_use(self) -> None:
+        self.assertIn("모든 placeholder", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("정확히 한 번씩", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("누락하거나 중복하지 않는다", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+
+    def test_strict_prompt_requires_exact_placeholder_order(self) -> None:
+        self.assertIn("정확히 동일한 순서", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("앞이나 뒤로 이동하지 않는다", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("A → B → C → D", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+
+    def test_strict_prompt_forbids_cross_event_field_regrouping(self) -> None:
+        self.assertIn("나눌 수 없는 하나의 record", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("필드를 재그룹화하지 않는다", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+
+    def test_strict_prompt_forbids_event_merge_and_summary(self) -> None:
+        self.assertIn("병합, 요약, 정렬", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("모든 이벤트를 그대로 보존", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+
+    def test_strict_prompt_forbids_factual_repetition_around_answer(self) -> None:
+        self.assertIn("서론, 설명, 요약 또는 결론", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+        self.assertIn("factual placeholder를 다시 반복하지 않는다", STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+
+    def test_default_prompt_and_production_prompt_are_unchanged(self) -> None:
+        prepared, _, _ = _prepared(events=4)
+        default_transport = _Transport()
+        strict_transport = _Transport()
+        production_prompt_before = SYSTEM_PROMPT
+
+        run_prepared_question(
+            prepared,
+            transport=default_transport,
+            settings=_settings(),
+            repeat_index=1,
+        )
+        run_prepared_question(
+            prepared,
+            transport=strict_transport,
+            settings=_settings(),
+            repeat_index=1,
+            strict_event_order=True,
+        )
+
+        self.assertEqual(
+            default_transport.calls[0]["payload"]["messages"][0]["content"],
+            EXPERIMENT_SYSTEM_PROMPT,
+        )
+        self.assertEqual(
+            strict_transport.calls[0]["payload"]["messages"][0]["content"],
+            STRICT_EVENT_ORDER_SYSTEM_PROMPT,
+        )
+        self.assertEqual(SYSTEM_PROMPT, production_prompt_before)
+        self.assertNotEqual(STRICT_EVENT_ORDER_SYSTEM_PROMPT, SYSTEM_PROMPT)
+
     def test_clean_echo_passes_every_required_check(self) -> None:
         prepared, _, _ = _prepared(events=4)
         transport = _Transport()
@@ -533,6 +588,20 @@ class ActualHoldingLiveRunTests(unittest.TestCase):
             2,
         )
         self.assertEqual(summary["max_successful_event_count"], 4)
+        self.assertEqual(summary["by_question"]["HX07"]["runs"], 2)
+        self.assertEqual(summary["by_question"]["HX07"]["successes"], 1)
+        self.assertEqual(
+            summary["by_question"]["HX07"]["failure_reasons"],
+            {"placeholder_missing": 1},
+        )
+        self.assertEqual(
+            summary["by_question"]["HX07"]["expected_placeholder_count"],
+            8,
+        )
+        self.assertEqual(
+            summary["by_question"]["HX07"]["found_placeholder_counts"],
+            [8, 8],
+        )
         self.assertFalse(summary["all_questions_clean"])
 
 

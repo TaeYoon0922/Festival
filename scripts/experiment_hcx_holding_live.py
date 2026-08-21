@@ -98,6 +98,30 @@ PRIOR_AUDIT_CANDIDATE_EVENT_COUNTS = {
 
 _FIELD_PLACEHOLDER_KINDS = ("date", "number", "text")
 
+# Experimental only.  The production prompt in ``hcx_verbalizer.py`` and the
+# default live-experiment prompt imported above remain byte-for-byte unchanged.
+STRICT_EVENT_ORDER_SYSTEM_PROMPT = EXPERIMENT_SYSTEM_PROMPT + """
+
+추가 불변 규칙:
+- 입력의 모든 placeholder는 출력에 정확히 한 번씩 나타나야 한다.
+- placeholder는 입력과 정확히 동일한 순서를 유지해야 한다.
+- placeholder를 누락하거나 중복하지 않는다.
+- 어떤 placeholder도 다른 placeholder의 앞이나 뒤로 이동하지 않는다.
+- 입력의 각 이벤트는 나눌 수 없는 하나의 record다. 한 이벤트의 모든 필드를 함께 유지한다.
+- 서로 다른 이벤트의 필드를 재그룹화하지 않는다.
+
+금지 예시:
+입력이 event1의 before A, after B 다음에 event2의 before C, after D 순서라면,
+before A, C 다음에 after B, D로 재배열하는 것은 금지한다.
+출력도 반드시 A → B → C → D 순서를 유지한다.
+
+- 이벤트를 병합, 요약, 정렬, 중복 제거, 선택, 비교, 집계 또는 재구성하지 않는다.
+- 서론, 설명, 요약 또는 결론에서 factual placeholder를 다시 반복하지 않는다.
+- citation을 생성하지 않는다.
+- 자연스러운 한국어 연결 표현만 바꿀 수 있다. placeholder의 identity, 개수와 순서는 불변이다.
+- 이벤트가 많아도 모든 이벤트를 그대로 보존한다. 답변을 줄이기 위해 사실을 생략하지 않는다.
+"""
+
 
 class ExperimentPreparationError(ValueError):
     """A safe all-candidate claim could not be built."""
@@ -537,6 +561,14 @@ def main(argv: list[str] | None = None) -> int:
         choices=TARGET_QUESTION_IDS,
         help="Limit the run to one or more target IDs (repeatable).",
     )
+    parser.add_argument(
+        "--strict-event-order",
+        action="store_true",
+        help=(
+            "Use the experiment-only exact-once/event-order prompt. "
+            "The default and production prompts remain unchanged."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
@@ -564,7 +596,12 @@ def main(argv: list[str] | None = None) -> int:
         if prepared is None:
             for repeat_index in range(1, args.repeat + 1):
                 runs.append(
-                    preparation_failure_record(row, repeat_index, diagnostic)
+                    preparation_failure_record(
+                        row,
+                        repeat_index,
+                        diagnostic,
+                        strict_event_order=args.strict_event_order,
+                    )
                 )
             continue
 
@@ -581,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                     settings=settings,
                     repeat_index=repeat_index,
                     show_output=args.show_output,
+                    strict_event_order=args.strict_event_order,
                 )
             )
 
@@ -589,7 +627,9 @@ def main(argv: list[str] | None = None) -> int:
         "model": settings.model,
         "max_tokens": settings.max_tokens,
         "repeat": args.repeat,
+        "strict_event_order": args.strict_event_order,
         "target_question_ids": list(TARGET_QUESTION_IDS),
+        "selected_question_ids": [str(row["question_id"]) for row in rows],
         "production_caps_observed_not_applied": {
             "MAX_CLAIM_EVENTS": MAX_CLAIM_EVENTS,
             "MAX_CLAIM_LITERALS": MAX_CLAIM_LITERALS,
@@ -1025,15 +1065,22 @@ def run_prepared_question(
     settings: HcxSettings,
     repeat_index: int,
     show_output: bool = False,
+    strict_event_order: bool = False,
 ) -> dict[str, Any]:
     """Make one HCX call and run every detached-citation safety check."""
 
     record = base_run_record(prepared, repeat_index)
+    record["strict_event_order"] = strict_event_order
     protection = prepared.detached.protection
+    system_prompt = (
+        STRICT_EVENT_ORDER_SYSTEM_PROMPT
+        if strict_event_order
+        else EXPERIMENT_SYSTEM_PROMPT
+    )
     payload = {
         "model": settings.model,
         "messages": [
-            {"role": "system", "content": EXPERIMENT_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": protection.masked},
         ],
         "temperature": settings.temperature,
@@ -1175,6 +1222,8 @@ def preparation_failure_record(
     row: Mapping[str, Any],
     repeat_index: int,
     diagnostic: Mapping[str, Any],
+    *,
+    strict_event_order: bool = False,
 ) -> dict[str, Any]:
     reason = str(
         diagnostic.get("exception_message")
@@ -1185,6 +1234,7 @@ def preparation_failure_record(
         "question_id": str(row.get("question_id") or ""),
         "question": str(row.get("query") or ""),
         "repeat_index": repeat_index,
+        "strict_event_order": strict_event_order,
         "task_type": None,
         "requested_fields": [],
         "candidate_event_count": 0,
@@ -1286,12 +1336,17 @@ def summarize_live_runs(
         for run in runs
         if run.get("hcx_success") is not True
     )
+    question_summary = {
+        question_id: _summarize_question_runs(question_runs)
+        for question_id, question_runs in sorted(by_question.items())
+    }
     return {
         "question_count": len(by_question),
         "run_count": len(runs),
         "hcx_success_count": len(clean_questions),
         "hcx_successful_run_count": len(successful_runs),
         "failure_reasons": dict(sorted(failures.items())),
+        "by_question": question_summary,
         "by_candidate_event_count": _group_runs(runs, "candidate_event_count"),
         "by_protected_literal_count": _group_runs(runs, "protected_literal_count"),
         "max_successful_event_count": max(
@@ -1306,7 +1361,73 @@ def summarize_live_runs(
             len(by_question) == len(TARGET_QUESTION_IDS)
             and len(clean_questions) == len(TARGET_QUESTION_IDS)
         ),
+        "all_selected_questions_clean": bool(by_question)
+        and len(clean_questions) == len(by_question),
     }
+
+
+def _summarize_question_runs(
+    runs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    failures = [run for run in runs if run.get("hcx_success") is not True]
+    expected_counts = [
+        len(tuple(run.get("expected_field_placeholders") or ())) for run in runs
+    ]
+    found_counts = [
+        len(tuple(run.get("found_field_placeholders") or ())) for run in runs
+    ]
+    unique_expected = sorted(set(expected_counts))
+    return {
+        "runs": len(runs),
+        "successes": sum(run.get("hcx_success") is True for run in runs),
+        "failure_reasons": dict(
+            sorted(
+                Counter(
+                    str(run.get("hcx_failure_reason") or "unknown_failure")
+                    for run in failures
+                ).items()
+            )
+        ),
+        "failure_categories": dict(
+            sorted(Counter(_failure_category(run) for run in failures).items())
+        ),
+        "expected_placeholder_count": (
+            unique_expected[0] if len(unique_expected) == 1 else unique_expected
+        ),
+        "found_placeholder_counts": found_counts,
+        "run_results": [
+            {
+                "repeat_index": run.get("repeat_index"),
+                "success": run.get("hcx_success") is True,
+                "expected_placeholder_count": expected,
+                "found_placeholder_count": found,
+                "failure_reason": run.get("hcx_failure_reason"),
+            }
+            for run, expected, found in zip(
+                runs,
+                expected_counts,
+                found_counts,
+                strict=True,
+            )
+        ],
+    }
+
+
+def _failure_category(run: Mapping[str, Any]) -> str:
+    reason = str(run.get("hcx_failure_reason") or "unknown_failure")
+    if reason in {
+        "placeholder_missing",
+        "placeholder_reordered",
+        "placeholder_duplicated",
+    }:
+        return reason
+    if run.get("candidate_valid_before_citation_attachment") is not True:
+        return "validator_failure"
+    if run.get("deterministic_citations_attached") is not True:
+        return "citation_attachment_failure"
+    if run.get("final_answer_valid") is not True:
+        return "validator_failure"
+    return reason
 
 
 def _group_runs(
