@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,9 @@ from app.retrieval.embeddings import EmbeddingHttpError, UrllibJsonTransport
 
 
 DEFAULT_EVENT_COUNTS = (4, 6, 10)
+
+#: The literal kinds ``protect_literals`` assigns.
+_KINDS = ("date", "number", "citation")
 
 COMPANY = "효성중공업"
 REPORTER = "국민연금기금"
@@ -108,7 +113,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--show-output",
         action="store_true",
-        help="Include the restored model output for each run.",
+        help=(
+            "Include the assistant message for each run: the raw candidate, "
+            "and the restored text when integrity allows restoration."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -197,11 +205,17 @@ def run_once(
     record["finish_reason"] = _finish_reason(response)
     record["completion_tokens"] = _completion_tokens(response)
     record["candidate_received"] = raw is not None
+    if show_output:
+        # Emitted here, not at the end, so a run that fails integrity still
+        # shows what the model actually wrote.  Only the assistant message is
+        # exposed; the response envelope and request headers never are.
+        record["raw_hcx_candidate"] = raw
     if raw is None:
         return record
 
     found = PLACEHOLDER_PATTERN.findall(raw)
     integrity = check_placeholder_integrity(raw, protection)
+    breakdown = placeholder_type_breakdown(protection, found)
     record.update(
         {
             "output_chars": len(raw),
@@ -209,7 +223,8 @@ def run_once(
             "found_placeholders": len(found),
             "placeholder_integrity_valid": integrity.valid,
             "placeholder_integrity_reason": integrity.reason,
-            "all_events_kept": integrity.valid,
+            "all_events_kept": breakdown["field_placeholders_all_preserved"],
+            **breakdown,
         }
     )
     if not integrity.valid:
@@ -235,6 +250,42 @@ def run_once(
     if show_output:
         record["restored_output"] = restored
     return record
+
+
+def placeholder_type_breakdown(
+    protection: Any, found: Sequence[str]
+) -> dict[str, Any]:
+    """Split placeholder survival by kind.
+
+    Whether a model drops whole events or drops one kind of token across every
+    event are different failures with different fixes, and the totals alone
+    cannot tell them apart.
+    """
+
+    kinds = {literal.placeholder: literal.kind for literal in protection.literals}
+    found_set = set(found)
+    expected_counts = Counter(literal.kind for literal in protection.literals)
+    found_counts = Counter(
+        kinds[token] for token in found_set if token in kinds
+    )
+
+    expected_by_type = {kind: expected_counts.get(kind, 0) for kind in _KINDS}
+    found_by_type = {kind: found_counts.get(kind, 0) for kind in _KINDS}
+    missing_by_type = {
+        kind: expected_by_type[kind] - found_by_type[kind] for kind in _KINDS
+    }
+
+    def preserved(*wanted: str) -> bool:
+        return all(missing_by_type[kind] == 0 for kind in wanted)
+
+    return {
+        "expected_placeholders_by_type": expected_by_type,
+        "found_placeholders_by_type": found_by_type,
+        "missing_placeholders_by_type": missing_by_type,
+        "unrecognized_placeholders": len(found_set - set(kinds)),
+        "field_placeholders_all_preserved": preserved("date", "number"),
+        "citation_placeholders_all_preserved": preserved("citation"),
+    }
 
 
 def build_experiment_claim(event_count: int) -> CompactClaim:

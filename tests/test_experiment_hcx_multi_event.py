@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from app.generation.hcx_verbalizer import SYSTEM_PROMPT, HcxSettings
@@ -7,6 +8,7 @@ from app.generation.protected_literals import protect_literals, restore_literals
 from scripts.experiment_hcx_multi_event import (
     EXPERIMENT_SYSTEM_PROMPT,
     build_experiment_claim,
+    placeholder_type_breakdown,
     run_once,
     summarize,
 )
@@ -111,12 +113,17 @@ class RunOutcomeTests(unittest.TestCase):
         self.assertEqual(record["inference_markers"], [])
         self.assertEqual(record["finish_reason"], "stop")
 
-    def test_a_dropped_event_is_reported_as_integrity_failure(self) -> None:
+    def test_a_dropped_event_value_is_reported_as_event_loss(self) -> None:
         def respond(masked: str) -> str:
-            placeholders = protect_literals(
+            protection = protect_literals(
                 build_experiment_claim(4).deterministic_text
-            ).placeholders
-            return masked.replace(placeholders[-1], "")
+            )
+            date = next(
+                literal.placeholder
+                for literal in protection.literals
+                if literal.kind == "date"
+            )
+            return masked.replace(date, "")
 
         record = run_once(_Transport(respond), _settings(), 4)
 
@@ -124,6 +131,26 @@ class RunOutcomeTests(unittest.TestCase):
         self.assertFalse(record["all_events_kept"])
         self.assertEqual(record["placeholder_integrity_reason"], "placeholder_missing")
         self.assertNotIn("candidate_valid", record)
+
+    def test_dropping_only_citations_is_not_reported_as_event_loss(self) -> None:
+        """Integrity still fails, but the events themselves survived."""
+
+        def respond(masked: str) -> str:
+            protection = protect_literals(
+                build_experiment_claim(4).deterministic_text
+            )
+            for literal in protection.literals:
+                if literal.kind == "citation":
+                    masked = masked.replace(literal.placeholder, "")
+            return masked
+
+        record = run_once(_Transport(respond), _settings(), 4)
+
+        self.assertFalse(record["placeholder_integrity_valid"])
+        self.assertTrue(record["all_events_kept"])
+        self.assertTrue(record["field_placeholders_all_preserved"])
+        self.assertFalse(record["citation_placeholders_all_preserved"])
+        self.assertEqual(record["found_placeholders"], 8)
 
     def test_an_added_conclusion_is_surfaced(self) -> None:
         record = run_once(
@@ -159,6 +186,126 @@ class RunOutcomeTests(unittest.TestCase):
         self.assertEqual(
             restore_literals(protection.masked, protection), claim.deterministic_text
         )
+
+
+class PlaceholderTypeBreakdownTests(unittest.TestCase):
+    """Losing every citation and losing whole events look identical in totals."""
+
+    def setUp(self) -> None:
+        self.claim = build_experiment_claim(4)
+        self.protection = protect_literals(self.claim.deterministic_text)
+        self.by_kind = {
+            kind: [
+                literal.placeholder
+                for literal in self.protection.literals
+                if literal.kind == kind
+            ]
+            for kind in ("date", "number", "citation")
+        }
+
+    def test_four_events_expect_four_dates_four_numbers_eight_citations(self) -> None:
+        breakdown = placeholder_type_breakdown(self.protection, [])
+
+        self.assertEqual(
+            breakdown["expected_placeholders_by_type"],
+            {"date": 4, "number": 4, "citation": 8},
+        )
+
+    def test_a_full_echo_preserves_every_kind(self) -> None:
+        breakdown = placeholder_type_breakdown(
+            self.protection, list(self.protection.placeholders)
+        )
+
+        self.assertEqual(
+            breakdown["missing_placeholders_by_type"],
+            {"date": 0, "number": 0, "citation": 0},
+        )
+        self.assertTrue(breakdown["field_placeholders_all_preserved"])
+        self.assertTrue(breakdown["citation_placeholders_all_preserved"])
+
+    def test_the_observed_pattern_is_citation_loss_not_event_loss(self) -> None:
+        """8 of 16 survive: every date and number, and no citation."""
+
+        found = self.by_kind["date"] + self.by_kind["number"]
+
+        breakdown = placeholder_type_breakdown(self.protection, found)
+
+        self.assertEqual(
+            breakdown["found_placeholders_by_type"],
+            {"date": 4, "number": 4, "citation": 0},
+        )
+        self.assertEqual(breakdown["missing_placeholders_by_type"]["citation"], 8)
+        self.assertTrue(breakdown["field_placeholders_all_preserved"])
+        self.assertFalse(breakdown["citation_placeholders_all_preserved"])
+
+    def test_dropping_a_whole_event_shows_as_field_loss(self) -> None:
+        found = (
+            self.by_kind["date"][:-1]
+            + self.by_kind["number"][:-1]
+            + self.by_kind["citation"][:-2]
+        )
+
+        breakdown = placeholder_type_breakdown(self.protection, found)
+
+        self.assertFalse(breakdown["field_placeholders_all_preserved"])
+        self.assertEqual(breakdown["missing_placeholders_by_type"]["date"], 1)
+        self.assertEqual(breakdown["missing_placeholders_by_type"]["number"], 1)
+
+    def test_invented_placeholders_are_counted_separately(self) -> None:
+        breakdown = placeholder_type_breakdown(
+            self.protection,
+            [*self.protection.placeholders, "__FESTIVAL_NUMBER_ZZ__"],
+        )
+
+        self.assertEqual(breakdown["unrecognized_placeholders"], 1)
+
+
+class ShowOutputTests(unittest.TestCase):
+    """A run that fails integrity is exactly when the output matters most."""
+
+    def test_raw_candidate_is_reported_when_integrity_fails(self) -> None:
+        def respond(masked: str) -> str:
+            protection = protect_literals(
+                build_experiment_claim(4).deterministic_text
+            )
+            citations = [
+                literal.placeholder
+                for literal in protection.literals
+                if literal.kind == "citation"
+            ]
+            for token in citations:
+                masked = masked.replace(token, "")
+            return masked
+
+        record = run_once(_Transport(respond), _settings(), 4, show_output=True)
+
+        self.assertFalse(record["placeholder_integrity_valid"])
+        self.assertIn("raw_hcx_candidate", record)
+        self.assertTrue(record["raw_hcx_candidate"])
+        self.assertNotIn("restored_output", record)
+
+    def test_raw_candidate_is_reported_on_success_too(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked), _settings(), 4, show_output=True
+        )
+
+        self.assertIn("raw_hcx_candidate", record)
+        self.assertIn("restored_output", record)
+
+    def test_nothing_is_shown_without_the_flag(self) -> None:
+        record = run_once(_Transport(lambda masked: masked), _settings(), 4)
+
+        self.assertNotIn("raw_hcx_candidate", record)
+        self.assertNotIn("restored_output", record)
+
+    def test_the_report_never_carries_credentials(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked), _settings(), 4, show_output=True
+        )
+
+        body = json.dumps(record, ensure_ascii=False).lower()
+        for forbidden in ("authorization", "bearer", "test-key", "api_key"):
+            self.assertNotIn(forbidden, body)
 
 
 class SummaryTests(unittest.TestCase):
