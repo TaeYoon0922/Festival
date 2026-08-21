@@ -198,9 +198,14 @@ class Case4HistoryQuestionTests(unittest.TestCase):
             with self.subTest(date=date):
                 self.assertIn(date, self.generated.answer_text)
 
-    def test_every_field_is_still_rendered(self) -> None:
-        self.assertIn("변동 후 주식수", self.generated.answer_text)
-        self.assertIn("변동 후 비율", self.generated.answer_text)
+    def test_every_verified_value_is_still_rendered(self) -> None:
+        """The compact multi-event form drops labels, never values."""
+
+        text = self.generated.answer_text
+        for _, shares, ratio in EVENTS:
+            with self.subTest(shares=shares):
+                self.assertIn(f"{shares}주", text)
+                self.assertIn(f"{ratio}%", text)
 
 
 class Case5MultiEventSafetyTests(unittest.TestCase):
