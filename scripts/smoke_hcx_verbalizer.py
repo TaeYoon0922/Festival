@@ -44,6 +44,12 @@ from app.generation.hcx_verbalizer import (
     HcxVerbalizer,
     _response_content,
 )
+from app.generation.protected_literals import (
+    PLACEHOLDER_PATTERN,
+    check_placeholder_integrity,
+    protect_literals,
+    restore_literals,
+)
 from app.retrieval.embeddings import UrllibJsonTransport
 
 
@@ -91,8 +97,9 @@ def main(argv: list[str] | None = None) -> int:
         "--diagnose",
         action="store_true",
         help=(
-            "Print the raw HCX candidate next to the reference, with the "
-            "citation markers and numeric tokens the validator compared."
+            "Print the raw and restored HCX candidates next to the reference, "
+            "with the placeholders, citation markers, and numeric tokens "
+            "compared at each stage."
         ),
     )
     args = parser.parse_args(argv)
@@ -109,29 +116,39 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    fixture = _fixture()
     recorder = _RecordingTransport(UrllibJsonTransport())
     verbalizer = HcxVerbalizer(settings, transport=recorder)
-    outcome = verbalizer.verbalize(fixture, required_terms=(FIXTURE_COMPANY,))
+    outcome = verbalizer.verbalize(_fixture(), required_terms=(FIXTURE_COMPANY,))
 
-    candidate = (
+    # ``protect_literals`` is deterministic, so the same protection the
+    # verbalizer built can be rebuilt here without production exposing it.
+    protection = protect_literals(FIXTURE_TEXT)
+    raw = (
         _response_content(recorder.response)
         if isinstance(recorder.response, dict)
         else None
     )
+    integrity = (
+        check_placeholder_integrity(raw, protection) if raw is not None else None
+    )
+    restored = (
+        restore_literals(raw, protection)
+        if raw is not None and integrity is not None and integrity.valid
+        else None
+    )
 
-    # Two different questions.  ``served`` is what a caller receives, which on a
-    # fallback is the reference itself and therefore always valid.  ``candidate``
-    # is what HCX actually produced, and is the only one that explains a
-    # fallback.
+    # Three different questions.  ``served`` is what a caller receives, which on
+    # a fallback is the reference itself and therefore always valid.
+    # ``integrity`` says whether the protected literals survived the model.
+    # ``restored`` is the only one that judges what HCX actually wrote.
     served = validate_verbalized_answer(
         outcome.text, reference=FIXTURE_TEXT, required_terms=(FIXTURE_COMPANY,)
     )
     candidate_result = (
         validate_verbalized_answer(
-            candidate, reference=FIXTURE_TEXT, required_terms=(FIXTURE_COMPANY,)
+            restored, reference=FIXTURE_TEXT, required_terms=(FIXTURE_COMPANY,)
         )
-        if candidate is not None
+        if restored is not None
         else None
     )
 
@@ -145,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
         "answer_non_empty": bool(outcome.text.strip()),
         "deterministic_fallback_served": outcome.text == FIXTURE_TEXT,
         "served_answer_valid": served.valid,
-        "hcx_candidate_received": candidate is not None,
+        "hcx_candidate_received": raw is not None,
+        "placeholder_integrity_valid": None if integrity is None else integrity.valid,
+        "placeholder_integrity_reason": None if integrity is None else integrity.reason,
         "hcx_candidate_valid": (
             None if candidate_result is None else candidate_result.valid
         ),
@@ -156,7 +175,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_answer:
         report["served_answer"] = outcome.text
     if args.diagnose:
-        report["diagnostic"] = _diagnostic(candidate, candidate_result)
+        report["diagnostic"] = _diagnostic(
+            raw, restored, protection, integrity, candidate_result
+        )
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
@@ -176,25 +197,40 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _diagnostic(candidate: str | None, result: Any) -> dict[str, Any]:
-    """Show exactly what the validator compared.  No headers, no credentials."""
+def _diagnostic(
+    raw: str | None,
+    restored: str | None,
+    protection: Any,
+    integrity: Any,
+    result: Any,
+) -> dict[str, Any]:
+    """Show exactly what each stage compared.  No headers, no credentials."""
 
     reference_citations = extract_citation_markers(FIXTURE_TEXT)
     reference_numbers = extract_numeric_tokens(FIXTURE_TEXT)
     payload: dict[str, Any] = {
         "reference_text": FIXTURE_TEXT,
-        "raw_hcx_candidate": candidate,
+        "masked_reference": protection.masked,
+        "raw_hcx_candidate": raw,
+        "restored_hcx_candidate": restored,
+        "expected_placeholders": list(protection.placeholders),
+        "found_placeholders": None if raw is None else PLACEHOLDER_PATTERN.findall(raw),
+        "placeholder_integrity_reason": None if integrity is None else integrity.reason,
+        "placeholder_integrity_detail": None if integrity is None else integrity.detail,
         "reference_citations": sorted(reference_citations),
         "candidate_citations": None,
         "reference_numeric_tokens": sorted(reference_numbers),
         "candidate_numeric_tokens": None,
         "validator_reason": None if result is None else result.reason,
     }
-    if candidate is None:
+    if restored is None:
         return payload
 
-    candidate_citations = extract_citation_markers(candidate)
-    candidate_numbers = extract_numeric_tokens(candidate)
+    # Tokens are read off the restored text, because that is what the validator
+    # judged.  Reading them off the masked reply would report empty sets and
+    # hide the real comparison.
+    candidate_citations = extract_citation_markers(restored)
+    candidate_numbers = extract_numeric_tokens(restored)
     payload["candidate_citations"] = sorted(candidate_citations)
     payload["candidate_numeric_tokens"] = sorted(candidate_numbers)
     payload["citations_only_in_reference"] = sorted(
@@ -203,12 +239,8 @@ def _diagnostic(candidate: str | None, result: Any) -> dict[str, Any]:
     payload["citations_only_in_candidate"] = sorted(
         candidate_citations - reference_citations
     )
-    payload["numbers_only_in_reference"] = sorted(
-        reference_numbers - candidate_numbers
-    )
-    payload["numbers_only_in_candidate"] = sorted(
-        candidate_numbers - reference_numbers
-    )
+    payload["numbers_only_in_reference"] = sorted(reference_numbers - candidate_numbers)
+    payload["numbers_only_in_candidate"] = sorted(candidate_numbers - reference_numbers)
     return payload
 
 

@@ -8,7 +8,15 @@ from app.generation.answer_generator import (
     GeneratedCitation,
     GeneratedSection,
 )
-from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
+from app.generation.hcx_verbalizer import (
+    PLACEHOLDER_INTEGRITY_FAILED,
+    HcxSettings,
+    HcxVerbalizer,
+)
+from app.generation.protected_literals import (
+    protect_literals,
+    restore_literals,
+)
 from app.retrieval.embeddings import EmbeddingHttpError
 
 
@@ -16,10 +24,18 @@ DETERMINISTIC_TEXT = (
     "국민연금기금의 효성중공업 보유주식수는 2023년 03월 07일 기준 655,490주입니다.[1]"
 )
 
-FAITHFUL_TEXT = (
-    "효성중공업에 대한 국민연금기금의 보유주식수는 2023년 03월 07일 기준으로 "
-    "655,490주입니다.[1]"
+#: The verbalizer masks the reference before the model sees it, so a stub
+#: reply has to speak in placeholders too.
+PROTECTION = protect_literals(DETERMINISTIC_TEXT)
+P_DATE, P_NUMBER, P_CITATION = PROTECTION.placeholders
+
+MASKED_FAITHFUL = (
+    f"효성중공업에 대한 국민연금기금의 보유주식수는 {P_DATE} 기준으로 "
+    f"{P_NUMBER}주입니다.{P_CITATION}"
 )
+
+#: What that reply becomes once the literals are restored.
+FAITHFUL_TEXT = restore_literals(MASKED_FAITHFUL, PROTECTION)
 
 
 def _generated(*, answerable: bool = True) -> GeneratedAnswer:
@@ -88,7 +104,7 @@ def _reply(content: str) -> dict:
 
 class VerbalizerSuccessTests(unittest.TestCase):
     def test_faithful_reply_is_used(self) -> None:
-        transport = _Transport(_reply(FAITHFUL_TEXT))
+        transport = _Transport(_reply(MASKED_FAITHFUL))
         verbalizer = HcxVerbalizer(_settings(), transport=transport)
 
         outcome = verbalizer.verbalize(_generated())
@@ -98,7 +114,7 @@ class VerbalizerSuccessTests(unittest.TestCase):
         self.assertEqual(outcome.text, FAITHFUL_TEXT)
 
     def test_native_clova_response_shape_is_accepted(self) -> None:
-        transport = _Transport({"result": {"message": {"content": FAITHFUL_TEXT}}})
+        transport = _Transport({"result": {"message": {"content": MASKED_FAITHFUL}}})
         verbalizer = HcxVerbalizer(_settings(), transport=transport)
 
         outcome = verbalizer.verbalize(_generated())
@@ -107,7 +123,7 @@ class VerbalizerSuccessTests(unittest.TestCase):
         self.assertEqual(outcome.text, FAITHFUL_TEXT)
 
     def test_request_uses_deterministic_generation_parameters(self) -> None:
-        transport = _Transport(_reply(FAITHFUL_TEXT))
+        transport = _Transport(_reply(MASKED_FAITHFUL))
         HcxVerbalizer(_settings(model="HCX-005"), transport=transport).verbalize(
             _generated()
         )
@@ -118,7 +134,7 @@ class VerbalizerSuccessTests(unittest.TestCase):
         self.assertEqual(transport.calls[0]["headers"]["Authorization"], "Bearer test-key")
 
     def test_request_never_carries_retrieved_chunks(self) -> None:
-        transport = _Transport(_reply(FAITHFUL_TEXT))
+        transport = _Transport(_reply(MASKED_FAITHFUL))
         HcxVerbalizer(_settings(), transport=transport).verbalize(_generated())
 
         body = json.dumps(transport.calls[0]["payload"], ensure_ascii=False)
@@ -139,7 +155,7 @@ class OpenAiCompatibleContractTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.transport = _Transport(_reply(FAITHFUL_TEXT))
+        self.transport = _Transport(_reply(MASKED_FAITHFUL))
         HcxVerbalizer(_settings(), transport=self.transport).verbalize(_generated())
         self.call = self.transport.calls[0]
 
@@ -189,7 +205,7 @@ class OpenAiCompatibleContractTests(unittest.TestCase):
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": FAITHFUL_TEXT},
+                        "message": {"role": "assistant", "content": MASKED_FAITHFUL},
                     }
                 ],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 20},
@@ -241,53 +257,188 @@ class VerbalizerFallbackTests(unittest.TestCase):
 
         self.assertEqual(status, "fallback_invalid_response")
 
+    def test_empty_reply_falls_back(self) -> None:
+        status, _ = self._fallback(response=_reply("   "))
+
+        self.assertEqual(status, "fallback_invalid_response")
+
     def test_hallucinated_number_falls_back(self) -> None:
+        """A number typed fresh is not a placeholder, so the validator catches it."""
+
         status, reason = self._fallback(
-            response=_reply(DETERMINISTIC_TEXT + " 전년 대비 99,999주 증가했습니다.")
+            response=_reply(MASKED_FAITHFUL + " 전년 대비 99,999주 증가했습니다.")
         )
 
         self.assertEqual(status, "fallback_validation_failed")
         self.assertEqual(reason, "numeric_token_changed")
-
-    def test_changed_number_format_falls_back(self) -> None:
-        status, reason = self._fallback(
-            response=_reply(DETERMINISTIC_TEXT.replace("655,490주", "약 65만 주"))
-        )
-
-        self.assertEqual(status, "fallback_validation_failed")
-        self.assertEqual(reason, "numeric_token_changed")
-
-    def test_removed_citation_falls_back(self) -> None:
-        status, reason = self._fallback(
-            response=_reply(DETERMINISTIC_TEXT.replace("[1]", ""))
-        )
-
-        self.assertEqual(status, "fallback_validation_failed")
-        self.assertEqual(reason, "citation_marker_changed")
 
     def test_added_citation_falls_back(self) -> None:
-        status, reason = self._fallback(response=_reply(DETERMINISTIC_TEXT + "[2]"))
+        status, reason = self._fallback(response=_reply(MASKED_FAITHFUL + "[2]"))
 
         self.assertEqual(status, "fallback_validation_failed")
         self.assertEqual(reason, "citation_marker_changed")
 
     def test_investment_language_falls_back(self) -> None:
         status, reason = self._fallback(
-            response=_reply(DETERMINISTIC_TEXT + " 매수를 추천합니다.")
+            response=_reply(MASKED_FAITHFUL + " 매수를 추천합니다.")
         )
 
         self.assertEqual(status, "fallback_validation_failed")
         self.assertEqual(reason, "forbidden_investment_language")
 
-    def test_empty_reply_falls_back(self) -> None:
-        status, _ = self._fallback(response=_reply("   "))
 
-        self.assertEqual(status, "fallback_invalid_response")
+class ProtectedLiteralRoundTripTests(unittest.TestCase):
+    """The literals HCX kept mangling must come back byte for byte."""
+
+    def _verbalize(self, reply: str):
+        transport = _Transport(_reply(reply))
+        return HcxVerbalizer(_settings(), transport=transport).verbalize(
+            _generated(), required_terms=("효성중공업",)
+        )
+
+    def test_model_never_sees_the_raw_literals(self) -> None:
+        transport = _Transport(_reply(MASKED_FAITHFUL))
+        HcxVerbalizer(_settings(), transport=transport).verbalize(_generated())
+
+        body = json.dumps(transport.calls[0]["payload"], ensure_ascii=False)
+        self.assertNotIn("2023년 03월 07일", body)
+        self.assertNotIn("655,490", body)
+        self.assertNotIn("[1]", body)
+        for placeholder in PROTECTION.placeholders:
+            self.assertIn(placeholder, body)
+
+    def test_date_is_restored_exactly(self) -> None:
+        outcome = self._verbalize(MASKED_FAITHFUL)
+
+        self.assertEqual(outcome.status, "success")
+        self.assertIn("2023년 03월 07일", outcome.text)
+        self.assertNotIn("2023년 3월 7일", outcome.text)
+
+    def test_number_is_restored_exactly(self) -> None:
+        outcome = self._verbalize(MASKED_FAITHFUL)
+
+        self.assertEqual(outcome.status, "success")
+        self.assertIn("655,490", outcome.text)
+        self.assertNotIn("655490", outcome.text.replace("655,490", ""))
+
+    def test_citation_is_restored_exactly(self) -> None:
+        outcome = self._verbalize(MASKED_FAITHFUL)
+
+        self.assertEqual(outcome.status, "success")
+        self.assertIn("[1]", outcome.text)
+
+    def test_wording_only_change_succeeds(self) -> None:
+        reply = (
+            f"공시에 따르면 국민연금기금이 보유한 효성중공업 주식은 {P_DATE} 기준 "
+            f"{P_NUMBER}주입니다.{P_CITATION}"
+        )
+
+        outcome = self._verbalize(reply)
+
+        self.assertEqual(outcome.status, "success")
+        self.assertTrue(outcome.text.startswith("공시에 따르면"))
+        self.assertIn("2023년 03월 07일", outcome.text)
+        self.assertIn("655,490", outcome.text)
+        self.assertIn("[1]", outcome.text)
+
+    def test_markdown_cannot_alter_the_protected_literals(self) -> None:
+        reply = (
+            f"국민연금기금의 **효성중공업** 보유주식 수는 **{P_DATE}** 기준 "
+            f"**{P_NUMBER}주**입니다.{P_CITATION}"
+        )
+
+        outcome = self._verbalize(reply)
+
+        self.assertEqual(outcome.status, "success")
+        self.assertIn("**2023년 03월 07일**", outcome.text)
+        self.assertIn("**655,490주**", outcome.text)
+        self.assertIn("[1]", outcome.text)
+
+    def test_the_live_failure_mode_can_no_longer_corrupt_literals(self) -> None:
+        """The exact edits observed against the live model, now harmless.
+
+        HCX previously normalized the date to ``2023년 3월 7일``, dropped ``[1]``,
+        and added emphasis.  With the literals masked it can only do the last of
+        those, and the first two become an integrity failure rather than a wrong
+        number reaching a reader.
+        """
+
+        outcome = self._verbalize(
+            "국민연금기금의 효성중공업 보유주식 수는 **2023년 3월 7일** 기준 "
+            "**655,490주**입니다."
+        )
+
+        self.assertEqual(outcome.status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+
+
+class PlaceholderIntegrityFallbackTests(unittest.TestCase):
+    """A mangled placeholder is never guessed back into a literal."""
+
+    def _integrity_failure(self, reply: str) -> str:
+        transport = _Transport(_reply(reply))
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            _generated()
+        )
+        self.assertEqual(outcome.status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+        return outcome.reason or ""
+
+    def test_deleted_placeholder_falls_back(self) -> None:
+        reason = self._integrity_failure(MASKED_FAITHFUL.replace(P_CITATION, ""))
+
+        self.assertEqual(reason, "placeholder_missing")
+
+    def test_added_placeholder_falls_back(self) -> None:
+        reason = self._integrity_failure(MASKED_FAITHFUL + " __FESTIVAL_NUMBER_Z__")
+
+        self.assertEqual(reason, "placeholder_unexpected")
+
+    def test_duplicated_placeholder_falls_back(self) -> None:
+        reason = self._integrity_failure(MASKED_FAITHFUL + P_NUMBER)
+
+        self.assertEqual(reason, "placeholder_duplicated")
+
+    def test_reordered_placeholders_fall_back(self) -> None:
+        reply = (
+            f"보유주식수는 {P_NUMBER}주이며 기준일은 {P_DATE}입니다.{P_CITATION}"
+        )
+
+        reason = self._integrity_failure(reply)
+
+        self.assertEqual(reason, "placeholder_reordered")
+
+    def test_placeholder_rewritten_as_a_literal_falls_back(self) -> None:
+        reason = self._integrity_failure(
+            MASKED_FAITHFUL.replace(P_DATE, "2023년 3월 7일")
+        )
+
+        self.assertEqual(reason, "placeholder_missing")
+
+    def test_reference_that_already_looks_masked_is_refused(self) -> None:
+        generated = _generated()
+        masked_reference = GeneratedAnswer(
+            question=generated.question,
+            answer_text="보유주식수는 __FESTIVAL_NUMBER_A__주입니다.",
+            citations=generated.citations,
+            sections=generated.sections,
+            warnings=generated.warnings,
+            confidence=generated.confidence,
+            answerable=True,
+        )
+        transport = _Transport(_reply(MASKED_FAITHFUL))
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            masked_reference
+        )
+
+        self.assertEqual(outcome.status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(transport.calls, [])
 
 
 class VerbalizerGatingTests(unittest.TestCase):
     def test_disabled_returns_the_deterministic_answer(self) -> None:
-        transport = _Transport(_reply(FAITHFUL_TEXT))
+        transport = _Transport(_reply(MASKED_FAITHFUL))
         verbalizer = HcxVerbalizer(_settings(enabled=False), transport=transport)
 
         outcome = verbalizer.verbalize(_generated())
@@ -297,7 +448,7 @@ class VerbalizerGatingTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
     def test_missing_credentials_return_the_deterministic_answer(self) -> None:
-        transport = _Transport(_reply(FAITHFUL_TEXT))
+        transport = _Transport(_reply(MASKED_FAITHFUL))
         verbalizer = HcxVerbalizer(_settings(api_key=""), transport=transport)
 
         outcome = verbalizer.verbalize(_generated())
@@ -306,7 +457,7 @@ class VerbalizerGatingTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
     def test_unanswerable_result_never_reaches_the_model(self) -> None:
-        transport = _Transport(_reply(FAITHFUL_TEXT))
+        transport = _Transport(_reply(MASKED_FAITHFUL))
         verbalizer = HcxVerbalizer(_settings(), transport=transport)
 
         outcome = verbalizer.verbalize(_generated(answerable=False))

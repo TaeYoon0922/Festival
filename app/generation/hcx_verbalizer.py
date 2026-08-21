@@ -20,6 +20,13 @@ from app.generation.answer_validator import (
     ValidationPolicy,
     validate_verbalized_answer,
 )
+from app.generation.protected_literals import (
+    ProtectedText,
+    check_placeholder_integrity,
+    contains_placeholder_syntax,
+    protect_literals,
+    restore_literals,
+)
 
 # The embedding adapter already owns a tested JSON transport with sanitized HTTP
 # error semantics.  Reusing it keeps one network contract and leaves that
@@ -45,14 +52,20 @@ DEFAULT_MODEL = "HCX-005"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_TOKENS = 1024
 
+#: A protected literal did not survive the round trip.
+PLACEHOLDER_INTEGRITY_FAILED = "fallback_placeholder_integrity_failed"
+
 SYSTEM_PROMPT = """당신은 이미 검증된 공시 답변을 자연스러운 한국어로 다듬는 편집자입니다.
 
 반드시 지킬 것:
 - 입력에 있는 사실만 사용한다. 새로운 사실을 추가하지 않는다.
-- 숫자, 날짜, 기업명은 입력에 적힌 표기를 문자 그대로 유지한다.
-  예: "2,967,759주"를 "약 297만 주"로 바꾸지 않는다.
-- 인용 표기([1], [2] 등)를 모두 그대로 유지한다. 추가하거나 삭제하지 않는다.
+- __FESTIVAL_...__ 형태의 토큰은 보호된 값이다. 글자 하나도 바꾸지 말고
+  개수와 순서를 입력 그대로 유지한다. 삭제, 추가, 중복, 번역, 분할하지 않는다.
+- 보호 토큰 안쪽이나 바로 옆에 다른 문자를 끼워 넣지 않는다.
+- 보호 토큰이 무엇을 뜻하는지 추측하거나 숫자, 날짜로 바꿔 쓰지 않는다.
 - 외부 지식, 추정, 투자 의견, 전망, 추천을 쓰지 않는다.
+- Markdown 서식을 새로 만들지 않는다. 굵게(**), 기울임(*), 제목(#),
+  목록(-), 코드 블록을 추가하지 않는다.
 - 원문보다 길게 쓰지 않는다.
 
 출력은 다듬어진 답변 본문만 쓴다. 설명이나 머리말을 붙이지 않는다."""
@@ -145,11 +158,29 @@ class HcxVerbalizer:
             # An unsupported answer must never be made to sound confident.
             return VerbalizationOutcome(reference, "skipped_not_answerable")
 
+        if contains_placeholder_syntax(reference):
+            # Protection would be ambiguous, so the model is not consulted.
+            return VerbalizationOutcome(
+                reference,
+                PLACEHOLDER_INTEGRITY_FAILED,
+                "reference already contains placeholder syntax",
+            )
+
+        protection = protect_literals(reference)
         try:
-            candidate = self._request(generated)
+            masked_candidate = self._request(generated, protection)
         except _VerbalizerFailure as failure:
             return VerbalizationOutcome(reference, failure.status, failure.reason)
 
+        integrity = check_placeholder_integrity(masked_candidate, protection)
+        if not integrity.valid:
+            # Never repair a mangled placeholder: a guessed literal is worse
+            # than the deterministic answer.
+            return VerbalizationOutcome(
+                reference, PLACEHOLDER_INTEGRITY_FAILED, integrity.reason
+            )
+
+        candidate = restore_literals(masked_candidate, protection)
         result = validate_verbalized_answer(
             candidate,
             reference=reference,
@@ -162,12 +193,12 @@ class HcxVerbalizer:
             )
         return VerbalizationOutcome(candidate.strip(), "success")
 
-    def _request(self, generated: GeneratedAnswer) -> str:
+    def _request(self, generated: GeneratedAnswer, protection: ProtectedText) -> str:
         payload = {
             "model": self.settings.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _verified_facts(generated)},
+                {"role": "user", "content": _verified_facts(generated, protection)},
             ],
             "temperature": self.settings.temperature,
             "max_tokens": self.settings.max_tokens,
@@ -208,22 +239,20 @@ class _VerbalizerFailure(Exception):
         self.reason = reason
 
 
-def _verified_facts(generated: GeneratedAnswer) -> str:
-    """Serialize only what the deterministic pipeline already proved."""
+def _verified_facts(generated: GeneratedAnswer, protection: ProtectedText) -> str:
+    """Serialize the masked answer and nothing that would unmask it.
+
+    ``answer_text`` is rendered from the sections, so sending the sections too
+    would hand the model a second, unprotected copy of every number, date, and
+    citation marker — exactly what the placeholders exist to prevent.  Only the
+    section titles survive, as structural hints that carry no literals.
+    """
 
     facts = {
         "question": generated.question,
-        "deterministic_answer": generated.answer_text,
-        "sections": [
-            {
-                "title": section.title,
-                "content": section.content,
-                "citations": list(section.citations),
-                "metadata": list(section.metadata),
-            }
-            for section in generated.sections
-        ],
-        "citation_ids": [citation.citation_id for citation in generated.citations],
+        "answer_to_rewrite": protection.masked,
+        "section_titles": [section.title for section in generated.sections],
+        "protected_tokens": list(protection.placeholders),
     }
     return json.dumps(facts, ensure_ascii=False, indent=2)
 

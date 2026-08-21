@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 import psycopg
@@ -16,6 +17,10 @@ from app.generation.hcx_verbalizer import (
     HcxSettings,
     HcxVerbalizer,
     VerbalizationOutcome,
+)
+from app.generation.protected_literals import (
+    PLACEHOLDER_PATTERN,
+    protect_literals,
 )
 from app.reasoning.query_plan import QueryPlan
 from app.retrieval.embeddings import EmbeddingHttpError
@@ -104,6 +109,22 @@ def _client(pipeline_factory=None, **kwargs) -> TestClient:
     return TestClient(app, **kwargs)
 
 
+def _hcx_factory(reply: str):
+    def factory() -> AnswerPipeline:
+        return _pipeline(
+            verbalizer=HcxVerbalizer(
+                HcxSettings(
+                    enabled=True,
+                    endpoint="https://clova.example/v1/chat/completions",
+                    api_key="key",
+                ),
+                transport=_StubTransport(reply),
+            )
+        )
+
+    return factory
+
+
 def _ask(client: TestClient, **params):
     query = {"question_id": QUESTION_ID, "question": QUESTION}
     query.update(params)
@@ -182,42 +203,45 @@ class HcxIntegrationTests(unittest.TestCase):
 
     def test_faithful_hcx_text_is_served(self) -> None:
         deterministic = _ask(_client()).json()["answer"]
-        rephrased = f"공시에 따르면 {deterministic}"
+        # The verbalizer masks the reference, so a faithful reply speaks in
+        # placeholders and is only readable again after restoration.
+        masked = protect_literals(deterministic).masked
 
-        def factory() -> AnswerPipeline:
-            return _pipeline(
-                verbalizer=HcxVerbalizer(
-                    HcxSettings(
-                        enabled=True,
-                        endpoint="https://clova.example/v1/chat/completions",
-                        api_key="key",
-                    ),
-                    transport=_StubTransport(rephrased),
-                )
-            )
-
-        payload = _ask(_client(factory)).json()
+        payload = _ask(_client(_hcx_factory(f"공시에 따르면 {masked}"))).json()
 
         self.assertEqual(payload["think_trace"]["hcx_status"], "success")
-        self.assertEqual(payload["answer"], rephrased)
+        self.assertEqual(payload["answer"], f"공시에 따르면 {deterministic}")
         self.assertIn("hcx_verbalizer", payload["think_trace"]["stages"])
+
+    def test_served_answer_never_leaks_a_placeholder(self) -> None:
+        deterministic = _ask(_client()).json()["answer"]
+        masked = protect_literals(deterministic).masked
+
+        payload = _ask(_client(_hcx_factory(f"공시에 따르면 {masked}"))).json()
+
+        self.assertIsNone(PLACEHOLDER_PATTERN.search(payload["answer"]))
+        self.assertNotIn("__FESTIVAL_", json.dumps(payload, ensure_ascii=False))
+
+    def test_normalized_literals_fall_back(self) -> None:
+        """The live failure mode: HCX rewrites a date and drops a citation."""
+
+        deterministic = _ask(_client()).json()["answer"]
+
+        payload = _ask(_client(_hcx_factory(deterministic))).json()
+
+        self.assertEqual(
+            payload["think_trace"]["hcx_status"],
+            "fallback_placeholder_integrity_failed",
+        )
+        self.assertEqual(payload["answer"], deterministic)
 
     def test_hallucinating_hcx_falls_back_to_the_deterministic_answer(self) -> None:
         deterministic = _ask(_client()).json()["answer"]
+        masked = protect_literals(deterministic).masked
 
-        def factory() -> AnswerPipeline:
-            return _pipeline(
-                verbalizer=HcxVerbalizer(
-                    HcxSettings(
-                        enabled=True,
-                        endpoint="https://clova.example/v1/chat/completions",
-                        api_key="key",
-                    ),
-                    transport=_StubTransport(deterministic + " 총 12,345주 늘었습니다."),
-                )
-            )
-
-        payload = _ask(_client(factory)).json()
+        payload = _ask(
+            _client(_hcx_factory(masked + " 총 12,345주 늘었습니다."))
+        ).json()
 
         self.assertEqual(
             payload["think_trace"]["hcx_status"], "fallback_validation_failed"
