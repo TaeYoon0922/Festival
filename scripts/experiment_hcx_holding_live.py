@@ -51,6 +51,7 @@ from app.generation.compact_claim import (
     _matching_events,
     _render,
     _resolution_mapping,
+    build_compact_claim,
 )
 from app.generation.hcx_verbalizer import HcxSettings, _response_content
 from app.generation.protected_literals import (
@@ -62,6 +63,7 @@ from app.generation.protected_literals import (
     restore_literals,
 )
 from app.parsing.final_validation import HOLDING_ADDITIONAL_QUESTIONS
+from scripts.audit_compact_claim_eligibility import analyze_eligibility
 from app.retrieval.embeddings import EmbeddingHttpError, UrllibJsonTransport
 from scripts.experiment_hcx_multi_event import (
     EXPERIMENT_SYSTEM_PROMPT,
@@ -87,6 +89,12 @@ TARGET_QUESTION_IDS = (
     "HX18",
     "HX19",
     "HX20",
+)
+
+#: Every frozen Holding question.  The capped experiment may target any of
+#: them; eligibility is decided at runtime, never from a hard-coded list.
+HOLDING20_QUESTION_IDS = tuple(
+    str(row["question_id"]) for row in HOLDING_ADDITIONAL_QUESTIONS
 )
 
 PRIOR_AUDIT_CANDIDATE_EVENT_COUNTS = {
@@ -597,8 +605,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--question-id",
         action="append",
-        choices=TARGET_QUESTION_IDS,
-        help="Limit the run to one or more target IDs (repeatable).",
+        choices=HOLDING20_QUESTION_IDS,
+        help="Limit the run to one or more Holding question IDs (repeatable).",
+    )
+    parser.add_argument(
+        "--production-caps",
+        action="store_true",
+        help=(
+            "Build the claim with the production build_compact_claim, so the "
+            "current caps apply, and make one HCX call for the whole claim. "
+            "Eligibility is verified per question at runtime."
+        ),
     )
     parser.add_argument(
         "--strict-event-order",
@@ -630,7 +647,21 @@ def main(argv: list[str] | None = None) -> int:
 
     pipeline = AnswerPipeline.from_env()
     transport = UrllibJsonTransport()
-    rows = target_question_rows(args.question_id)
+    rows = target_question_rows(
+        args.question_id,
+        default_ids=HOLDING20_QUESTION_IDS if args.production_caps else None,
+    )
+
+    if args.production_caps:
+        return run_production_caps_experiment(
+            pipeline,
+            transport,
+            settings,
+            rows,
+            repeat=args.repeat,
+            show_output=args.show_output,
+            diagnose_only=args.diagnose_prepare,
+        )
     runs: list[dict[str, Any]] = []
     event_runs: list[dict[str, Any]] = []
     event_wise_question_runs: list[dict[str, Any]] = []
@@ -727,8 +758,88 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+
+def run_production_caps_experiment(
+    pipeline: Any,
+    transport: Any,
+    settings: HcxSettings,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    repeat: int,
+    show_output: bool,
+    diagnose_only: bool,
+) -> int:
+    """One HCX call per run over the claim production would actually serve.
+
+    Ineligible questions are reported and skipped rather than forced through:
+    the point is to measure the questions HCX would really be asked about under
+    today's caps.
+    """
+
+    eligibility: list[dict[str, Any]] = []
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        question_id = str(row["question_id"])
+        print(f"[prepare] {question_id}", file=sys.stderr, flush=True)
+        prepared, verdict = prepare_capped_question(pipeline, row)
+        eligibility.append(verdict)
+        if prepared is None:
+            print(
+                f"[skip] {question_id} ineligible: {verdict.get('eligibility_reason')}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        if diagnose_only:
+            continue
+        for repeat_index in range(1, repeat + 1):
+            print(
+                f"[hcx] {question_id} run {repeat_index}/{repeat}",
+                file=sys.stderr,
+                flush=True,
+            )
+            record = run_prepared_question(
+                prepared,
+                transport=transport,
+                settings=settings,
+                repeat_index=repeat_index,
+                show_output=show_output,
+                strict_event_order=False,
+                check_structured_text_leakage=True,
+            )
+            record["eligible_under_current_caps"] = True
+            runs.append(record)
+
+    report: dict[str, Any] = {
+        "mode": (
+            "production_caps_prepare"
+            if diagnose_only
+            else "production_caps_single_call"
+        ),
+        "model": settings.model,
+        "max_tokens": settings.max_tokens,
+        "repeat": repeat,
+        "event_wise": False,
+        "strict_event_order": False,
+        "citation_detached": True,
+        "production_caps_applied": {
+            "MAX_CLAIM_EVENTS": MAX_CLAIM_EVENTS,
+            "MAX_CLAIM_LITERALS": MAX_CLAIM_LITERALS,
+        },
+        "selected_question_ids": [str(row["question_id"]) for row in rows],
+        "eligibility": eligibility,
+    }
+    if not diagnose_only:
+        report["runs"] = runs
+    report["summary"] = summarize_capped_runs(runs, eligibility, repeat=repeat)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def target_question_rows(
     question_ids: Sequence[str] | None = None,
+    *,
+    default_ids: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Return the requested frozen Holding questions in explicit target order."""
 
@@ -739,7 +850,10 @@ def target_question_rows(
     missing = [question_id for question_id in TARGET_QUESTION_IDS if question_id not in by_id]
     if missing:
         raise RuntimeError("frozen Holding questions missing: " + ", ".join(missing))
-    selected = tuple(question_ids or TARGET_QUESTION_IDS)
+    selected = tuple(question_ids or default_ids or TARGET_QUESTION_IDS)
+    unknown = [question_id for question_id in selected if question_id not in by_id]
+    if unknown:
+        raise RuntimeError("unknown Holding questions: " + ", ".join(unknown))
     return tuple(by_id[question_id] for question_id in selected)
 
 
@@ -1169,6 +1283,7 @@ def run_prepared_question(
         "temperature": settings.temperature,
         "max_tokens": settings.max_tokens,
     }
+    started = time.perf_counter()
     try:
         response = transport.post_json(
             settings.endpoint,
@@ -1177,13 +1292,16 @@ def run_prepared_question(
             timeout_seconds=settings.timeout_seconds,
         )
     except EmbeddingHttpError as error:
+        record["elapsed_ms"] = _elapsed_ms(started)
         record["transport_error"] = (
             "timeout" if error.status_code is None else f"HTTP {error.status_code}"
         )
         return finalize_run(record)
     except Exception as error:  # noqa: BLE001 - continue the live sweep
+        record["elapsed_ms"] = _elapsed_ms(started)
         record["transport_error"] = type(error).__name__
         return finalize_run(record)
+    record["elapsed_ms"] = _elapsed_ms(started)
 
     raw = _response_content(response) if isinstance(response, Mapping) else None
     record["candidate_received"] = raw is not None
@@ -1401,6 +1519,207 @@ def run_event_wise_question(
     return question_record, event_records
 
 
+def _elapsed_ms(started: float) -> int:
+    return int(round((time.perf_counter() - started) * 1000))
+
+
+def prepare_capped_question(
+    pipeline: Any,
+    row: Mapping[str, Any],
+) -> tuple[PreparedHoldingQuestion | None, dict[str, Any]]:
+    """Prepare the claim production itself would build, caps included.
+
+    Unlike the all-candidate path, this calls ``build_compact_claim`` directly,
+    so ``MAX_CLAIM_EVENTS`` and ``MAX_CLAIM_LITERALS`` apply exactly as they do
+    in production.  Eligibility is decided here from live objects; no question
+    is assumed eligible from an earlier audit.
+    """
+
+    question_id = str(row["question_id"])
+    question = str(row["query"])
+    eligibility: dict[str, Any] = {
+        "question_id": question_id,
+        "question": question,
+        "eligible_under_current_caps": False,
+        "eligibility_reason": None,
+        "candidate_event_count": 0,
+        "protected_literal_count": 0,
+        "exception_stage": None,
+        "exception_message": None,
+    }
+
+    try:
+        plan = pipeline.understanding.understand(
+            question, top_k=pipeline.settings.top_k
+        )
+        execution = pipeline.executor.execute(plan)
+        result = pipeline.orchestrator.run(question, plan, execution)
+    except Exception as error:  # noqa: BLE001 - diagnostic boundary
+        eligibility["exception_stage"] = "pipeline"
+        eligibility["exception_message"] = safe_exception_message(error)
+        eligibility["eligibility_reason"] = "pipeline_error"
+        return None, eligibility
+
+    task_type = str(result.task_decision.task_type)
+    draft = result.answer_draft
+    resolution = result.resolution
+
+    # The audit's gate analysis is reused so a rejection is named the same way
+    # here as it is there, and it cross-checks itself against the builder.
+    analysis = analyze_eligibility(draft, resolution, task_type=task_type)
+    requested = tuple(str(field) for field in analysis["requested_fields"])
+    eligibility.update(
+        {
+            "task_type": task_type,
+            "requested_fields": list(requested),
+            "candidate_event_count": int(analysis["candidate_event_count"]),
+            "eligibility_reason": analysis["skip_reason"],
+            "audit_agrees_with_builder": analysis["audit_agrees_with_builder"],
+            "MAX_CLAIM_EVENTS": MAX_CLAIM_EVENTS,
+            "MAX_CLAIM_LITERALS": MAX_CLAIM_LITERALS,
+        }
+    )
+
+    claim = build_compact_claim(draft, resolution, task_type=task_type)
+    if claim is None:
+        eligibility["eligibility_reason"] = (
+            analysis["skip_reason"] or "build_compact_claim_returned_none"
+        )
+        return None, eligibility
+
+    try:
+        detached = detach_live_claim_citations(claim)
+    except Exception as error:  # noqa: BLE001 - diagnostic boundary
+        eligibility["exception_stage"] = "detach"
+        eligibility["exception_message"] = safe_exception_message(error)
+        eligibility["eligibility_reason"] = "citation_detachment_failed"
+        return None, eligibility
+
+    structure = real_structure_diagnostics(
+        claim,
+        detached,
+        requested_fields=requested,
+        candidate_event_count=int(analysis["candidate_event_count"]),
+    )
+    eligibility.update(
+        {
+            "eligible_under_current_caps": True,
+            "eligibility_reason": None,
+            "protected_literal_count": len(detached.protection.literals),
+            "field_literal_count": len(claim.fields),
+            "masked_chars": len(detached.protection.masked),
+            "claim_citation_count": len(claim.citations),
+            "prepare_success": True,
+        }
+    )
+    prepared = PreparedHoldingQuestion(
+        question_id=question_id,
+        question=question,
+        task_type=task_type,
+        requested_fields=requested,
+        candidate_event_count=int(analysis["candidate_event_count"]),
+        claim=claim,
+        detached=detached,
+        structure=structure,
+        prepare_diagnostics=eligibility,
+    )
+    return prepared, eligibility
+
+
+def summarize_capped_runs(
+    runs: Sequence[Mapping[str, Any]],
+    eligibility: Sequence[Mapping[str, Any]],
+    *,
+    repeat: int,
+) -> dict[str, Any]:
+    """Aggregate the capped single-call experiment for the decision gate."""
+
+    runs_by_question: dict[str, list[Mapping[str, Any]]] = {}
+    for run in runs:
+        runs_by_question.setdefault(str(run.get("question_id") or ""), []).append(run)
+
+    by_question: dict[str, dict[str, Any]] = {}
+    eligible_ids: list[str] = []
+    for row in eligibility:
+        question_id = str(row["question_id"])
+        question_runs = runs_by_question.get(question_id, [])
+        successes = [run for run in question_runs if run.get("hcx_success") is True]
+        failures = [run for run in question_runs if run.get("hcx_success") is not True]
+        if row.get("eligible_under_current_caps"):
+            eligible_ids.append(question_id)
+        by_question[question_id] = {
+            "question_id": question_id,
+            "eligible": bool(row.get("eligible_under_current_caps")),
+            "eligibility_reason": row.get("eligibility_reason"),
+            "candidate_event_count": row.get("candidate_event_count"),
+            "protected_literal_count": row.get("protected_literal_count"),
+            "runs": len(question_runs),
+            "hcx_successes": len(successes),
+            "hcx_failures": len(failures),
+            "hcx_success_rate": (
+                len(successes) / len(question_runs) if question_runs else 0.0
+            ),
+            "failure_reasons": dict(
+                sorted(
+                    Counter(
+                        str(run.get("hcx_failure_reason") or "unknown_failure")
+                        for run in failures
+                    ).items()
+                )
+            ),
+            "citation_attachment_successes": sum(
+                1
+                for run in question_runs
+                if run.get("deterministic_citations_attached") is True
+            ),
+            "final_validation_successes": sum(
+                1 for run in question_runs if run.get("final_answer_valid") is True
+            ),
+            "total_completion_tokens": sum(
+                int(run.get("completion_tokens") or 0) for run in question_runs
+            ),
+            "total_elapsed_ms": sum(
+                int(run.get("elapsed_ms") or 0) for run in question_runs
+            ),
+        }
+
+    successful = [run for run in runs if run.get("hcx_success") is True]
+    failure_reasons = Counter(
+        str(run.get("hcx_failure_reason") or "unknown_failure")
+        for run in runs
+        if run.get("hcx_success") is not True
+    )
+    clean = [
+        question_id
+        for question_id in eligible_ids
+        if by_question[question_id]["runs"] == repeat
+        and by_question[question_id]["hcx_successes"] == repeat
+    ]
+    return {
+        "eligible_question_count": len(eligible_ids),
+        "eligible_question_ids": eligible_ids,
+        "ineligible_question_ids": [
+            question_id
+            for question_id in by_question
+            if question_id not in eligible_ids
+        ],
+        "total_hcx_calls": len(runs),
+        "hcx_success_count": len(successful),
+        "hcx_failure_count": len(runs) - len(successful),
+        "hcx_success_rate": (len(successful) / len(runs)) if runs else 0.0,
+        # Every non-success is served by the deterministic answer instead.
+        "fallback_count": len(runs) - len(successful),
+        "failure_reasons": dict(sorted(failure_reasons.items())),
+        "total_completion_tokens": sum(
+            int(run.get("completion_tokens") or 0) for run in runs
+        ),
+        "total_elapsed_ms": sum(int(run.get("elapsed_ms") or 0) for run in runs),
+        "all_eligible_questions_clean": bool(eligible_ids)
+        and len(clean) == len(eligible_ids),
+        "by_question": by_question,
+    }
+
+
 def base_run_record(
     prepared: PreparedHoldingQuestion,
     repeat_index: int,
@@ -1419,6 +1738,8 @@ def base_run_record(
         "protected_literal_count": len(protection.literals),
         "masked_chars": len(protection.masked),
         "candidate_received": False,
+        "eligible_under_current_caps": None,
+        "elapsed_ms": None,
         "finish_reason": None,
         "completion_tokens": None,
         "field_placeholder_integrity_valid": False,
