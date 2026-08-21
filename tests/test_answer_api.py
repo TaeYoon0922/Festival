@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 
 import psycopg
@@ -299,6 +300,28 @@ class HcxIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(payload["answer"], deterministic)
         self.assertNotIn("hcx_verbalizer", payload["think_trace"]["stages"])
+
+    def test_a_redundant_unit_never_reaches_the_client(self) -> None:
+        """The reported defect, at the boundary a user actually sees."""
+
+        detached, _, deterministic = _claim_detachment()
+        placeholder = detached.protection.literals[-1].placeholder
+        reply = detached.protection.masked.replace(
+            placeholder, placeholder + "주", 1
+        )
+
+        payload = _ask(_client(_hcx_factory(reply))).json()
+
+        self.assertEqual(
+            payload["think_trace"]["hcx_status"], "fallback_redundant_unit_suffix"
+        )
+        self.assertEqual(payload["answer"], deterministic)
+        self.assertTrue(payload["answer"].strip())
+        self.assertNotIn("%%", payload["answer"])
+        self.assertNotIn("주주", payload["answer"])
+        self.assertIsNone(
+            re.search(r"\[\d+\]\s*[%주원배]", payload["answer"])
+        )
 
     def test_normalized_literals_fall_back(self) -> None:
         """The live failure mode: HCX writes its own prose instead of restating."""

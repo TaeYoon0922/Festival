@@ -19,6 +19,7 @@ from app.generation.compact_claim import CompactClaim, build_compact_claim
 from app.generation.answer_validator import ValidationPolicy
 from app.generation.lossless_verbalization import (
     CITATION_ATTACHMENT_FAILED,
+    REDUNDANT_UNIT_SUFFIX,
     LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
     DetachedClaimInput,
     claim_event_count,
@@ -70,6 +71,10 @@ SKIPPED_MULTI_EVENT_CLAIM = "skipped_multi_event_compact_claim"
 
 #: Citations could not be reattached to the events that own them.
 CITATION_ATTACHMENT_FAILED_STATUS = "fallback_citation_attachment_failed"
+
+#: The model appended a unit that the verified value or the claim
+#: template already carried.
+REDUNDANT_UNIT_STATUS = "fallback_redundant_unit_suffix"
 
 
 @dataclass(frozen=True)
@@ -273,6 +278,8 @@ _CITATION_FAULTS = frozenset(
 def _failure_status(reason: str | None) -> str:
     if reason in _PLACEHOLDER_FAULTS:
         return PLACEHOLDER_INTEGRITY_FAILED
+    if reason == REDUNDANT_UNIT_SUFFIX:
+        return REDUNDANT_UNIT_STATUS
     if reason in _CITATION_FAULTS:
         return CITATION_ATTACHMENT_FAILED_STATUS
     return "fallback_validation_failed"

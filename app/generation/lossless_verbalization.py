@@ -86,6 +86,9 @@ LOSSLESS_VERBALIZER_SYSTEM_PROMPT = """당신은 이미 검증된 사실을 자�
     문장을 쓴다.
 11. 결론 문장이나 설명 문장을 덧붙이지 않는다.
 12. citation을 쓰지 않는다. citation은 이 단계 밖에서 결정적으로 붙는다.
+13. 각 placeholder는 보호된 값 전체를 나타낸다. 그 값에 이미 포함된 단위나
+    기호까지 placeholder 안에 들어 있다. placeholder 뒤에 %, 주, 원, 배 등
+    어떤 단위나 기호도 덧붙이지 않는다.
 
 형식 예시(값이 아니라 형태만 참고):
 
@@ -109,6 +112,7 @@ BAD:
 
 #: Rejection reasons.  Each names one fail-closed check.
 GENERATED_CITATION = "generated_citation"
+REDUNDANT_UNIT_SUFFIX = "redundant_unit_suffix"
 UNPROTECTED_NUMERIC = "unprotected_numeric_generation"
 STRUCTURED_TEXT_LEAKAGE = "unprotected_structured_text_leakage"
 FORBIDDEN_LANGUAGE = "forbidden_investment_language"
@@ -403,6 +407,12 @@ def verify_lossless_candidate(
     if unprotected_text_literals(raw, protection):
         return LosslessResult(False, reason=STRUCTURED_TEXT_LEAKAGE)
 
+    # Checked before restoration, while placeholder boundaries are still
+    # visible: afterwards "7.12%%" is just text and the numeric tokenizer reads
+    # the duplicate as part of the value it already accepted.
+    if redundant_unit_suffixes(raw, protection):
+        return LosslessResult(False, reason=REDUNDANT_UNIT_SUFFIX)
+
     introduced = tuple(
         term
         for term in FORBIDDEN_INVESTMENT_TERMS
@@ -435,11 +445,89 @@ def verify_lossless_candidate(
     if not final_validation.valid:
         return LosslessResult(False, reason=final_validation.reason)
 
+    if citation_adjacent_units(attachment.final_answer):
+        return LosslessResult(False, reason=REDUNDANT_UNIT_SUFFIX)
+
     return LosslessResult(
         True,
         final_answer=attachment.final_answer.strip(),
         attached_citation_count=attachment.attached_citation_count,
     )
+
+
+
+#: Units a verified value may carry.  A closed list, deliberately: the unit has
+#: to come from the protected value or the claim template, never from guessing
+#: what a number might mean.
+UNIT_SUFFIXES = ("%", "주", "원", "배")
+
+
+def redundant_unit_suffixes(
+    candidate: str, protection: ProtectedText
+) -> list[str]:
+    """Find units the model wrote next to a placeholder that were already there.
+
+    A unit belongs either to the protected value itself — ``7.12%`` is masked
+    whole — or to the claim template, which renders ``<placeholder>주``.  Either
+    way the model has no unit to contribute, so any unit it adds beside a
+    placeholder duplicates one.  Restored, that reads ``7.12%%`` or
+    ``655,490주주``, and after citations are attached, ``7.12% [1]%``.
+
+    The comparison is against the masked reference, so both shapes are caught by
+    one rule and a legitimate template unit still passes.
+    """
+
+    problems: list[str] = []
+    for literal in protection.literals:
+        placeholder = literal.placeholder
+        candidate_at = candidate.find(placeholder)
+        reference_at = protection.masked.find(placeholder)
+        if candidate_at < 0 or reference_at < 0:
+            continue
+
+        candidate_tail = candidate[candidate_at + len(placeholder) :]
+        reference_tail = protection.masked[reference_at + len(placeholder) :]
+        reference_unit = _leading_unit(reference_tail)
+        candidate_unit = _leading_unit(candidate_tail)
+
+        if candidate_unit != reference_unit:
+            # The template puts no unit here, or a different one, so this unit
+            # is the model's own.  Dropping a unit is a different failure and
+            # is caught by citation attachment.
+            if candidate_unit:
+                problems.append(f"{literal.text}+{candidate_unit}")
+            continue
+
+        if reference_unit:
+            remainder = candidate_tail.lstrip(" \t")[len(reference_unit) :]
+            if _leading_unit(remainder) == reference_unit:
+                problems.append(f"{literal.text}+{reference_unit}{reference_unit}")
+
+    return sorted(set(problems))
+
+
+def citation_adjacent_units(final_answer: str) -> list[str]:
+    """Detect a unit left stranded after a citation marker.
+
+    A second, independent net.  Citation attachment inserts the marker after the
+    verified value, so a duplicated unit ends up behind it — the exact shape
+    that reached production.  Detection only; nothing is rewritten.
+    """
+
+    found: list[str] = []
+    for match in CITATION_MARKER_PATTERN.finditer(final_answer):
+        unit = _leading_unit(final_answer[match.end() :])
+        if unit:
+            found.append(f"{match.group(0)}{unit}")
+    return sorted(set(found))
+
+
+def _leading_unit(text: str) -> str:
+    stripped = text.lstrip(" \t")
+    for unit in sorted(UNIT_SUFFIXES, key=len, reverse=True):
+        if stripped.startswith(unit):
+            return unit
+    return ""
 
 
 def unprotected_numeric_tokens(raw: str, protection: ProtectedText) -> list[str]:
