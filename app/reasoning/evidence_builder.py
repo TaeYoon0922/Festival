@@ -11,6 +11,14 @@ from typing import Any, Mapping, Sequence
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
+_QUARTER_BY_BASE_MONTH = {
+    3: 1,
+    6: 2,
+    9: 3,
+    12: 4,
+}
+
+
 @dataclass(frozen=True)
 class EvidenceItem:
     chunk_id: str
@@ -631,6 +639,7 @@ def _period_metadata(chunk: Mapping[str, Any]) -> dict[str, Any]:
     keys = (
         "year",
         "base_year",
+        "base_month",
         "fiscal_year",
         "quarter",
         "period",
@@ -644,9 +653,14 @@ def _period_metadata(chunk: Mapping[str, Any]) -> dict[str, Any]:
         "period_labels",
         "statement_scope",
     )
-    return {
+    period = {
         key: copy.deepcopy(chunk[key]) for key in keys if chunk.get(key) is not None
     }
+    if period.get("quarter") is None:
+        quarter = _QUARTER_BY_BASE_MONTH.get(_integer(period.get("base_month")))
+        if quarter is not None:
+            period["quarter"] = quarter
+    return period
 
 
 def _is_holding_evidence(item: EvidenceItem) -> bool:
@@ -707,6 +721,9 @@ def _item_year(item: EvidenceItem, item_date: str | None) -> int | None:
 def _item_quarter(item: EvidenceItem, item_date: str | None) -> int | None:
     value = _integer(item.period.get("quarter"))
     if value is not None and 1 <= value <= 4:
+        return value
+    value = _QUARTER_BY_BASE_MONTH.get(_integer(item.period.get("base_month")))
+    if value is not None:
         return value
     if item_date:
         month = _integer(item_date[5:7])
