@@ -303,28 +303,53 @@ class CaseFNoMatchingEventTests(unittest.TestCase):
         self.assertIn("answer_not_supported", generated.warnings)
 
 
-class CaseGMultiEventUnchangedTests(unittest.TestCase):
+class CaseGMultiEventCompactTests(unittest.TestCase):
+    """Multi-event answers keep every event, on one line each."""
+
     def setUp(self) -> None:
         self.result, self.generated = _ask("국민연금 보유 변동 내역을 알려줘")
 
-    def test_the_structured_multi_event_form_is_kept(self) -> None:
+    def test_the_repeated_label_blocks_are_gone(self) -> None:
         text = self.generated.answer_text
 
-        self.assertIn("확인된 보유 변동 내역은 다음과 같습니다.", text)
-        self.assertIn("변동 후 주식수:", text)
-        self.assertIn("변동일:", text)
+        for label in ("회사:", "변동일:", "변동 후 주식수:", "변동 후 비율:"):
+            with self.subTest(label=label):
+                self.assertNotIn(label, text)
 
-    def test_events_stay_numbered(self) -> None:
+    def test_events_are_no_longer_numbered(self) -> None:
         text = self.generated.answer_text
 
-        for index in ("1.", "2.", "3."):
-            with self.subTest(index=index):
-                self.assertIn(index, text)
+        self.assertNotIn("\n1.\n", text)
+        self.assertNotIn("\n2.\n", text)
 
     def test_every_event_is_still_reported(self) -> None:
         for date in ("2022-12-05", "2023-06-30", "2024-06-30"):
             with self.subTest(date=date):
                 self.assertIn(date, self.generated.answer_text)
+
+    def test_one_line_per_event(self) -> None:
+        body = self.generated.sections[0].content.splitlines()
+
+        # A header plus one row per event.
+        self.assertEqual(len(body), 1 + 3)
+
+    def test_every_verified_value_is_still_present(self) -> None:
+        text = self.generated.answer_text
+
+        for shares, ratio in (
+            ("720,039", "7.12"),
+            ("801,200", "7.90"),
+            ("650,100", "6.40"),
+        ):
+            with self.subTest(shares=shares):
+                self.assertIn(f"{shares}주", text)
+                self.assertIn(f"{ratio}%", text)
+
+    def test_the_ambiguity_warning_is_kept(self) -> None:
+        self.assertIn("특정 시점을 자동 선택하지 않았습니다", self.generated.answer_text)
+        self.assertIn(
+            "multiple_matching_holding_events", self.result.answer_draft.warnings
+        )
 
 
 class CaseIEndToEndSingleEventTests(unittest.TestCase):

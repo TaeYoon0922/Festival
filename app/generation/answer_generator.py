@@ -182,13 +182,30 @@ def _holding_sections(
         ]
     )
     single_event = len(events) == 1 and not draft.ambiguity.get("temporal_ambiguity")
+    markers = [
+        registry.ids_for(_string_list(event.get("evidence_chunk_ids")))
+        for event in events
+    ]
+
+    compact = None
+    if not single_event and len(events) >= 2 and all(markers):
+        # One line per event instead of eleven, but only when every verified
+        # value survives the compression.  All events or none: a half-compact
+        # answer would make two events look like different kinds of fact.
+        compact = _holding_compact_lines(events, markers)
+    if compact is not None:
+        return (
+            _holding_section_list(draft, compact, [id for ids in markers for id in ids]),
+            [],
+            True,
+        )
+
     lines = [] if single_event else ["확인된 보유 변동 내역은 다음과 같습니다."]
     section_citations: list[str] = []
     warnings: list[str] = []
     supported = bool(events)
     for index, event in enumerate(events, start=1):
-        chunk_ids = _string_list(event.get("evidence_chunk_ids"))
-        citation_ids = registry.ids_for(chunk_ids)
+        citation_ids = markers[index - 1]
         if not single_event:
             lines.append(f"{index}.")
         if not citation_ids:
@@ -212,11 +229,19 @@ def _holding_sections(
         lines.extend(factual_lines)
         section_citations.extend(citation_ids)
 
+    return _holding_section_list(draft, lines, section_citations), warnings, supported
+
+
+def _holding_section_list(
+    draft: AnswerDraft, lines: Sequence[str], citations: Sequence[str]
+) -> list[GeneratedSection]:
+    """Assemble the holding sections, keeping the ambiguity notice intact."""
+
     sections = [
         GeneratedSection(
             title="보유 변동 내역",
             content="\n".join(lines),
-            citations=_unique(section_citations),
+            citations=_unique(list(citations)),
         )
     ]
     if bool(draft.ambiguity.get("temporal_ambiguity")):
@@ -230,7 +255,175 @@ def _holding_sections(
                 citations=(),
             )
         )
-    return sections, warnings, supported
+    return sections
+
+
+def _holding_compact_lines(
+    events: Sequence[Mapping[str, Any]],
+    markers: Sequence[Sequence[str]],
+) -> list[str] | None:
+    """State each verified event on one line, or return ``None``.
+
+    The record form spends eleven labelled lines per event, so ten events read
+    as a hundred-line dump of the same six labels.  Every value still appears
+    here; only the repetition of the labels is removed.
+
+    ``None`` means the compression dropped something, and the caller falls back
+    to the record form for the whole set.  Mixing the two would make otherwise
+    identical events look like different kinds of fact.
+    """
+
+    if not events or len(events) != len(markers):
+        return None
+
+    shared_company = _holding_shared_company(events)
+    rows = [
+        _holding_compact_row(event, marker, omit_company=shared_company is not None)
+        for event, marker in zip(events, markers)
+    ]
+    if any(row is None for row in rows):
+        return None
+
+    header = (
+        f"{shared_company}에 대해 확인된 보유 변동은 다음과 같습니다."
+        if shared_company
+        else "확인된 보유 변동은 다음과 같습니다."
+    )
+    for event, row, marker in zip(events, rows, markers):
+        if not _holding_compact_row_states_every_value(
+            event, row, marker, header=header, company_hoisted=bool(shared_company)
+        ):
+            return None
+    return [header, *rows]
+
+
+def _holding_shared_company(events: Sequence[Mapping[str, Any]]) -> str | None:
+    """The company name, when every event names the same one.
+
+    Only then may it move to the header; otherwise each row keeps its own, so
+    two companies are never collapsed into one.
+    """
+
+    names = {_text(event.get("corp_name")) for event in events}
+    if len(names) == 1:
+        return next(iter(names))
+    return None
+
+
+def _holding_compact_row(
+    event: Mapping[str, Any], marker: Sequence[str], *, omit_company: bool
+) -> str | None:
+    """Render one event as ``date | reporter | shares | ratio | filing [n]``."""
+
+    date = _text(event.get("reference_date"))
+    if not date or not marker:
+        return None
+
+    parts = [date]
+    if not omit_company:
+        company = _text(event.get("corp_name"))
+        if company:
+            parts.append(company)
+    reporter = _text(event.get("reporter"))
+    if reporter:
+        parts.append(reporter)
+
+    shares = _holding_compact_movement(event, _SHARES)
+    if shares:
+        parts.append(shares)
+    ratio = _holding_compact_movement(event, _RATIO)
+    if ratio:
+        parts.append(ratio)
+
+    filing = _holding_compact_filing(event)
+    if filing:
+        parts.append(filing)
+
+    if len(parts) == 1:
+        return None
+    return " | ".join(parts) + " " + " ".join(marker)
+
+
+def _holding_compact_movement(event: Mapping[str, Any], kind: int) -> str | None:
+    """``before → after (change, direction)``, dropping whichever part is absent."""
+
+    if kind == _SHARES:
+        unit, change_unit = _SHARE_UNIT, _SHARE_UNIT
+        fields = ("before_shares", "after_shares", "change_shares")
+    else:
+        unit, change_unit = _RATIO_UNIT, _RATIO_CHANGE_UNIT
+        fields = ("before_ratio", "after_ratio", "change_ratio")
+
+    before = _numeric_text(event.get(fields[0]), unit)
+    after = _numeric_text(event.get(fields[1]), unit)
+    change = _numeric_text(event.get(fields[2]), change_unit)
+
+    if before and after:
+        movement = f"{before} → {after}"
+    else:
+        movement = before or after
+    if not movement:
+        return change
+
+    # The direction word rides with the share movement, so the record form's
+    # "변동 방향" value still appears verbatim exactly once.
+    annotations = [value for value in (change,) if value]
+    if kind == _SHARES:
+        direction = _direction_text(event.get("change_direction"))
+        if direction:
+            annotations.append(direction)
+    if annotations:
+        movement += " (" + ", ".join(annotations) + ")"
+    return movement
+
+
+def _holding_compact_filing(event: Mapping[str, Any]) -> str | None:
+    parts = []
+    for field, label in (("report_date", "보고"), ("receipt_date", "접수")):
+        value = _text(event.get(field))
+        if value:
+            parts.append(f"{label} {value}")
+    return " ".join(parts) if parts else None
+
+
+def _holding_compact_row_states_every_value(
+    event: Mapping[str, Any],
+    row: str,
+    marker: Sequence[str],
+    *,
+    header: str,
+    company_hoisted: bool,
+) -> bool:
+    """Require this event's values to appear in *this event's* row.
+
+    Checking the whole body instead would let a value repeat its way to a false
+    pass: holding data reuses figures constantly — one event's after_shares is
+    the next event's before_shares, the same reporter files every time, and two
+    filings can share a change ratio. A value missing from row A would then be
+    "found" in row B, and the reader would be shown a row that quietly lost a
+    fact.
+
+    ``corp_name`` is the one exception, and only when every event named the
+    same company and it was hoisted into the header.
+    """
+
+    for entry in (
+        *_HOLDING_TEXT_FIELDS,
+        *_HOLDING_NUMERIC_FIELDS,
+        _HOLDING_DIRECTION,
+    ):
+        value = _holding_fact_value(event, entry)
+        if not value:
+            continue
+        if entry[0] == "corp_name" and company_hoisted:
+            if value not in header:
+                return False
+            continue
+        if value not in row:
+            return False
+
+    # The row has to carry its own provenance, not a neighbour's.
+    return bool(marker) and all(citation_id in row for citation_id in marker)
 
 
 #: Rendered first, always: they say whose holding this is and as of when.

@@ -167,8 +167,21 @@ class AnswerGeneratorTests(unittest.TestCase):
             [(citation.doc_id, citation.chunk_id) for citation in generated.citations],
             [("h23", "h23:ch_report"), ("h25", "h25:ch_report")],
         )
-        self.assertIn("2024-05-09 [1]", generated.answer_text)
-        self.assertIn("2025-07-28 [2]", generated.answer_text)
+        # Each event keeps its own citation on its own line; the compact
+        # multi-event form no longer prefixes the date with a field label.
+        lines = generated.answer_text.splitlines()
+        self.assertTrue(
+            any(
+                line.startswith("2024-05-09") and line.endswith("[1]")
+                for line in lines
+            )
+        )
+        self.assertTrue(
+            any(
+                line.startswith("2025-07-28") and line.endswith("[2]")
+                for line in lines
+            )
+        )
         self.assertIn("특정 시점을 자동 선택하지 않았습니다", generated.answer_text)
         self.assertIn("multiple_matching_holding_events", generated.warnings)
 
