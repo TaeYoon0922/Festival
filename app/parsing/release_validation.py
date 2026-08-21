@@ -21,6 +21,9 @@ from app.parsing.final_validation import (
     _exclusion_reason,
     _is_relevant,
     _tokens,
+    bm25_rerank_bonus,
+    build_bm25_rerank_policy,
+    combine_bm25_rerank_score,
 )
 from app.parsing.models import Table, TableCell
 from app.parsing.sampling import GROUPS
@@ -246,12 +249,23 @@ class _Bm25Collector:
     def __init__(self, questions: tuple[dict[str, Any], ...]):
         self.questions = questions
         self.query_counts = [Counter(_tokens(str(question["query"]))) for question in questions]
+        self.rerank_policies = [
+            build_bm25_rerank_policy(str(question["query"]))
+            for question in questions
+        ]
         self.query_terms = {term for counts in self.query_counts for term in counts}
+        self.questions_by_term: dict[str, set[int]] = defaultdict(set)
+        for question_index, counts in enumerate(self.query_counts):
+            for term in counts:
+                self.questions_by_term[term].add(question_index)
         self.posting_docs = {term: array("I") for term in self.query_terms}
         self.posting_frequencies = {term: array("I") for term in self.query_terms}
         self.lengths = array("I")
         self.chunk_ids: list[str] = []
         self.relevant_indexes: list[list[int]] = [[] for _ in questions]
+        self.rerank_bonuses: list[dict[int, float]] = [
+            {} for _ in questions
+        ]
         self.questions_by_doc: dict[str, list[int]] = defaultdict(list)
         for index, question in enumerate(questions):
             self.questions_by_doc[str(question["doc_id"])].append(index)
@@ -268,9 +282,59 @@ class _Bm25Collector:
         for term, frequency in frequencies.items():
             self.posting_docs[term].append(index)
             self.posting_frequencies[term].append(frequency)
+        rerank_questions = {
+            question_index
+            for term in frequencies
+            for question_index in self.questions_by_term[term]
+        }
+        for question_index in rerank_questions:
+            policy = self.rerank_policies[question_index]
+            bonus = bm25_rerank_bonus(evaluated, policy)
+            if bonus:
+                self.rerank_bonuses[question_index][index] = bonus
         for question_index in self.questions_by_doc.get(str(document["doc_id"]), []):
             if _is_relevant(evaluated, self.questions[question_index]):
                 self.relevant_indexes[question_index].append(index)
+
+    def _first_relevant_rank(
+        self,
+        raw_scores: dict[int, float],
+        relevant: list[int],
+        bonuses: dict[int, float] | None = None,
+    ) -> int | None:
+        if not relevant:
+            return None
+        bonuses = bonuses or {}
+
+        def adjusted(item: int) -> float:
+            return combine_bm25_rerank_score(
+                raw_scores.get(item, 0.0),
+                bonuses.get(item, 0.0),
+            )
+
+        def key(item: int) -> tuple[float, float, str]:
+            return (
+                -adjusted(item),
+                -raw_scores.get(item, 0.0),
+                self.chunk_ids[item],
+            )
+
+        best_relevant = min(relevant, key=key)
+        if adjusted(best_relevant) > 0:
+            best_key = key(best_relevant)
+            return 1 + sum(key(item) < best_key for item in raw_scores)
+        return 1 + sum(
+            score > 0
+            or (
+                score == 0
+                and self.chunk_ids[item] < self.chunk_ids[best_relevant]
+            )
+            for item, score in raw_scores.items()
+        ) + sum(
+            item not in raw_scores
+            and self.chunk_ids[item] < self.chunk_ids[best_relevant]
+            for item in range(len(self.chunk_ids))
+        )
 
     def evaluate(self, evaluation_name: str) -> dict[str, Any]:
         total = len(self.chunk_ids)
@@ -307,52 +371,53 @@ class _Bm25Collector:
                     )
 
             if scores:
-                top_index = min(
+                raw_top_index = min(
                     scores,
                     key=lambda item: (-scores[item], self.chunk_ids[item]),
                 )
+                bonuses = self.rerank_bonuses[question_index]
+                top_index = min(
+                    scores,
+                    key=lambda item: (
+                        -combine_bm25_rerank_score(
+                            scores[item],
+                            bonuses.get(item, 0.0),
+                        ),
+                        -scores[item],
+                        self.chunk_ids[item],
+                    ),
+                )
                 top_score = scores[top_index]
+                top_bonus = bonuses.get(top_index, 0.0)
             else:
                 top_index = min(range(total), key=self.chunk_ids.__getitem__) if total else None
+                raw_top_index = top_index
                 top_score = 0.0
+                top_bonus = 0.0
 
             relevant = self.relevant_indexes[question_index]
-            if relevant:
-                best_relevant = min(
-                    relevant,
-                    key=lambda item: (-scores.get(item, 0.0), self.chunk_ids[item]),
-                )
-                relevant_score = scores.get(best_relevant, 0.0)
-                if relevant_score > 0:
-                    first_rank = 1 + sum(
-                        score > relevant_score
-                        or (
-                            score == relevant_score
-                            and self.chunk_ids[item] < self.chunk_ids[best_relevant]
-                        )
-                        for item, score in scores.items()
-                    )
-                else:
-                    first_rank = 1 + sum(
-                        score > 0
-                        or (
-                            score == 0
-                            and self.chunk_ids[item] < self.chunk_ids[best_relevant]
-                        )
-                        for item, score in scores.items()
-                    ) + sum(
-                        item not in scores
-                        and self.chunk_ids[item] < self.chunk_ids[best_relevant]
-                        for item in range(total)
-                    )
-            else:
-                first_rank = None
+            raw_first_rank = self._first_relevant_rank(scores, relevant)
+            first_rank = self._first_relevant_rank(
+                scores,
+                relevant,
+                self.rerank_bonuses[question_index],
+            )
 
             rows.append(
                 {
                     **question,
                     "evidence_terms": " | ".join(question["evidence_terms"]),
                     "structural_relevant_chunk_count": len(relevant),
+                    "structural_raw_first_relevant_rank": raw_first_rank,
+                    "structural_raw_hit_at_1": bool(
+                        raw_first_rank and raw_first_rank <= 1
+                    ),
+                    "structural_raw_hit_at_5": bool(
+                        raw_first_rank and raw_first_rank <= 5
+                    ),
+                    "structural_raw_hit_at_10": bool(
+                        raw_first_rank and raw_first_rank <= 10
+                    ),
                     "structural_first_relevant_rank": first_rank,
                     "structural_hit_at_1": bool(first_rank and first_rank <= 1),
                     "structural_hit_at_5": bool(first_rank and first_rank <= 5),
@@ -364,6 +429,22 @@ class _Bm25Collector:
                     if top_index is not None
                     else "",
                     "structural_top1_score": round(top_score, 6),
+                    "structural_top1_rerank_bonus": round(top_bonus, 6),
+                    "structural_top1_rerank_score": round(
+                        combine_bm25_rerank_score(
+                            top_score,
+                            top_bonus,
+                        ),
+                        6,
+                    ),
+                    "structural_raw_top1_chunk_id": self.chunk_ids[raw_top_index]
+                    if raw_top_index is not None
+                    else "",
+                    "structural_raw_top1_score": round(
+                        scores.get(raw_top_index, 0.0), 6
+                    )
+                    if raw_top_index is not None
+                    else 0.0,
                 }
             )
 
@@ -387,11 +468,13 @@ class _Bm25Collector:
 
         return {
             "method": {
-                "algorithm": "BM25",
+                "algorithm": "BM25 + shared deterministic structural reranker",
                 "k1": 1.5,
                 "b": 0.75,
                 "tokenizer": "lowercased Korean/English/numeric word tokens",
                 "evaluation_text": "identical corp/report/section context prefix + chunk content",
+                "raw_bm25_score_preserved": True,
+                "rerank_scope": "query-classified table intent only",
                 "corpus_chunk_count": total,
             },
             "evaluation_name": evaluation_name,
@@ -724,6 +807,21 @@ def run_final_release_gate(output_dir: Path, pilot_validation_dir: Path) -> dict
     for report in (fixed_full, holding_full):
         selected = report["questions"]
         count = len(selected)
+        report["raw_bm25_overall"] = {
+            "question_count": count,
+            "recall_at_1": round(
+                sum(row["structural_raw_hit_at_1"] for row in selected) / count,
+                6,
+            ),
+            "recall_at_5": round(
+                sum(row["structural_raw_hit_at_5"] for row in selected) / count,
+                6,
+            ),
+            "recall_at_10": round(
+                sum(row["structural_raw_hit_at_10"] for row in selected) / count,
+                6,
+            ),
+        }
         report["overall"] = {
             "question_count": count,
             "recall_at_1": round(sum(row["structural_hit_at_1"] for row in selected) / count, 6),
@@ -865,9 +963,13 @@ def run_final_release_gate(output_dir: Path, pilot_validation_dir: Path) -> dict
     question_fields = [
         "question_id", "doc_group", "query", "doc_id", "target_type", "target_id",
         "evidence_terms", "structural_relevant_chunk_count",
+        "structural_raw_first_relevant_rank", "structural_raw_hit_at_1",
+        "structural_raw_hit_at_5", "structural_raw_hit_at_10",
         "structural_first_relevant_rank", "structural_hit_at_1",
         "structural_hit_at_5", "structural_hit_at_10", "structural_top1_doc_id",
         "structural_top1_chunk_id", "structural_top1_score",
+        "structural_top1_rerank_bonus", "structural_top1_rerank_score",
+        "structural_raw_top1_chunk_id", "structural_raw_top1_score",
     ]
     _write_csv(report_dir / "bm25_fixed_40_questions.csv", fixed_full["questions"], question_fields)
     _write_csv(report_dir / "bm25_holding_20_questions.csv", holding_full["questions"], question_fields)
