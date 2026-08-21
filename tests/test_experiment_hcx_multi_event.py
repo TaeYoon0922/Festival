@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 
+from app.generation.compact_claim import ClaimCitation, ClaimField, CompactClaim
 from app.generation.hcx_verbalizer import SYSTEM_PROMPT, HcxSettings
-from app.generation.protected_literals import protect_literals, restore_literals
+from app.generation.protected_literals import (
+    PLACEHOLDER_PATTERN,
+    protect_literals,
+    restore_literals,
+)
 from scripts.experiment_hcx_multi_event import (
     EXPERIMENT_SYSTEM_PROMPT,
+    attach_detached_citations,
     build_experiment_claim,
+    detach_claim_citations,
     placeholder_type_breakdown,
     run_once,
     summarize,
@@ -306,6 +314,227 @@ class ShowOutputTests(unittest.TestCase):
         body = json.dumps(record, ensure_ascii=False).lower()
         for forbidden in ("authorization", "bearer", "test-key", "api_key"):
             self.assertNotIn(forbidden, body)
+
+
+class DetachedCitationTests(unittest.TestCase):
+    def test_model_payload_has_no_citation_but_keeps_field_placeholders(self) -> None:
+        claim = build_experiment_claim(4)
+        detached = detach_claim_citations(claim)
+
+        self.assertNotIn("[1]", detached.text)
+        self.assertNotIn("[1]", detached.protection.masked)
+        self.assertEqual(
+            [literal.kind for literal in detached.protection.literals],
+            ["date", "number"] * 4,
+        )
+
+    def test_detached_request_never_sends_citations_to_hcx(self) -> None:
+        transport = _Transport(lambda masked: masked)
+
+        run_once(
+            transport,
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        user = transport.calls[0]["payload"]["messages"][1]["content"]
+        self.assertIsNone(re.search(r"\[\d+\]", user))
+        self.assertIn("__FESTIVAL_DATE_", user)
+        self.assertIn("__FESTIVAL_NUMBER_", user)
+        self.assertNotIn("__FESTIVAL_CITATION_", user)
+
+    def test_faithful_echo_passes_attachment_and_final_validation(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertTrue(record["field_placeholder_integrity_valid"])
+        self.assertTrue(record["all_events_kept"])
+        self.assertTrue(record["candidate_valid_before_citation_attachment"])
+        self.assertTrue(record["deterministic_citations_attached"])
+        self.assertEqual(record["attached_citation_count"], 4)
+        self.assertTrue(record["final_answer_valid"])
+
+    def test_model_generated_citation_is_rejected(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked + " [99]"),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertTrue(record["field_placeholder_integrity_valid"])
+        self.assertTrue(record["unexpected_citation_generation"])
+        self.assertFalse(record["candidate_valid_before_citation_attachment"])
+        self.assertFalse(record["deterministic_citations_attached"])
+        self.assertEqual(record["validator_reason"], "unexpected_citation_generation")
+
+    def test_duplicate_field_citations_are_attached_once_per_event(self) -> None:
+        claim = build_experiment_claim(2)
+        detached = detach_claim_citations(claim)
+
+        final, attached, count = attach_detached_citations(
+            detached.protection.masked,
+            detached,
+        )
+
+        self.assertTrue(attached)
+        self.assertEqual(count, 2)
+        self.assertEqual(final.count("[1]"), 1)
+        self.assertEqual(final.count("[2]"), 1)
+
+    def test_multi_source_event_uses_metadata_order(self) -> None:
+        fields = (
+            ClaimField(
+                name="reference_date",
+                label="변동일",
+                value="2023-06-30",
+                marker="[2]",
+                chunk_id="c2",
+            ),
+            ClaimField(
+                name="after_shares",
+                label="변동 후 주식수",
+                value="1,000주",
+                marker="[1]",
+                chunk_id="c1",
+            ),
+        )
+        citations = (
+            ClaimCitation("[1]", "c1", "d1", ()),
+            ClaimCitation("[2]", "c2", "d2", ()),
+        )
+        claim = CompactClaim(
+            question="질문",
+            company="회사",
+            reporter="보고자",
+            fields=fields,
+            citations=citations,
+            deterministic_text=(
+                "보고자 회사 변동일 2023-06-30[2], "
+                "변동 후 주식수 1,000주[1]"
+            ),
+        )
+        detached = detach_claim_citations(claim)
+
+        final, attached, count = attach_detached_citations(
+            detached.protection.masked,
+            detached,
+        )
+
+        self.assertTrue(attached)
+        self.assertEqual(count, 2)
+        self.assertTrue(final.endswith("1,000주 [1][2]"))
+
+    def test_field_placeholder_loss_fails_before_attachment(self) -> None:
+        def respond(masked: str) -> str:
+            token = PLACEHOLDER_PATTERN.findall(masked)[0]
+            return masked.replace(token, "", 1)
+
+        record = run_once(
+            _Transport(respond),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertFalse(record["field_placeholder_integrity_valid"])
+        self.assertFalse(record["all_events_kept"])
+        self.assertFalse(record["final_answer_valid"])
+
+    def test_deleted_event_fails_before_attachment(self) -> None:
+        def respond(masked: str) -> str:
+            last_date = PLACEHOLDER_PATTERN.findall(masked)[-2]
+            event_start = masked.rfind(", 변동일", 0, masked.index(last_date) + 1)
+            return masked[:event_start]
+
+        record = run_once(
+            _Transport(respond),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertFalse(record["field_placeholder_integrity_valid"])
+        self.assertEqual(record["field_placeholder_integrity_reason"], "placeholder_missing")
+        self.assertFalse(record["all_events_kept"])
+        self.assertFalse(record["deterministic_citations_attached"])
+
+    def test_event_reordering_fails_placeholder_integrity(self) -> None:
+        def respond(masked: str) -> str:
+            first, second = PLACEHOLDER_PATTERN.findall(masked)[:2]
+            return masked.replace(first, "__TEMP__", 1).replace(
+                second, first, 1
+            ).replace("__TEMP__", second, 1)
+
+        record = run_once(
+            _Transport(respond),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertFalse(record["field_placeholder_integrity_valid"])
+        self.assertEqual(record["field_placeholder_integrity_reason"], "placeholder_reordered")
+        self.assertFalse(record["all_events_kept"])
+
+    def test_added_number_fails_before_attachment(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked + " 총 99,999주"),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertFalse(record["candidate_valid_before_citation_attachment"])
+        self.assertEqual(record["validator_reason"], "numeric_token_changed")
+        self.assertFalse(record["final_answer_valid"])
+
+    def test_added_inference_fails_before_attachment(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked + " 이를 통해 증가를 알 수 있습니다."),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertFalse(record["candidate_valid_before_citation_attachment"])
+        self.assertEqual(record["validator_reason"], "inference_marker_added")
+        self.assertIn("이를 통해", record["inference_markers"])
+        self.assertFalse(record["final_answer_valid"])
+
+    def test_raw_candidate_stays_hidden_in_detached_mode(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+
+        self.assertNotIn("raw_hcx_candidate", record)
+        self.assertNotIn("restored_output", record)
+        self.assertNotIn("final_output", record)
+
+    def test_detached_summary_requires_every_final_check(self) -> None:
+        clean = run_once(
+            _Transport(lambda masked: masked),
+            _settings(),
+            4,
+            detach_citations=True,
+        )
+        failed = dict(clean, final_answer_valid=False)
+
+        self.assertEqual(
+            summarize([clean])["largest_fully_clean_event_count"],
+            4,
+        )
+        self.assertIsNone(
+            summarize([clean, failed])["largest_fully_clean_event_count"]
+        )
 
 
 class SummaryTests(unittest.TestCase):

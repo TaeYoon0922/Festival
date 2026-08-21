@@ -23,6 +23,7 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.generation.answer_validator import validate_verbalized_answer
+from app.generation.answer_validator import (
+    CITATION_MARKER_PATTERN,
+    validate_verbalized_answer,
+)
 from app.generation.compact_claim import (
     MAX_CLAIM_EVENTS,
     MAX_CLAIM_LITERALS,
@@ -90,6 +94,29 @@ INFERENCE_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class EventCitationAttachment:
+    """Citation markers to insert after one event's last field placeholder."""
+
+    anchor_text: str
+    markers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DetachedClaimInput:
+    """Citation-free model input plus citation metadata kept outside HCX."""
+
+    text: str
+    protection: Any
+    attachments: tuple[EventCitationAttachment, ...]
+
+    @property
+    def expected_citation_sequence(self) -> tuple[str, ...]:
+        return tuple(
+            marker for attachment in self.attachments for marker in attachment.markers
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -118,6 +145,14 @@ def main(argv: list[str] | None = None) -> int:
             "and the restored text when integrity allows restoration."
         ),
     )
+    parser.add_argument(
+        "--detach-citations",
+        action="store_true",
+        help=(
+            "Remove citations from the HCX input and attach the preserved "
+            "event citation metadata deterministically after validation."
+        ),
+    )
     args = parser.parse_args(argv)
 
     settings = HcxSettings.from_env()
@@ -131,7 +166,11 @@ def main(argv: list[str] | None = None) -> int:
     transport = UrllibJsonTransport()
     runs = [
         run_once(
-            transport, settings, count, show_output=args.show_output
+            transport,
+            settings,
+            count,
+            show_output=args.show_output,
+            detach_citations=args.detach_citations,
         )
         for count in args.events
         for _ in range(max(1, args.repeat))
@@ -162,11 +201,17 @@ def run_once(
     event_count: int,
     *,
     show_output: bool = False,
+    detach_citations: bool = False,
 ) -> dict[str, Any]:
     """Send one claim of ``event_count`` events and report what came back."""
 
     claim = build_experiment_claim(event_count)
-    protection = protect_literals(claim.deterministic_text)
+    detached = detach_claim_citations(claim) if detach_citations else None
+    protection = (
+        detached.protection
+        if detached is not None
+        else protect_literals(claim.deterministic_text)
+    )
     payload = {
         "model": settings.model,
         "messages": [
@@ -183,6 +228,7 @@ def run_once(
         "masked_chars": len(protection.masked),
         "field_literal_count": len(claim.fields),
         "protected_literal_count": len(protection.literals),
+        "detach_citations": detach_citations,
     }
 
     try:
@@ -212,6 +258,15 @@ def run_once(
         record["raw_hcx_candidate"] = raw
     if raw is None:
         return record
+
+    if detached is not None:
+        return _evaluate_detached_candidate(
+            record,
+            raw,
+            claim=claim,
+            detached=detached,
+            show_output=show_output,
+        )
 
     found = PLACEHOLDER_PATTERN.findall(raw)
     integrity = check_placeholder_integrity(raw, protection)
@@ -250,6 +305,209 @@ def run_once(
     if show_output:
         record["restored_output"] = restored
     return record
+
+
+def detach_claim_citations(claim: CompactClaim) -> DetachedClaimInput:
+    """Build citation-free protected text and event-level attachment metadata.
+
+    Event boundaries are identified by the repeated field schema emitted by the
+    synthetic claim builder.  Citation order comes from ``claim.citations``, not
+    from model output or a sorted marker value.
+    """
+
+    event_fields = _group_event_fields(claim.fields)
+    detached_fields = [
+        ClaimField(
+            name=field.name,
+            label=field.label,
+            value=field.value,
+            marker="",
+            chunk_id=field.chunk_id,
+        )
+        for field in claim.fields
+    ]
+    text = _render(claim.company, claim.reporter, detached_fields)
+    if CITATION_MARKER_PATTERN.search(text):
+        raise ValueError("detached HCX input still contains a citation marker")
+
+    protection = protect_literals(text)
+    field_literals = tuple(
+        literal for literal in protection.literals if literal.kind in {"date", "number"}
+    )
+    if len(field_literals) != len(claim.fields):
+        raise ValueError("each experimental claim field must contain one literal")
+
+    citation_order = {
+        citation.marker: index for index, citation in enumerate(claim.citations)
+    }
+    attachments: list[EventCitationAttachment] = []
+    field_offset = 0
+    for fields in event_fields:
+        event_markers = {field.marker for field in fields}
+        unknown = event_markers.difference(citation_order)
+        if unknown:
+            raise ValueError("claim field references unknown citation metadata")
+        markers = tuple(sorted(event_markers, key=citation_order.__getitem__))
+        field_offset += len(fields)
+        last_field = fields[-1]
+        last_literal = field_literals[field_offset - 1]
+        literal_offset = last_field.value.rfind(last_literal.text)
+        if literal_offset < 0:
+            raise ValueError("field literal is not present in its rendered value")
+        suffix = last_field.value[literal_offset + len(last_literal.text) :]
+        attachments.append(
+            EventCitationAttachment(
+                anchor_text=last_literal.placeholder + suffix,
+                markers=markers,
+            )
+        )
+    return DetachedClaimInput(
+        text=text,
+        protection=protection,
+        attachments=tuple(attachments),
+    )
+
+
+def attach_detached_citations(
+    masked_candidate: str,
+    detached: DetachedClaimInput,
+) -> tuple[str | None, bool, int]:
+    """Attach preserved citations after each event, without inventing markers."""
+
+    candidate = masked_candidate
+    for attachment in detached.attachments:
+        if candidate.count(attachment.anchor_text) != 1:
+            return None, False, 0
+        suffix = "".join(attachment.markers)
+        candidate = candidate.replace(
+            attachment.anchor_text,
+            f"{attachment.anchor_text} {suffix}",
+            1,
+        )
+
+    final_answer = restore_literals(candidate, detached.protection)
+    found = tuple(
+        match.group(0) for match in CITATION_MARKER_PATTERN.finditer(final_answer)
+    )
+    expected = detached.expected_citation_sequence
+    return final_answer, found == expected, len(found)
+
+
+def _evaluate_detached_candidate(
+    record: dict[str, Any],
+    raw: str,
+    *,
+    claim: CompactClaim,
+    detached: DetachedClaimInput,
+    show_output: bool,
+) -> dict[str, Any]:
+    """Validate fields first, then simulate deterministic citation attachment."""
+
+    protection = detached.protection
+    found = PLACEHOLDER_PATTERN.findall(raw)
+    integrity = check_placeholder_integrity(raw, protection)
+    breakdown = placeholder_type_breakdown(protection, found)
+    unexpected_citation = CITATION_MARKER_PATTERN.search(raw) is not None
+    record.update(
+        {
+            "output_chars": len(raw),
+            "expected_placeholders": len(protection.placeholders),
+            "found_placeholders": len(found),
+            "field_placeholder_integrity_valid": integrity.valid,
+            "field_placeholder_integrity_reason": integrity.reason,
+            "placeholder_integrity_valid": integrity.valid,
+            "placeholder_integrity_reason": integrity.reason,
+            "all_events_kept": integrity.valid,
+            "unexpected_citation_generation": unexpected_citation,
+            "candidate_valid_before_citation_attachment": False,
+            "deterministic_citations_attached": False,
+            "attached_citation_count": 0,
+            "final_answer_valid": False,
+            "inference_markers": [],
+            **breakdown,
+        }
+    )
+    if not integrity.valid:
+        return record
+
+    restored = restore_literals(raw, protection)
+    inference_markers = [
+        marker for marker in INFERENCE_MARKERS if marker in restored
+    ]
+    record["inference_markers"] = inference_markers
+    if show_output:
+        record["restored_output"] = restored
+
+    if unexpected_citation:
+        record["validator_reason"] = "unexpected_citation_generation"
+        return record
+
+    validation = validate_verbalized_answer(
+        restored,
+        reference=detached.text,
+        required_terms=claim.required_terms,
+    )
+    candidate_valid = validation.valid and not inference_markers
+    record.update(
+        {
+            "restored_chars": len(restored),
+            "length_ratio": round(len(restored) / len(detached.text), 2),
+            "candidate_valid_before_citation_attachment": candidate_valid,
+            "validator_reason": (
+                "inference_marker_added" if inference_markers else validation.reason
+            ),
+        }
+    )
+    if not candidate_valid:
+        return record
+
+    final_answer, attached, attached_count = attach_detached_citations(raw, detached)
+    record["deterministic_citations_attached"] = attached
+    record["attached_citation_count"] = attached_count
+    if not attached or final_answer is None:
+        record["final_validator_reason"] = "citation_attachment_failed"
+        return record
+
+    final_validation = validate_verbalized_answer(
+        final_answer,
+        reference=_expected_attached_answer(detached),
+        required_terms=claim.required_terms,
+    )
+    record["final_answer_valid"] = final_validation.valid
+    record["final_validator_reason"] = final_validation.reason
+    if show_output:
+        record["final_output"] = final_answer
+    return record
+
+
+def _expected_attached_answer(detached: DetachedClaimInput) -> str:
+    expected, attached, _ = attach_detached_citations(
+        detached.protection.masked,
+        detached,
+    )
+    if not attached or expected is None:
+        raise ValueError("deterministic citation plan cannot attach to its source")
+    return expected
+
+
+def _group_event_fields(
+    fields: Sequence[ClaimField],
+) -> tuple[tuple[ClaimField, ...], ...]:
+    """Split the repeated synthetic field schema into ordered events."""
+
+    groups: list[tuple[ClaimField, ...]] = []
+    current: list[ClaimField] = []
+    names: set[str] = set()
+    for field in fields:
+        if current and field.name in names:
+            groups.append(tuple(current))
+            current = []
+            names = set()
+        current.append(field)
+        names.add(field.name)
+    if current:
+        groups.append(tuple(current))
+    return tuple(groups)
 
 
 def placeholder_type_breakdown(
@@ -340,21 +598,57 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
     for run in runs:
         bucket = by_size.setdefault(
             run["event_count"],
-            {"runs": 0, "integrity_ok": 0, "validator_ok": 0, "inference_seen": 0},
+            {
+                "runs": 0,
+                "integrity_ok": 0,
+                "validator_ok": 0,
+                "final_answer_ok": 0,
+                "inference_seen": 0,
+                "fully_clean": 0,
+            },
         )
         bucket["runs"] += 1
-        if run.get("placeholder_integrity_valid"):
+        integrity_ok = bool(
+            run.get(
+                "field_placeholder_integrity_valid",
+                run.get("placeholder_integrity_valid"),
+            )
+        )
+        validator_ok = bool(
+            run.get(
+                "candidate_valid_before_citation_attachment",
+                run.get("candidate_valid"),
+            )
+        )
+        final_answer_ok = bool(run.get("final_answer_valid", validator_ok))
+        all_events_kept = bool(run.get("all_events_kept", integrity_ok))
+        citations_attached = bool(
+            run.get("deterministic_citations_attached", final_answer_ok)
+        )
+        no_inference = not run.get("inference_markers")
+        if integrity_ok:
             bucket["integrity_ok"] += 1
-        if run.get("candidate_valid"):
+        if validator_ok:
             bucket["validator_ok"] += 1
+        if final_answer_ok:
+            bucket["final_answer_ok"] += 1
         if run.get("inference_markers"):
             bucket["inference_seen"] += 1
+        if (
+            integrity_ok
+            and all_events_kept
+            and validator_ok
+            and citations_attached
+            and final_answer_ok
+            and no_inference
+        ):
+            bucket["fully_clean"] += 1
 
     largest_clean = max(
         (
             size
             for size, bucket in by_size.items()
-            if bucket["runs"] == bucket["validator_ok"]
+            if bucket["runs"] == bucket["fully_clean"]
         ),
         default=None,
     )
