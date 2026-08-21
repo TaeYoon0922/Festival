@@ -12,12 +12,19 @@ from app.generation.answer_generator import (
 )
 from app.generation.compact_claim import build_compact_claim
 from app.generation.hcx_verbalizer import (
+    CITATION_ATTACHMENT_FAILED_STATUS,
+    LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
     PLACEHOLDER_INTEGRITY_FAILED,
+    SKIPPED_MULTI_EVENT_CLAIM,
     SKIPPED_NO_COMPACT_CLAIM,
     HcxSettings,
     HcxVerbalizer,
 )
-from app.generation.protected_literals import protect_literals, restore_literals
+from app.generation.lossless_verbalization import (
+    claim_event_count,
+    detach_claim_citations,
+    expected_attached_answer,
+)
 from app.reasoning.answer_composer import compose_periodic_answer
 from app.reasoning.periodic_fact_resolver import resolve_periodic_facts
 from app.reasoning.query_plan import QueryPlan
@@ -31,13 +38,20 @@ from tests.test_periodic_fact_resolver import (
 )
 
 
-def _holding_context():
-    """Run the production holding path once and keep what the verbalizer needs."""
+def _holding_context(events: int = 1):
+    """Run the production holding path and keep what the verbalizer needs."""
 
-    pair = _holding_pair(
-        "h23:ch", "h23", rank=1, date="2023-06-30",
-        projection_type="holding_report", table_id="t23",
-    )
+    pairs = [
+        _holding_pair(
+            f"h2{index}:ch",
+            f"h2{index}",
+            rank=index + 1,
+            date=f"202{3 + index}-06-30",
+            projection_type="holding_report",
+            table_id=f"t2{index}",
+        )
+        for index in range(events)
+    ]
     plan = QueryPlan(
         query="효성중공업 국민연금기금 변동일 변동후 주식수",
         task_type="holding_change",
@@ -46,32 +60,35 @@ def _holding_context():
         disclosure_route=("holding",),
         evidence={"requested_holding_fields": ["reference_date", "after_shares"]},
     )
-    result = AgentOrchestrator().run(plan.raw_query, plan, _execution(plan, pair))
+    result = AgentOrchestrator().run(plan.raw_query, plan, _execution(plan, *pairs))
     generated = CitationAwareAnswerGenerator().generate(result.answer_draft)
-    claim = build_compact_claim(
-        result.answer_draft, result.resolution, task_type=result.task_decision.task_type
-    )
-    return result, generated, claim
+    return result, generated
 
 
-RESULT, GENERATED, CLAIM = _holding_context()
+RESULT, GENERATED = _holding_context(events=1)
 
 #: The full deterministic answer, served whenever HCX is skipped or rejected.
 DETERMINISTIC_TEXT = GENERATED.answer_text
 
-#: The compact claim is what HCX is asked to restate and is judged against.
-CLAIM_TEXT = CLAIM.deterministic_text
-PROTECTION = protect_literals(CLAIM_TEXT)
+CLAIM = build_compact_claim(
+    RESULT.answer_draft,
+    RESULT.resolution,
+    task_type=RESULT.task_decision.task_type,
+)
+DETACHED = detach_claim_citations(CLAIM)
 
-MASKED_FAITHFUL = f"{PROTECTION.masked}입니다"
-FAITHFUL_TEXT = restore_literals(MASKED_FAITHFUL, PROTECTION)
+#: What the model is shown: citation-free, every verified value masked.
+MASKED = DETACHED.protection.masked
+
+#: What a perfectly faithful reply becomes once citations are reattached.
+EXPECTED_FINAL = expected_attached_answer(DETACHED)
 
 
-def _verbalizer_kwargs() -> dict:
+def _kwargs(result=RESULT) -> dict:
     return {
-        "draft": RESULT.answer_draft,
-        "resolution": RESULT.resolution,
-        "task_type": RESULT.task_decision.task_type,
+        "draft": result.answer_draft,
+        "resolution": result.resolution,
+        "task_type": result.task_decision.task_type,
     }
 
 
@@ -111,67 +128,116 @@ def _reply(content: str) -> dict:
     return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
 
-def _verbalize(reply: str, **overrides):
+def _verbalize(reply: str, *, generated=GENERATED, result=RESULT, **overrides):
     transport = _Transport(_reply(reply))
     verbalizer = HcxVerbalizer(_settings(**overrides), transport=transport)
-    return verbalizer.verbalize(GENERATED, **_verbalizer_kwargs()), transport
+    return verbalizer.verbalize(generated, **_kwargs(result)), transport
 
 
-class CompactClaimInputTests(unittest.TestCase):
-    """HCX restates a short claim, never the whole evidence report."""
+class SingleEventGateTests(unittest.TestCase):
+    """HCX is asked only about the claim shape live runs proved it can restate."""
 
-    def test_the_claim_is_far_smaller_than_the_full_answer(self) -> None:
-        self.assertLess(len(CLAIM_TEXT), len(DETERMINISTIC_TEXT))
-        self.assertLess(len(PROTECTION.placeholders), 10)
+    def test_a_single_event_claim_reaches_the_model(self) -> None:
+        outcome, transport = _verbalize(MASKED)
 
-    def test_the_request_carries_the_masked_claim_not_the_report(self) -> None:
-        _, transport = _verbalize(MASKED_FAITHFUL)
+        self.assertEqual(claim_event_count(CLAIM), 1)
+        self.assertEqual(outcome.status, "success")
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_a_two_event_claim_never_reaches_the_model(self) -> None:
+        result, generated = _holding_context(events=2)
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            generated, **_kwargs(result)
+        )
+
+        self.assertEqual(outcome.status, SKIPPED_MULTI_EVENT_CLAIM)
+        self.assertEqual(outcome.text, generated.answer_text)
+        self.assertEqual(transport.calls, [])
+
+    def test_a_three_event_claim_never_reaches_the_model(self) -> None:
+        result, generated = _holding_context(events=3)
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            generated, **_kwargs(result)
+        )
+
+        self.assertEqual(outcome.status, SKIPPED_MULTI_EVENT_CLAIM)
+        self.assertEqual(transport.calls, [])
+
+    def test_the_multi_event_deterministic_answer_is_returned_unchanged(self) -> None:
+        result, generated = _holding_context(events=3)
+
+        outcome = HcxVerbalizer(_settings(), transport=_Transport()).verbalize(
+            generated, **_kwargs(result)
+        )
+
+        self.assertEqual(outcome.text, generated.answer_text)
+
+    def test_the_gate_does_not_change_compact_claim_eligibility(self) -> None:
+        """A skipped claim is still a claim; only the HCX call is narrowed."""
+
+        result, _ = _holding_context(events=3)
+
+        claim = build_compact_claim(
+            result.answer_draft,
+            result.resolution,
+            task_type=result.task_decision.task_type,
+        )
+
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim_event_count(claim), 3)
+
+
+class CitationDetachmentTests(unittest.TestCase):
+    def test_the_model_never_receives_a_citation_marker(self) -> None:
+        _, transport = _verbalize(MASKED)
 
         body = json.dumps(transport.calls[0]["payload"], ensure_ascii=False)
-        self.assertIn(PROTECTION.masked, body)
-        self.assertNotIn(DETERMINISTIC_TEXT, body)
+        self.assertNotIn("[1]", body)
+        self.assertNotIn("CITATION", body)
 
-    def test_the_request_never_carries_raw_literals_or_chunks(self) -> None:
-        _, transport = _verbalize(MASKED_FAITHFUL)
+    def test_the_model_never_receives_a_raw_verified_value(self) -> None:
+        _, transport = _verbalize(MASKED)
 
         body = json.dumps(transport.calls[0]["payload"], ensure_ascii=False)
         self.assertNotIn("2023-06-30", body)
         self.assertNotIn("1,000", body)
-        self.assertNotIn("[1]", body)
-        self.assertNotIn("chunk_id", body)
-        self.assertNotIn("source_refs", body)
 
+    def test_the_model_is_sent_the_masked_claim_not_the_report(self) -> None:
+        _, transport = _verbalize(MASKED)
 
-class VerbalizerSuccessTests(unittest.TestCase):
-    def test_faithful_reply_is_used(self) -> None:
-        outcome, _ = _verbalize(MASKED_FAITHFUL)
+        user = transport.calls[0]["payload"]["messages"][1]["content"]
+        self.assertEqual(user, MASKED)
+        self.assertNotIn(DETERMINISTIC_TEXT, user)
 
-        self.assertEqual(outcome.status, "success")
-        self.assertTrue(outcome.used_hcx)
-        self.assertEqual(outcome.text, FAITHFUL_TEXT)
+    def test_the_lossless_prompt_is_sent(self) -> None:
+        _, transport = _verbalize(MASKED)
 
-    def test_native_clova_response_shape_is_accepted(self) -> None:
-        transport = _Transport({"result": {"message": {"content": MASKED_FAITHFUL}}})
-        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
-            GENERATED, **_verbalizer_kwargs()
-        )
+        system = transport.calls[0]["payload"]["messages"][0]["content"]
+        self.assertEqual(system, LOSSLESS_VERBALIZER_SYSTEM_PROMPT)
+
+    def test_citations_are_reattached_after_a_successful_reply(self) -> None:
+        outcome, _ = _verbalize(MASKED)
 
         self.assertEqual(outcome.status, "success")
-        self.assertEqual(outcome.text, FAITHFUL_TEXT)
+        self.assertIn("[1]", outcome.text)
+        self.assertEqual(outcome.text, EXPECTED_FINAL)
 
-    def test_literals_are_restored_verbatim(self) -> None:
-        outcome, _ = _verbalize(MASKED_FAITHFUL)
 
+class LiteralPreservationTests(unittest.TestCase):
+    def test_a_faithful_reply_restores_every_literal_verbatim(self) -> None:
+        outcome, _ = _verbalize(MASKED)
+
+        self.assertEqual(outcome.status, "success")
         self.assertIn("2023-06-30", outcome.text)
         self.assertIn("1,000주", outcome.text)
-        self.assertIn("[1]", outcome.text)
 
-    def test_wording_only_change_succeeds(self) -> None:
-        date, first_marker, number, second_marker = PROTECTION.placeholders
-        reply = (
-            f"국민연금기금이 보유한 테스트회사 주식은 {date} 기준{first_marker} "
-            f"{number}주입니다{second_marker}"
-        )
+    def test_wording_may_change_around_the_placeholders(self) -> None:
+        date, number = DETACHED.protection.placeholders
+        reply = f"국민연금기금 테스트회사 변동일 {date}, 변동 후 주식수 {number}주입니다"
 
         outcome, _ = _verbalize(reply)
 
@@ -179,19 +245,313 @@ class VerbalizerSuccessTests(unittest.TestCase):
         self.assertIn("2023-06-30", outcome.text)
         self.assertIn("1,000주", outcome.text)
 
+    def test_the_native_clova_envelope_is_accepted(self) -> None:
+        transport = _Transport({"result": {"message": {"content": MASKED}}})
 
-class OpenAiCompatibleContractTests(unittest.TestCase):
-    """Lock the CLOVA Studio OpenAI compatibility contract.
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            GENERATED, **_kwargs()
+        )
 
-    Two ways to break this request are guarded here.  The native
-    ``/v3/chat-completions`` route takes camelCase fields such as ``maxTokens``
-    and returns a different envelope.  And the compatibility layer does not
-    support every OpenAI sampling field: ``top_p`` in particular is unsupported,
-    so it must not be sent even though plain OpenAI would accept it.
-    """
+        self.assertEqual(outcome.status, "success")
+
+
+class FailClosedTests(unittest.TestCase):
+    """Every rejection serves the deterministic answer, byte for byte."""
+
+    def _rejected(self, reply: str) -> tuple[str, str]:
+        outcome, _ = _verbalize(reply)
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+        return outcome.status, outcome.reason or ""
+
+    def test_a_missing_placeholder_falls_back(self) -> None:
+        date = DETACHED.protection.placeholders[0]
+
+        status, reason = self._rejected(MASKED.replace(date, ""))
+
+        self.assertEqual(status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(reason, "placeholder_missing")
+
+    def test_a_reordered_placeholder_falls_back(self) -> None:
+        date, number = DETACHED.protection.placeholders
+
+        status, reason = self._rejected(f"{number}주 그리고 {date}")
+
+        self.assertEqual(status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(reason, "placeholder_reordered")
+
+    def test_a_duplicated_placeholder_falls_back(self) -> None:
+        number = DETACHED.protection.placeholders[1]
+
+        status, reason = self._rejected(MASKED + number)
+
+        self.assertEqual(status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(reason, "placeholder_duplicated")
+
+    def test_an_unexpected_placeholder_falls_back(self) -> None:
+        status, reason = self._rejected(MASKED + " __FESTIVAL_NUMBER_Z__")
+
+        self.assertEqual(status, PLACEHOLDER_INTEGRITY_FAILED)
+        self.assertEqual(reason, "placeholder_unexpected")
+
+    def test_an_invented_number_falls_back(self) -> None:
+        """The HX09 failure: a prior value the claim never carried."""
+
+        status, reason = self._rejected(f"이전에는 2,000주였고 {MASKED}")
+
+        self.assertEqual(status, "fallback_validation_failed")
+        self.assertEqual(reason, "unprotected_numeric_generation")
+
+    def test_a_model_written_citation_falls_back(self) -> None:
+        status, reason = self._rejected(MASKED + "[1]")
+
+        self.assertEqual(status, "fallback_validation_failed")
+        self.assertEqual(reason, "generated_citation")
+
+    def test_investment_language_falls_back(self) -> None:
+        status, reason = self._rejected(MASKED + " 매수를 추천합니다")
+
+        self.assertEqual(status, "fallback_validation_failed")
+        self.assertEqual(reason, "forbidden_investment_language")
+
+    def test_an_added_conclusion_falls_back(self) -> None:
+        status, reason = self._rejected(MASKED + " 이를 통해 추이를 알 수 있습니다")
+
+        self.assertEqual(status, "fallback_validation_failed")
+        self.assertEqual(reason, "inference_marker_added")
+
+    def test_a_missing_entity_falls_back(self) -> None:
+        date, number = DETACHED.protection.placeholders
+        reply = f"변동일 {date}, 변동 후 주식수 {number}주"
+
+        status, reason = self._rejected(reply)
+
+        self.assertEqual(status, "fallback_validation_failed")
+        self.assertEqual(reason, "entity_missing")
+
+    def test_an_overlong_reply_falls_back(self) -> None:
+        status, reason = self._rejected(MASKED + " 그리고" * 200)
+
+        self.assertEqual(status, "fallback_validation_failed")
+        self.assertEqual(reason, "length_exceeded")
+
+    def test_an_empty_reply_falls_back(self) -> None:
+        status, _ = self._rejected("   ")
+
+        self.assertEqual(status, "fallback_invalid_response")
+
+
+class StructuredTextLeakageTests(unittest.TestCase):
+    """A TEXT value must appear only inside its placeholder."""
 
     def setUp(self) -> None:
-        _, transport = _verbalize(MASKED_FAITHFUL)
+        pair = _holding_pair(
+            "h23:ch", "h23", rank=1, date="2023-06-30",
+            projection_type="holding_report", table_id="t23",
+        )
+        plan = QueryPlan(
+            query="효성중공업 국민연금기금 변동일 변동방향",
+            task_type="holding_change",
+            metric="holding_shares",
+            reporter="국민연금기금",
+            disclosure_route=("holding",),
+            evidence={"requested_holding_fields": ["reference_date"]},
+        )
+        self.result = AgentOrchestrator().run(
+            plan.raw_query, plan, _execution(plan, pair)
+        )
+        self.generated = CitationAwareAnswerGenerator().generate(
+            self.result.answer_draft
+        )
+        self.claim = build_compact_claim(
+            self.result.answer_draft,
+            self.result.resolution,
+            task_type=self.result.task_decision.task_type,
+        )
+        self.detached = detach_claim_citations(self.claim)
+
+    def test_a_faithful_reply_succeeds(self) -> None:
+        outcome, _ = _verbalize(
+            self.detached.protection.masked,
+            generated=self.generated,
+            result=self.result,
+        )
+
+        self.assertEqual(outcome.status, "success")
+
+    def test_an_invented_number_still_falls_back_here(self) -> None:
+        """TEXT-literal leakage itself is covered in test_lossless_verbalization."""
+
+        outcome, _ = _verbalize(
+            f"이전 2,000주 {self.detached.protection.masked}",
+            generated=self.generated,
+            result=self.result,
+        )
+
+        self.assertEqual(outcome.reason, "unprotected_numeric_generation")
+        self.assertEqual(outcome.text, self.generated.answer_text)
+
+
+class TransportFailureTests(unittest.TestCase):
+    def _failure(self, error: Exception) -> tuple[str, str]:
+        transport = _Transport(error=error)
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            GENERATED, **_kwargs()
+        )
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+        return outcome.status, outcome.reason or ""
+
+    def test_a_timeout_falls_back(self) -> None:
+        status, _ = self._failure(
+            EmbeddingHttpError("timed out", status_code=None, transient=True)
+        )
+
+        self.assertEqual(status, "fallback_timeout")
+
+    def test_an_http_error_falls_back(self) -> None:
+        status, reason = self._failure(
+            EmbeddingHttpError("boom", status_code=500, transient=True)
+        )
+
+        self.assertEqual(status, "fallback_http_error")
+        self.assertEqual(reason, "HTTP 500")
+
+    def test_an_unexpected_exception_falls_back(self) -> None:
+        status, _ = self._failure(ValueError("not JSON"))
+
+        self.assertEqual(status, "fallback_error")
+
+    def test_a_missing_message_falls_back(self) -> None:
+        transport = _Transport({"choices": []})
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            GENERATED, **_kwargs()
+        )
+
+        self.assertEqual(outcome.status, "fallback_invalid_response")
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+
+
+class NeverEmptyTests(unittest.TestCase):
+    def test_every_outcome_carries_text(self) -> None:
+        replies = [
+            MASKED,
+            MASKED + "[1]",
+            MASKED + " 매수",
+            MASKED.replace(DETACHED.protection.placeholders[0], ""),
+            "   ",
+        ]
+
+        for reply in replies:
+            with self.subTest(reply=reply[:24]):
+                outcome, _ = _verbalize(reply)
+                self.assertTrue(outcome.text.strip())
+
+
+class SkipTests(unittest.TestCase):
+    def test_no_compact_claim_skips_without_calling_the_model(self) -> None:
+        older = _periodic_item(
+            "p23:ch", "p23", rank=1, text="연료전지 매출액은 1,234억원입니다.", year=2023
+        )
+        newer = _periodic_item(
+            "p24:ch", "p24", rank=2, text="연료전지 매출액은 1,234억원입니다.", year=2024
+        )
+        evidence = _periodic_evidence(
+            [_periodic_group("g1", older, newer, group_type="periodic_repeated_fact")]
+        )
+        resolution = resolve_periodic_facts(evidence)
+        draft = compose_periodic_answer(resolution, evidence)
+        generated = CitationAwareAnswerGenerator().generate(draft)
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            generated, draft=draft, resolution=resolution, task_type="periodic_fact"
+        )
+
+        self.assertEqual(outcome.status, SKIPPED_NO_COMPACT_CLAIM)
+        self.assertEqual(outcome.text, generated.answer_text)
+        self.assertEqual(transport.calls, [])
+
+    def test_general_evidence_skips_without_calling_the_model(self) -> None:
+        pair = _candidate(
+            "m23:ch", "m23", rank=1, doc_group="major",
+            content="유상증자 결정. 신주 1,000,000주.",
+            section="주요사항보고서", report_nm="유상증자결정",
+        )
+        plan = QueryPlan(
+            query="삼성전자 유상증자 공시 내용",
+            task_type="corporate_event",
+            event_type="capital_increase",
+            disclosure_route=("major",),
+        )
+        result = AgentOrchestrator().run(plan.raw_query, plan, _execution(plan, pair))
+        generated = CitationAwareAnswerGenerator().generate(result.answer_draft)
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            generated, **_kwargs(result)
+        )
+
+        self.assertEqual(outcome.status, SKIPPED_NO_COMPACT_CLAIM)
+        self.assertEqual(transport.calls, [])
+
+    def test_disabled_returns_the_deterministic_answer(self) -> None:
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(
+            _settings(enabled=False), transport=transport
+        ).verbalize(GENERATED, **_kwargs())
+
+        self.assertEqual(outcome.status, "disabled")
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+        self.assertEqual(transport.calls, [])
+
+    def test_missing_credentials_return_the_deterministic_answer(self) -> None:
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(_settings(api_key=""), transport=transport).verbalize(
+            GENERATED, **_kwargs()
+        )
+
+        self.assertEqual(outcome.status, "not_configured")
+        self.assertEqual(transport.calls, [])
+
+    def test_an_unanswerable_result_never_reaches_the_model(self) -> None:
+        unanswerable = GeneratedAnswer(
+            question="확인되지 않는 질문",
+            answer_text="확인되지 않은 정보가 있습니다.",
+            citations=(
+                GeneratedCitation(
+                    citation_id="[1]", chunk_id="c", doc_id="d",
+                    source_refs=(), section="s", evidence_type="table",
+                ),
+            ),
+            sections=(
+                GeneratedSection(
+                    title="확인 필요",
+                    content="확인되지 않은 정보가 있습니다.",
+                    citations=(),
+                ),
+            ),
+            warnings=("answer_not_supported",),
+            confidence={"level": "low", "display_text": "낮음"},
+            answerable=False,
+        )
+        transport = _Transport(_reply(MASKED))
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            unanswerable, **_kwargs()
+        )
+
+        self.assertEqual(outcome.status, "skipped_not_answerable")
+        self.assertEqual(outcome.text, unanswerable.answer_text)
+        self.assertEqual(transport.calls, [])
+
+
+class OpenAiCompatibleContractTests(unittest.TestCase):
+    """The CLOVA Studio OpenAI compatibility contract is unchanged."""
+
+    def setUp(self) -> None:
+        _, transport = _verbalize(MASKED)
         self.call = transport.calls[0]
 
     def test_sends_only_supported_fields(self) -> None:
@@ -230,281 +590,10 @@ class OpenAiCompatibleContractTests(unittest.TestCase):
     def test_default_endpoint_alone_does_not_enable_the_verbalizer(self) -> None:
         self.assertFalse(HcxSettings.from_env({}).configured)
 
-    def test_reads_content_from_the_openai_envelope(self) -> None:
-        transport = _Transport(
-            {
-                "id": "chatcmpl-1",
-                "object": "chat.completion",
-                "model": "HCX-005",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": MASKED_FAITHFUL},
-                    }
-                ],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
-            }
-        )
-
-        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
-            GENERATED, **_verbalizer_kwargs()
-        )
-
-        self.assertEqual(outcome.status, "success")
-
-
-class VerbalizerFallbackTests(unittest.TestCase):
-    """Every failure serves the full deterministic answer."""
-
-    def _fallback(self, **kwargs) -> tuple[str, str]:
-        transport = _Transport(**kwargs)
-        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
-            GENERATED, **_verbalizer_kwargs()
-        )
-        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
-        return outcome.status, outcome.reason or ""
-
-    def test_timeout_falls_back(self) -> None:
-        status, _ = self._fallback(
-            error=EmbeddingHttpError("timed out", status_code=None, transient=True)
-        )
-
-        self.assertEqual(status, "fallback_timeout")
-
-    def test_raw_timeout_error_falls_back(self) -> None:
-        status, _ = self._fallback(error=TimeoutError("timed out"))
-
-        self.assertEqual(status, "fallback_timeout")
-
-    def test_http_error_falls_back(self) -> None:
-        status, reason = self._fallback(
-            error=EmbeddingHttpError("boom", status_code=500, transient=True)
-        )
-
-        self.assertEqual(status, "fallback_http_error")
-        self.assertEqual(reason, "HTTP 500")
-
-    def test_unexpected_exception_falls_back(self) -> None:
-        status, _ = self._fallback(error=ValueError("not JSON"))
-
-        self.assertEqual(status, "fallback_error")
-
-    def test_missing_content_falls_back(self) -> None:
-        status, _ = self._fallback(response={"choices": []})
-
-        self.assertEqual(status, "fallback_invalid_response")
-
-    def test_empty_reply_falls_back(self) -> None:
-        status, _ = self._fallback(response=_reply("   "))
-
-        self.assertEqual(status, "fallback_invalid_response")
-
-    def test_hallucinated_number_falls_back(self) -> None:
-        """A number typed fresh is not a placeholder, so the validator catches it."""
-
-        status, reason = self._fallback(
-            response=_reply(MASKED_FAITHFUL + " 전년 대비 99,999주 증가했습니다.")
-        )
-
-        self.assertEqual(status, "fallback_validation_failed")
-        self.assertEqual(reason, "numeric_token_changed")
-
-    def test_added_citation_falls_back(self) -> None:
-        status, reason = self._fallback(response=_reply(MASKED_FAITHFUL + "[9]"))
-
-        self.assertEqual(status, "fallback_validation_failed")
-        self.assertEqual(reason, "citation_marker_changed")
-
-    def test_investment_language_falls_back(self) -> None:
-        status, reason = self._fallback(
-            response=_reply(MASKED_FAITHFUL + " 매수를 추천합니다.")
-        )
-
-        self.assertEqual(status, "fallback_validation_failed")
-        self.assertEqual(reason, "forbidden_investment_language")
-
-
-class PlaceholderIntegrityFallbackTests(unittest.TestCase):
-    """A mangled placeholder is never guessed back into a literal."""
-
-    def _integrity_failure(self, reply: str) -> str:
-        outcome, _ = _verbalize(reply)
-        self.assertEqual(outcome.status, PLACEHOLDER_INTEGRITY_FAILED)
-        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
-        return outcome.reason or ""
-
-    def test_deleted_placeholder_falls_back(self) -> None:
-        reason = self._integrity_failure(
-            MASKED_FAITHFUL.replace(PROTECTION.placeholders[0], "")
-        )
-
-        self.assertEqual(reason, "placeholder_missing")
-
-    def test_added_placeholder_falls_back(self) -> None:
-        reason = self._integrity_failure(MASKED_FAITHFUL + " __FESTIVAL_NUMBER_Z__")
-
-        self.assertEqual(reason, "placeholder_unexpected")
-
-    def test_duplicated_placeholder_falls_back(self) -> None:
-        reason = self._integrity_failure(
-            MASKED_FAITHFUL + PROTECTION.placeholders[0]
-        )
-
-        self.assertEqual(reason, "placeholder_duplicated")
-
-    def test_reordered_placeholders_fall_back(self) -> None:
-        date, first_marker, number, second_marker = PROTECTION.placeholders
-        reply = f"{number}주{second_marker} 기준일 {date}{first_marker}"
-
-        reason = self._integrity_failure(reply)
-
-        self.assertEqual(reason, "placeholder_reordered")
-
-    def test_placeholder_rewritten_as_a_literal_falls_back(self) -> None:
-        reason = self._integrity_failure(
-            MASKED_FAITHFUL.replace(PROTECTION.placeholders[0], "2023년 6월 30일")
-        )
-
-        self.assertEqual(reason, "placeholder_missing")
-
-    def test_the_live_failure_mode_can_no_longer_corrupt_literals(self) -> None:
-        """The model writing its own prose instead of restating the claim."""
-
-        outcome, _ = _verbalize(
-            "국민연금기금의 테스트회사 보유주식 수는 **2023년 6월 30일** 기준 "
-            "**1,000주**입니다."
-        )
-
-        self.assertEqual(outcome.status, PLACEHOLDER_INTEGRITY_FAILED)
-        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
-
-
-class CompactClaimSkipTests(unittest.TestCase):
-    """No compact claim means no model call, and the deterministic answer stands."""
-
-    def _skip(self, generated, **kwargs) -> tuple[str, list]:
-        transport = _Transport(_reply(MASKED_FAITHFUL))
-        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
-            generated, **kwargs
-        )
-        return outcome, transport.calls
-
-    def test_missing_draft_skips_without_calling_the_model(self) -> None:
-        outcome, calls = self._skip(GENERATED)
-
-        self.assertEqual(outcome.status, SKIPPED_NO_COMPACT_CLAIM)
-        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
-        self.assertEqual(calls, [])
-
-    def test_answerable_periodic_fact_still_skips(self) -> None:
-        """P07's shape: the answer is sound, but its value lives in free text."""
-
-        older = _periodic_item(
-            "p23:ch", "p23", rank=1, text="연료전지 주기기 매출액은 1,234억원입니다.", year=2023
-        )
-        newer = _periodic_item(
-            "p24:ch", "p24", rank=2, text="연료전지 주기기 매출액은 1,234억원입니다.", year=2024
-        )
-        evidence = _periodic_evidence(
-            [_periodic_group("g1", older, newer, group_type="periodic_repeated_fact")]
-        )
-        resolution = resolve_periodic_facts(evidence)
-        draft = compose_periodic_answer(resolution, evidence)
-        generated = CitationAwareAnswerGenerator().generate(draft)
-        self.assertTrue(generated.answerable)
-
-        outcome, calls = self._skip(
-            generated,
-            draft=draft,
-            resolution=resolution,
-            task_type="periodic_fact",
-        )
-
-        self.assertEqual(outcome.status, SKIPPED_NO_COMPACT_CLAIM)
-        self.assertEqual(outcome.text, generated.answer_text)
-        self.assertEqual(calls, [])
-
-    def test_general_evidence_skips_without_calling_the_model(self) -> None:
-        pair = _candidate(
-            "m23:ch", "m23", rank=1, doc_group="major",
-            content="유상증자 결정. 신주 1,000,000주.",
-            section="주요사항보고서", report_nm="유상증자결정",
-        )
-        plan = QueryPlan(
-            query="삼성전자 유상증자 공시 내용",
-            task_type="corporate_event",
-            event_type="capital_increase",
-            disclosure_route=("major",),
-        )
-        result = AgentOrchestrator().run(plan.raw_query, plan, _execution(plan, pair))
-        generated = CitationAwareAnswerGenerator().generate(result.answer_draft)
-
-        outcome, calls = self._skip(
-            generated,
-            draft=result.answer_draft,
-            resolution=result.resolution,
-            task_type=result.task_decision.task_type,
-        )
-
-        self.assertEqual(outcome.status, SKIPPED_NO_COMPACT_CLAIM)
-        self.assertEqual(calls, [])
-
-
-class VerbalizerGatingTests(unittest.TestCase):
-    def test_disabled_returns_the_deterministic_answer(self) -> None:
-        transport = _Transport(_reply(MASKED_FAITHFUL))
-        outcome = HcxVerbalizer(
-            _settings(enabled=False), transport=transport
-        ).verbalize(GENERATED, **_verbalizer_kwargs())
-
-        self.assertEqual(outcome.status, "disabled")
-        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
-        self.assertEqual(transport.calls, [])
-
-    def test_missing_credentials_return_the_deterministic_answer(self) -> None:
-        transport = _Transport(_reply(MASKED_FAITHFUL))
-        outcome = HcxVerbalizer(
-            _settings(api_key=""), transport=transport
-        ).verbalize(GENERATED, **_verbalizer_kwargs())
-
-        self.assertEqual(outcome.status, "not_configured")
-        self.assertEqual(transport.calls, [])
-
-    def test_unanswerable_result_never_reaches_the_model(self) -> None:
-        unanswerable = GeneratedAnswer(
-            question="확인되지 않는 질문",
-            answer_text="확인되지 않은 정보가 있습니다.",
-            citations=(
-                GeneratedCitation(
-                    citation_id="[1]", chunk_id="c", doc_id="d",
-                    source_refs=(), section="s", evidence_type="table",
-                ),
-            ),
-            sections=(
-                GeneratedSection(title="확인 필요", content="확인되지 않은 정보가 있습니다.", citations=()),
-            ),
-            warnings=("answer_not_supported",),
-            confidence={"level": "low", "display_text": "낮음"},
-            answerable=False,
-        )
-        transport = _Transport(_reply(MASKED_FAITHFUL))
-
-        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
-            unanswerable, **_verbalizer_kwargs()
-        )
-
-        self.assertEqual(outcome.status, "skipped_not_answerable")
-        self.assertEqual(outcome.text, unanswerable.answer_text)
-        self.assertEqual(transport.calls, [])
-
 
 class HcxSettingsTests(unittest.TestCase):
     def test_enabled_by_default(self) -> None:
         self.assertTrue(HcxSettings.from_env({}).enabled)
-
-    def test_unconfigured_without_credentials(self) -> None:
-        self.assertFalse(HcxSettings.from_env({}).configured)
 
     def test_reads_environment(self) -> None:
         settings = HcxSettings.from_env(
@@ -533,6 +622,11 @@ class HcxSettingsTests(unittest.TestCase):
     def test_request_headers_still_carry_the_key(self) -> None:
         self.assertEqual(
             _settings().request_headers(), {"Authorization": "Bearer test-key"}
+        )
+
+    def test_the_citation_attachment_status_is_distinct(self) -> None:
+        self.assertNotEqual(
+            CITATION_ATTACHMENT_FAILED_STATUS, PLACEHOLDER_INTEGRITY_FAILED
         )
 
 

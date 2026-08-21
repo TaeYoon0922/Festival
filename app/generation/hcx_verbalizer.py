@@ -9,7 +9,6 @@ or times out falls back to the deterministic text.
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -17,16 +16,20 @@ from typing import Any
 
 from app.generation.answer_generator import GeneratedAnswer
 from app.generation.compact_claim import CompactClaim, build_compact_claim
-from app.generation.answer_validator import (
-    ValidationPolicy,
-    validate_verbalized_answer,
+from app.generation.answer_validator import ValidationPolicy
+from app.generation.lossless_verbalization import (
+    CITATION_ATTACHMENT_FAILED,
+    LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
+    DetachedClaimInput,
+    claim_event_count,
+    detach_claim_citations,
+    verify_lossless_candidate,
 )
 from app.generation.protected_literals import (
-    ProtectedText,
-    check_placeholder_integrity,
-    contains_placeholder_syntax,
-    protect_literals,
-    restore_literals,
+    PLACEHOLDER_DUPLICATED,
+    PLACEHOLDER_MISSING,
+    PLACEHOLDER_REORDERED,
+    PLACEHOLDER_UNEXPECTED,
 )
 
 # The embedding adapter already owns a tested JSON transport with sanitized HTTP
@@ -60,20 +63,13 @@ PLACEHOLDER_INTEGRITY_FAILED = "fallback_placeholder_integrity_failed"
 #: keeps the grounded deterministic answer, not an error.
 SKIPPED_NO_COMPACT_CLAIM = "skipped_no_compact_verified_claim"
 
-SYSTEM_PROMPT = """당신은 이미 검증된 공시 답변을 자연스러운 한국어로 다듬는 편집자입니다.
+#: The claim covers more than one verified event.  Live runs showed the model
+#: cannot restate those without reordering or dropping facts, so it is not
+#: asked to.  A deliberate skip, not an error.
+SKIPPED_MULTI_EVENT_CLAIM = "skipped_multi_event_compact_claim"
 
-반드시 지킬 것:
-- 입력에 있는 사실만 사용한다. 새로운 사실을 추가하지 않는다.
-- __FESTIVAL_...__ 형태의 토큰은 보호된 값이다. 글자 하나도 바꾸지 말고
-  개수와 순서를 입력 그대로 유지한다. 삭제, 추가, 중복, 번역, 분할하지 않는다.
-- 보호 토큰 안쪽이나 바로 옆에 다른 문자를 끼워 넣지 않는다.
-- 보호 토큰이 무엇을 뜻하는지 추측하거나 숫자, 날짜로 바꿔 쓰지 않는다.
-- 외부 지식, 추정, 투자 의견, 전망, 추천을 쓰지 않는다.
-- Markdown 서식을 새로 만들지 않는다. 굵게(**), 기울임(*), 제목(#),
-  목록(-), 코드 블록을 추가하지 않는다.
-- 원문보다 길게 쓰지 않는다.
-
-출력은 다듬어진 답변 본문만 쓴다. 설명이나 머리말을 붙이지 않는다."""
+#: Citations could not be reattached to the events that own them.
+CITATION_ATTACHMENT_FAILED_STATUS = "fallback_citation_attachment_failed"
 
 
 @dataclass(frozen=True)
@@ -181,52 +177,43 @@ class HcxVerbalizer:
             # model would be handed a whole report and would rewrite it.
             return VerbalizationOutcome(deterministic, SKIPPED_NO_COMPACT_CLAIM)
 
-        # The model now restates the claim, so the claim is what its output is
-        # judged against.
-        reference = claim.deterministic_text
-        terms = tuple(required_terms) or claim.required_terms
+        # Live evidence, not caution for its own sake: single-event claims came
+        # back clean fourteen times out of fourteen, while multi-event claims
+        # failed every attempt by reordering fields across events or dropping
+        # the company name.  This narrows only when HCX is called; compact-claim
+        # eligibility and the caps behind it are untouched.
+        if claim_event_count(claim) != 1:
+            return VerbalizationOutcome(deterministic, SKIPPED_MULTI_EVENT_CLAIM)
 
-        if contains_placeholder_syntax(reference):
-            # Protection would be ambiguous, so the model is not consulted.
+        try:
+            detached = detach_claim_citations(claim)
+        except ValueError as error:
             return VerbalizationOutcome(
-                deterministic,
-                PLACEHOLDER_INTEGRITY_FAILED,
-                "reference already contains placeholder syntax",
+                deterministic, "fallback_error", type(error).__name__
             )
 
-        protection = protect_literals(reference)
         try:
-            masked_candidate = self._request(claim, protection)
+            masked_candidate = self._request(detached)
         except _VerbalizerFailure as failure:
             return VerbalizationOutcome(deterministic, failure.status, failure.reason)
 
-        integrity = check_placeholder_integrity(masked_candidate, protection)
-        if not integrity.valid:
-            # Never repair a mangled placeholder: a guessed literal is worse
-            # than the deterministic answer.
-            return VerbalizationOutcome(
-                deterministic, PLACEHOLDER_INTEGRITY_FAILED, integrity.reason
-            )
-
-        candidate = restore_literals(masked_candidate, protection)
-        result = validate_verbalized_answer(
-            candidate,
-            reference=reference,
-            required_terms=terms,
-            policy=self.policy,
+        result = verify_lossless_candidate(
+            masked_candidate, claim=claim, detached=detached
         )
-        if not result.valid:
+        if not result.valid or result.final_answer is None:
+            # Never repair a mangled reply: a guessed literal, or a citation
+            # placed by inference, is worse than the deterministic answer.
             return VerbalizationOutcome(
-                deterministic, "fallback_validation_failed", result.reason
+                deterministic, _failure_status(result.reason), result.reason
             )
-        return VerbalizationOutcome(candidate.strip(), "success")
+        return VerbalizationOutcome(result.final_answer, "success")
 
-    def _request(self, claim: CompactClaim, protection: ProtectedText) -> str:
+    def _request(self, detached: DetachedClaimInput) -> str:
         payload = {
             "model": self.settings.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _verified_facts(claim, protection)},
+                {"role": "system", "content": LOSSLESS_VERBALIZER_SYSTEM_PROMPT},
+                {"role": "user", "content": detached.protection.masked},
             ],
             "temperature": self.settings.temperature,
             "max_tokens": self.settings.max_tokens,
@@ -260,28 +247,43 @@ class HcxVerbalizer:
         return content
 
 
+#: Placeholder faults keep their own status; everything else a check rejects is
+#: a validation fallback, with the specific check named in ``reason``.
+_PLACEHOLDER_FAULTS = frozenset(
+    {
+        PLACEHOLDER_MISSING,
+        PLACEHOLDER_DUPLICATED,
+        PLACEHOLDER_REORDERED,
+        PLACEHOLDER_UNEXPECTED,
+    }
+)
+
+_CITATION_FAULTS = frozenset(
+    {
+        CITATION_ATTACHMENT_FAILED,
+        "citation_sequence_mismatch",
+        "citation_mapping_missing",
+        "event_count_mismatch",
+        "event_span_not_found",
+        "event_field_text_mismatch",
+    }
+)
+
+
+def _failure_status(reason: str | None) -> str:
+    if reason in _PLACEHOLDER_FAULTS:
+        return PLACEHOLDER_INTEGRITY_FAILED
+    if reason in _CITATION_FAULTS:
+        return CITATION_ATTACHMENT_FAILED_STATUS
+    return "fallback_validation_failed"
+
+
 class _VerbalizerFailure(Exception):
     def __init__(self, status: str, reason: str) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
 
-
-def _verified_facts(claim: CompactClaim, protection: ProtectedText) -> str:
-    """Serialize the masked claim and nothing that would unmask it.
-
-    Only the masked rendering is sent.  The claim's own field values are left
-    out on purpose: including them would hand the model an unprotected copy of
-    every number and date, which is exactly what the placeholders prevent.
-    """
-
-    facts = {
-        "question": claim.question,
-        "answer_to_rewrite": protection.masked,
-        "field_labels": [field.label for field in claim.fields],
-        "protected_tokens": list(protection.placeholders),
-    }
-    return json.dumps(facts, ensure_ascii=False, indent=2)
 
 
 def _response_content(response: Mapping[str, Any]) -> str | None:

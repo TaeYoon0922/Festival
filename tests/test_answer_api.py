@@ -21,10 +21,11 @@ from app.generation.hcx_verbalizer import (
 from app.agent.orchestrator import AgentOrchestrator
 from app.generation.answer_generator import CitationAwareAnswerGenerator
 from app.generation.compact_claim import build_compact_claim
-from app.generation.protected_literals import (
-    PLACEHOLDER_PATTERN,
-    protect_literals,
+from app.generation.lossless_verbalization import (
+    detach_claim_citations,
+    expected_attached_answer,
 )
+from app.generation.protected_literals import PLACEHOLDER_PATTERN
 from app.reasoning.query_plan import QueryPlan
 from app.retrieval.embeddings import EmbeddingHttpError
 from tests.test_agent_end_to_end_smoke import (
@@ -112,23 +113,57 @@ def _client(pipeline_factory=None, **kwargs) -> TestClient:
     return TestClient(app, **kwargs)
 
 
-def _claim_protection():
-    """Rebuild the compact claim the pipeline will produce for this fixture."""
+def _single_event_plan_and_execution():
+    """One holding event: the only shape HCX is asked to verbalize."""
 
-    plan, execution = _plan_and_execution()
+    pair = _holding_pair(
+        "h23:ch_report",
+        "h23",
+        rank=1,
+        date="2023-06-30",
+        projection_type="holding_report",
+        table_id="t23",
+    )
+    plan = QueryPlan(
+        query=QUESTION,
+        task_type="holding_change",
+        metric="holding_shares",
+        reporter="국민연금기금",
+        disclosure_route=("holding",),
+        evidence={"requested_holding_fields": ["reference_date", "after_shares"]},
+    )
+    return plan, _execution(plan, pair)
+
+
+def _single_event_pipeline(*, verbalizer=None) -> AnswerPipeline:
+    plan, execution = _single_event_plan_and_execution()
+    return AnswerPipeline(
+        understanding=_StaticUnderstanding(QUESTION, plan),
+        executor=_StaticExecutor(plan, execution),
+        verbalizer=verbalizer or HcxVerbalizer(HcxSettings(enabled=False)),
+    )
+
+
+def _claim_detachment():
+    """Rebuild what the pipeline sends the model for the single-event fixture."""
+
+    plan, execution = _single_event_plan_and_execution()
     result = AgentOrchestrator().run(QUESTION, plan, execution)
     claim = build_compact_claim(
         result.answer_draft,
         result.resolution,
         task_type=result.task_decision.task_type,
     )
+    detached = detach_claim_citations(claim)
     generated = CitationAwareAnswerGenerator().generate(result.answer_draft)
-    return claim, protect_literals(claim.deterministic_text), generated.answer_text
+    return detached, expected_attached_answer(detached), generated.answer_text
 
 
-def _hcx_factory(reply: str):
+def _hcx_factory(reply: str, *, single_event: bool = True):
+    build = _single_event_pipeline if single_event else _pipeline
+
     def factory() -> AnswerPipeline:
-        return _pipeline(
+        return build(
             verbalizer=HcxVerbalizer(
                 HcxSettings(
                     enabled=True,
@@ -219,33 +254,56 @@ class HcxIntegrationTests(unittest.TestCase):
         self.assertNotIn("hcx_verbalizer", payload["think_trace"]["stages"])
 
     def test_faithful_hcx_text_is_served(self) -> None:
-        claim, protection, _ = _claim_protection()
+        detached, expected_final, _ = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(f"{protection.masked}입니다"))).json()
+        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
 
         self.assertEqual(payload["think_trace"]["hcx_status"], "success")
-        self.assertEqual(payload["answer"], f"{claim.deterministic_text}입니다")
+        self.assertEqual(payload["answer"], expected_final)
         self.assertIn("hcx_verbalizer", payload["think_trace"]["stages"])
 
     def test_served_answer_is_shorter_than_the_full_report(self) -> None:
-        _, protection, deterministic = _claim_protection()
+        detached, _, deterministic = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(f"{protection.masked}입니다"))).json()
+        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
 
         self.assertLess(len(payload["answer"]), len(deterministic))
 
-    def test_served_answer_never_leaks_a_placeholder(self) -> None:
-        _, protection, _ = _claim_protection()
+    def test_served_answer_carries_its_deterministic_citation(self) -> None:
+        detached, _, _ = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(f"{protection.masked}입니다"))).json()
+        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
+
+        self.assertIn("[1]", payload["answer"])
+
+    def test_served_answer_never_leaks_a_placeholder(self) -> None:
+        detached, _, _ = _claim_detachment()
+
+        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
 
         self.assertIsNone(PLACEHOLDER_PATTERN.search(payload["answer"]))
         self.assertNotIn("__FESTIVAL_", json.dumps(payload, ensure_ascii=False))
 
+    def test_a_multi_event_claim_skips_hcx(self) -> None:
+        """The two-event fixture is served deterministically, unchanged."""
+
+        deterministic = _ask(_client()).json()["answer"]
+
+        payload = _ask(
+            _client(_hcx_factory("무엇이든", single_event=False))
+        ).json()
+
+        self.assertEqual(
+            payload["think_trace"]["hcx_status"],
+            "skipped_multi_event_compact_claim",
+        )
+        self.assertEqual(payload["answer"], deterministic)
+        self.assertNotIn("hcx_verbalizer", payload["think_trace"]["stages"])
+
     def test_normalized_literals_fall_back(self) -> None:
         """The live failure mode: HCX writes its own prose instead of restating."""
 
-        deterministic = _ask(_client()).json()["answer"]
+        _, _, deterministic = _claim_detachment()
 
         payload = _ask(_client(_hcx_factory(deterministic))).json()
 
@@ -256,10 +314,12 @@ class HcxIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["answer"], deterministic)
 
     def test_hallucinating_hcx_falls_back_to_the_deterministic_answer(self) -> None:
-        _, protection, deterministic = _claim_protection()
+        detached, _, deterministic = _claim_detachment()
 
         payload = _ask(
-            _client(_hcx_factory(protection.masked + " 총 12,345주 늘었습니다."))
+            _client(
+                _hcx_factory(detached.protection.masked + " 총 12,345주 늘었습니다.")
+            )
         ).json()
 
         self.assertEqual(

@@ -5,7 +5,10 @@ import re
 import unittest
 
 from app.generation.compact_claim import ClaimCitation, ClaimField, CompactClaim
-from app.generation.hcx_verbalizer import SYSTEM_PROMPT, HcxSettings
+from app.generation.hcx_verbalizer import HcxSettings
+from app.generation.lossless_verbalization import (
+    LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
+)
 from app.generation.protected_literals import (
     PLACEHOLDER_PATTERN,
     protect_literals,
@@ -87,7 +90,9 @@ class ExperimentClaimTests(unittest.TestCase):
 
 class ExperimentPromptTests(unittest.TestCase):
     def test_the_experiment_prompt_is_not_the_production_prompt(self) -> None:
-        self.assertNotEqual(EXPERIMENT_SYSTEM_PROMPT, SYSTEM_PROMPT)
+        self.assertNotEqual(
+            EXPERIMENT_SYSTEM_PROMPT, LOSSLESS_VERBALIZER_SYSTEM_PROMPT
+        )
 
     def test_the_experiment_prompt_forbids_summarising(self) -> None:
         self.assertIn("요약", EXPERIMENT_SYSTEM_PROMPT)

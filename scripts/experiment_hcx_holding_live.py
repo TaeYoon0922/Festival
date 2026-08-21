@@ -54,6 +54,14 @@ from app.generation.compact_claim import (
     build_compact_claim,
 )
 from app.generation.hcx_verbalizer import HcxSettings, _response_content
+from app.generation.lossless_verbalization import (
+    LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
+    CitationAttachmentResult,
+    DetachedClaimInput,
+    EventCitationAttachment,
+    attach_detached_citations,
+    detach_claim_citations,
+)
 from app.generation.protected_literals import (
     PLACEHOLDER_PATTERN,
     ProtectedLiteral,
@@ -68,9 +76,6 @@ from app.retrieval.embeddings import EmbeddingHttpError, UrllibJsonTransport
 from scripts.experiment_hcx_multi_event import (
     EXPERIMENT_SYSTEM_PROMPT,
     INFERENCE_MARKERS,
-    CitationAttachmentResult,
-    DetachedClaimInput,
-    EventCitationAttachment,
     _completion_tokens,
     _finish_reason,
     _group_event_fields,
@@ -141,53 +146,6 @@ before A, C 다음에 after B, D로 재배열하는 것은 금지한다.
 # placeholder nobody supplied.  The wording below removes the analyst role
 # entirely and leaves only a transcription task.  Every example is schema-only;
 # no real company, date, question, or answer appears here.
-LOSSLESS_VERBALIZER_SYSTEM_PROMPT = """당신은 이미 검증된 사실을 자연스러운 한국어 문장으로 옮기는 변환기입니다.
-
-당신의 역할:
-- 당신은 사용자의 질문에 독자적으로 답하지 않는다.
-- 당신은 공시를 분석하지 않는다.
-- 당신은 빠진 정보를 채우지 않는다.
-- 당신은 VERIFIED CLAIM에 이미 있는 사실만 자연스러운 한국어로 바꾼다.
-
-절대 규칙:
-1. VERIFIED CLAIM에 명시된 사실만 사용한다.
-2. 새로운 사실 항목을 추가하지 않는다.
-3. 다음을 추론하거나 복원하지 않는다: 변동 전 값, 변동 후 값, 증감 수량,
-   증감 비율, 기준일, 거래 행위, 사유, 계산, 비교.
-4. 어떤 계산도 하지 않는다.
-5. 수식, 예시, 가정된 숫자, 설명용 숫자, 번호 매긴 개요를 쓰지 않는다.
-6. 새로운 placeholder를 만들지 않는다. 입력에 없는 placeholder는
-   어떤 이름으로도 출력하지 않는다.
-7. 입력의 모든 placeholder는 출력에 정확히 한 번, 원형 그대로,
-   입력과 같은 순서로 나타나야 한다.
-8. placeholder의 의미 유형을 다시 해석하지 않는다. 비율에 쓰인 NUMBER
-   placeholder도 그대로 NUMBER placeholder로 유지한다. 이름을 바꾸지 않는다.
-9. 거래 의미를 유추하지 않는다. 매수, 매도, 매입, 처분, 취득, 사들이다 등의
-   표현은 그 의미가 검증된 값으로 직접 주어진 경우가 아니면 쓰지 않는다.
-10. "변동 현황은 다음과 같습니다" 같은 머리말을 쓰지 않는다. 그런 표현은
-    주어지지 않은 항목을 채우도록 유도한다. 주어진 사실만 담은 가장 짧은
-    문장을 쓴다.
-11. 결론 문장이나 설명 문장을 덧붙이지 않는다.
-12. citation을 쓰지 않는다. citation은 이 단계 밖에서 결정적으로 붙는다.
-
-형식 예시(값이 아니라 형태만 참고):
-
-VERIFIED CLAIM:
-보유 비율: __FESTIVAL_NUMBER_A__%
-
-GOOD:
-보유 비율은 __FESTIVAL_NUMBER_A__%입니다.
-
-BAD:
-이전 보유 비율은 5%였으며 현재는 __FESTIVAL_NUMBER_A__%입니다.
-
-BAD:
-변동률은 (__FESTIVAL_NUMBER_A__ - 5) / 5 * 100 입니다.
-
-BAD:
-보유 비율은 __FESTIVAL_PERCENTAGE_A__입니다.
-
-출력은 변환된 본문만 쓴다. 머리말, 설명, 목록, 결론을 붙이지 않는다."""
 
 
 class ExperimentPreparationError(ValueError):
@@ -212,125 +170,13 @@ class PreparedHoldingQuestion:
 
 
 def detach_live_claim_citations(claim: CompactClaim) -> DetachedClaimInput:
-    """Protect every structured requested field, including plain text values.
+    """Delegate to the promoted production implementation.
 
-    Numeric/date classification is delegated to the production literal
-    protector.  A field with no numeric/date literal is protected as one
-    opaque TEXT value.  The value comes directly from ``ClaimField``; rendered
-    prose is never parsed to recover it.
+    Kept as a name the experiment already uses, so results stay
+    comparable, but there is only one implementation to review.
     """
 
-    event_fields = _group_event_fields(claim.fields)
-    citation_order = {
-        citation.marker: index for index, citation in enumerate(claim.citations)
-    }
-    kind_offsets: Counter[str] = Counter()
-    literals: list[ProtectedLiteral] = []
-    masked_fields: list[ClaimField] = []
-    field_suffixes: list[str] = []
-
-    for field in claim.fields:
-        value = field.value
-        if not value:
-            raise ValueError("experimental claim field value must be non-empty")
-        value_protection = protect_literals(value)
-        value_literals = tuple(
-            literal
-            for literal in value_protection.literals
-            if literal.kind in {"date", "number"}
-        )
-        if len(value_literals) > 1:
-            raise ValueError(
-                "each experimental claim field must resolve to one protected literal"
-            )
-
-        if value_literals:
-            source_literal = value_literals[0]
-            kind = source_literal.kind
-            placeholder = _field_placeholder(kind, kind_offsets[kind])
-            kind_offsets[kind] += 1
-            masked_value = value_protection.masked.replace(
-                source_literal.placeholder,
-                placeholder,
-                1,
-            )
-            literal_text = source_literal.text
-            literal_offset = value.rfind(literal_text)
-            if literal_offset < 0:
-                raise ValueError("field literal is not present in its structured value")
-            suffix = value[literal_offset + len(literal_text) :]
-        else:
-            kind = "text"
-            placeholder = _field_placeholder(kind, kind_offsets[kind])
-            kind_offsets[kind] += 1
-            masked_value = placeholder
-            literal_text = value
-            suffix = ""
-
-        literals.append(
-            ProtectedLiteral(
-                placeholder=placeholder,
-                text=literal_text,
-                kind=kind,
-            )
-        )
-        masked_fields.append(
-            ClaimField(
-                name=field.name,
-                label=field.label,
-                value=masked_value,
-                marker="",
-                chunk_id=field.chunk_id,
-            )
-        )
-        field_suffixes.append(suffix)
-
-    detached_fields = tuple(
-        ClaimField(
-            name=field.name,
-            label=field.label,
-            value=field.value,
-            marker="",
-            chunk_id=field.chunk_id,
-        )
-        for field in claim.fields
-    )
-    text = _render(claim.company, claim.reporter, detached_fields)
-    masked = _render(claim.company, claim.reporter, masked_fields)
-    if CITATION_MARKER_PATTERN.search(text) or CITATION_MARKER_PATTERN.search(masked):
-        raise ValueError("detached HCX input still contains a citation marker")
-
-    protection = ProtectedText(
-        original=text,
-        masked=masked,
-        literals=tuple(literals),
-    )
-    attachments: list[EventCitationAttachment] = []
-    field_offset = 0
-    for fields in event_fields:
-        event_start = field_offset
-        field_offset += len(fields)
-        event_markers = {field.marker for field in fields}
-        unknown = event_markers.difference(citation_order)
-        if unknown:
-            raise ValueError("claim field references unknown citation metadata")
-        markers = tuple(sorted(event_markers, key=citation_order.__getitem__))
-        attachments.append(
-            EventCitationAttachment(
-                field_placeholders=tuple(
-                    literal.placeholder
-                    for literal in literals[event_start:field_offset]
-                ),
-                trailing_suffix=field_suffixes[field_offset - 1],
-                markers=markers,
-            )
-        )
-
-    return DetachedClaimInput(
-        text=text,
-        protection=protection,
-        attachments=tuple(attachments),
-    )
+    return detach_claim_citations(claim)
 
 
 def _field_placeholder(kind: str, index: int) -> str:
@@ -390,70 +236,9 @@ def attach_live_detached_citations(
     masked_candidate: str,
     detached: DetachedClaimInput,
 ) -> CitationAttachmentResult:
-    """Attach event citations by mixed DATE/NUMBER/TEXT placeholder ownership."""
+    """Delegate to the promoted production implementation."""
 
-    integrity = check_placeholder_integrity(masked_candidate, detached.protection)
-    if not integrity.valid:
-        return CitationAttachmentResult(None, False, 0, integrity.reason)
-
-    owned_placeholders = tuple(
-        placeholder
-        for attachment in detached.attachments
-        for placeholder in attachment.field_placeholders
-    )
-    if owned_placeholders != detached.protection.placeholders:
-        return CitationAttachmentResult(None, False, 0, "event_count_mismatch")
-
-    insertions: list[tuple[int, str]] = []
-    for index, attachment in enumerate(detached.attachments):
-        if not attachment.field_placeholders:
-            return CitationAttachmentResult(None, False, 0, "event_span_not_found")
-        if not attachment.markers:
-            return CitationAttachmentResult(None, False, 0, "citation_mapping_missing")
-
-        last_placeholder = attachment.field_placeholders[-1]
-        placeholder_start = masked_candidate.find(last_placeholder)
-        if placeholder_start < 0:
-            return CitationAttachmentResult(None, False, 0, "event_span_not_found")
-        insertion_offset = placeholder_start + len(last_placeholder)
-        if attachment.trailing_suffix:
-            suffix_match = re.match(
-                rf"[ \t]*{re.escape(attachment.trailing_suffix)}",
-                masked_candidate[insertion_offset:],
-            )
-            if suffix_match is None:
-                return CitationAttachmentResult(
-                    None, False, 0, "event_field_text_mismatch"
-                )
-            insertion_offset += suffix_match.end()
-
-        if index + 1 < len(detached.attachments):
-            next_placeholder = detached.attachments[index + 1].field_placeholders[0]
-            next_event_offset = masked_candidate.find(next_placeholder)
-            if next_event_offset < 0 or insertion_offset >= next_event_offset:
-                return CitationAttachmentResult(None, False, 0, "event_span_not_found")
-        insertions.append((insertion_offset, " " + "".join(attachment.markers)))
-
-    candidate = masked_candidate
-    for insertion_offset, citation_text in reversed(insertions):
-        candidate = (
-            candidate[:insertion_offset]
-            + citation_text
-            + candidate[insertion_offset:]
-        )
-
-    final_answer = restore_literals(candidate, detached.protection)
-    found_citations = tuple(
-        match.group(0) for match in CITATION_MARKER_PATTERN.finditer(final_answer)
-    )
-    if found_citations != detached.expected_citation_sequence:
-        return CitationAttachmentResult(
-            final_answer,
-            False,
-            len(found_citations),
-            "citation_sequence_mismatch",
-        )
-    return CitationAttachmentResult(final_answer, True, len(found_citations), None)
+    return attach_detached_citations(masked_candidate, detached)
 
 
 def evaluate_live_detached_candidate(

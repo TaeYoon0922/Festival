@@ -22,6 +22,7 @@ from app.generation.answer_generator import (
     GeneratedAnswer,
 )
 from app.generation.hcx_verbalizer import (
+    SKIPPED_MULTI_EVENT_CLAIM,
     SKIPPED_NO_COMPACT_CLAIM,
     HcxVerbalizer,
     VerbalizationOutcome,
@@ -52,6 +53,7 @@ _HCX_NOT_CALLED = frozenset(
         "not_configured",
         "skipped_not_answerable",
         SKIPPED_NO_COMPACT_CLAIM,
+        SKIPPED_MULTI_EVENT_CLAIM,
     }
 )
 

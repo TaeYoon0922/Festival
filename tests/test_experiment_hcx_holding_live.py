@@ -12,7 +12,10 @@ from app.generation.compact_claim import (
     _render,
     build_compact_claim,
 )
-from app.generation.hcx_verbalizer import HcxSettings, SYSTEM_PROMPT
+from app.generation.hcx_verbalizer import HcxSettings
+from app.generation.lossless_verbalization import (
+    LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
+)
 from app.generation.protected_literals import (
     PLACEHOLDER_PATTERN,
     check_placeholder_integrity,
@@ -634,7 +637,7 @@ class ActualHoldingLiveRunTests(unittest.TestCase):
         prepared, _, _ = _prepared(events=4)
         default_transport = _Transport()
         strict_transport = _Transport()
-        production_prompt_before = SYSTEM_PROMPT
+        production_prompt_before = LOSSLESS_VERBALIZER_SYSTEM_PROMPT
 
         run_prepared_question(
             prepared,
@@ -658,8 +661,12 @@ class ActualHoldingLiveRunTests(unittest.TestCase):
             strict_transport.calls[0]["payload"]["messages"][0]["content"],
             STRICT_EVENT_ORDER_SYSTEM_PROMPT,
         )
-        self.assertEqual(SYSTEM_PROMPT, production_prompt_before)
-        self.assertNotEqual(STRICT_EVENT_ORDER_SYSTEM_PROMPT, SYSTEM_PROMPT)
+        self.assertEqual(
+            LOSSLESS_VERBALIZER_SYSTEM_PROMPT, production_prompt_before
+        )
+        self.assertNotEqual(
+            STRICT_EVENT_ORDER_SYSTEM_PROMPT, LOSSLESS_VERBALIZER_SYSTEM_PROMPT
+        )
 
     def test_clean_echo_passes_every_required_check(self) -> None:
         prepared, _, _ = _prepared(events=4)

@@ -7,7 +7,6 @@ import re
 import unittest
 from unittest import mock
 
-from app.generation.hcx_verbalizer import SYSTEM_PROMPT
 from scripts.experiment_hcx_holding_live import (
     LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
     STRICT_EVENT_ORDER_SYSTEM_PROMPT,
@@ -120,9 +119,14 @@ class LosslessPromptExampleTests(unittest.TestCase):
 class PromptIsolationTests(unittest.TestCase):
     """The new wording must not disturb any prompt already in use."""
 
-    def test_production_prompt_is_untouched(self) -> None:
-        self.assertNotEqual(PROMPT, SYSTEM_PROMPT)
-        self.assertNotIn("__FESTIVAL_PERCENTAGE_A__", SYSTEM_PROMPT)
+    def test_the_experiment_uses_the_production_prompt(self) -> None:
+        """The tested wording was promoted, so there is one prompt now."""
+
+        from app.generation.hcx_verbalizer import (
+            LOSSLESS_VERBALIZER_SYSTEM_PROMPT as served,
+        )
+
+        self.assertIs(PROMPT, served)
 
     def test_default_experiment_prompt_is_untouched(self) -> None:
         self.assertNotEqual(PROMPT, EXPERIMENT_SYSTEM_PROMPT)
