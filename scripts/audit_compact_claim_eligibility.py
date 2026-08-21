@@ -39,11 +39,14 @@ from app.generation.compact_claim import (
     MAX_CLAIM_LITERALS,
     SUPPORTED_TASK_TYPE,
     _citation_index,
+    _ClaimBuilder,
     _field_value,
     _matching_events,
+    _render,
     _resolution_mapping,
     build_compact_claim,
 )
+from app.generation.protected_literals import protect_literals
 from app.parsing.final_validation import HOLDING_ADDITIONAL_QUESTIONS
 
 
@@ -72,6 +75,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Audit every question in the frozen Holding20 set.",
     )
+    parser.add_argument(
+        "--expand-events",
+        action="store_true",
+        help=(
+            "Also measure the claim that would be built if every candidate "
+            "event were included, ignoring the caps.  Measurement only; the "
+            "caps are not changed and no event is selected over another."
+        ),
+    )
+    parser.add_argument(
+        "--routing",
+        action="store_true",
+        help="Also report how the question was routed and on what signals.",
+    )
     args = parser.parse_args(argv)
 
     if not args.holding20 and not args.question:
@@ -79,23 +96,32 @@ def main(argv: list[str] | None = None) -> int:
 
     pipeline = AnswerPipeline.from_env()
 
+    options = {"expand_events": args.expand_events, "routing": args.routing}
+
     if args.holding20:
         rows = [
-            audit_question(pipeline, str(row["question_id"]), str(row["query"]))
+            audit_question(
+                pipeline, str(row["question_id"]), str(row["query"]), **options
+            )
             for row in HOLDING_ADDITIONAL_QUESTIONS
         ]
         print(json.dumps(_summarize(rows), ensure_ascii=False, indent=2))
         return 0
 
     row = audit_question(
-        pipeline, args.question_id or "ad-hoc", args.question
+        pipeline, args.question_id or "ad-hoc", args.question, **options
     )
     print(json.dumps(row, ensure_ascii=False, indent=2))
     return 0
 
 
 def audit_question(
-    pipeline: AnswerPipeline, question_id: str, question: str
+    pipeline: AnswerPipeline,
+    question_id: str,
+    question: str,
+    *,
+    expand_events: bool = False,
+    routing: bool = False,
 ) -> dict[str, Any]:
     """Run the production path for one question and report eligibility."""
 
@@ -114,6 +140,12 @@ def audit_question(
     report["question_id"] = question_id
     report["answerable"] = generated.answerable
     report["deterministic_answer_chars"] = len(generated.answer_text)
+    if expand_events:
+        report["expanded"] = expand_all_events(result.answer_draft, result.resolution)
+    if routing:
+        report["routing"] = describe_routing(
+            question, plan, result, generated
+        )
     return report
 
 
@@ -213,6 +245,154 @@ def analyze_eligibility(
         report["compact_eligible"] = True
 
     return _confirm(report, draft, resolution, task_type)
+
+
+def expand_all_events(draft: Any, resolution: Any) -> dict[str, Any]:
+    """Measure the claim that would exist if every candidate event were kept.
+
+    This builds the claim the adapter would build with the caps lifted.  It uses
+    the adapter's own builder, takes the events in composer order, and drops
+    none: the point is to size the honest all-events claim, not to choose among
+    events.  Nothing here changes the caps or the served answer.
+    """
+
+    resolved = _resolution_mapping(resolution) if resolution is not None else {}
+    requested = tuple(resolved.get("requested_fields") or ())
+    empty = {
+        "requested_fields": list(requested),
+        "candidate_event_count": 0,
+        "candidate_literal_count": 0,
+        "compact_claim_chars_if_all_events_included": 0,
+        "protected_literal_count_if_all_events_included": 0,
+        "estimated_masked_chars": 0,
+        "citations_count": 0,
+        "duplicated_factual_values": [],
+        "duplicate_events": [],
+        "events_satisfying_all_query_constraints": 0,
+        "event_constraints": [],
+        "buildable": False,
+    }
+    if draft is None or not requested:
+        return empty
+
+    candidates = _matching_events(draft, requested)
+    if not candidates:
+        return empty
+
+    builder = _ClaimBuilder(_citation_index(draft))
+    for event_index, event in candidates:
+        if not builder.add_event(event_index, event, requested):
+            empty["candidate_event_count"] = len(candidates)
+            empty["note"] = "a field could not be linked to a citation"
+            return empty
+
+    company = _text_field(candidates[0][1], "corp_name")
+    reporter = _text_field(candidates[0][1], "reporter")
+    text = _render(company, reporter, builder.fields)
+    protection = protect_literals(text)
+
+    values = [f"{field.label}={field.value}" for field in builder.fields]
+    signatures = [
+        tuple(_field_value(event, field) for field in requested)
+        for _, event in candidates
+    ]
+    constraints = [_event_constraints(event) for _, event in candidates]
+
+    return {
+        "requested_fields": list(requested),
+        "candidate_event_count": len(candidates),
+        "candidate_literal_count": len(builder.literal_count()),
+        "compact_claim_chars_if_all_events_included": len(text),
+        "protected_literal_count_if_all_events_included": len(protection.literals),
+        "estimated_masked_chars": len(protection.masked),
+        "citations_count": len(builder.citations),
+        "duplicated_factual_values": _duplicates(values),
+        "duplicate_events": _duplicates([str(item) for item in signatures]),
+        "events_satisfying_all_query_constraints": sum(
+            1 for row in constraints if row["satisfies_all"]
+        ),
+        "event_constraints": constraints,
+        "buildable": True,
+    }
+
+
+def describe_routing(
+    question: str, plan: Any, result: Any, generated: Any
+) -> dict[str, Any]:
+    """Show how a question was routed and whether holding structure exists anyway."""
+
+    decision = result.task_decision
+    evidence = result.evidence_set
+    group_types = [group.group_type for group in evidence.evidence_groups]
+    sections = [
+        {
+            "title": section.title,
+            "content_keys": sorted(dict(section.content or {}).keys()),
+        }
+        for section in getattr(result.answer_draft, "answer_sections", ()) or ()
+    ]
+    return {
+        "question": question,
+        "plan_task_type": getattr(plan, "task_type", None),
+        "plan_disclosure_route": list(_as_tuple(getattr(plan, "disclosure_route", ()))),
+        "plan_metric": getattr(plan, "metric", None),
+        "plan_reporter": getattr(plan, "reporter", None),
+        "plan_event_type": getattr(plan, "event_type", None),
+        "routed_task_type": decision.task_type,
+        "resolver_type": decision.resolver_type,
+        "route_confidence": decision.confidence,
+        "matched_signals": list(decision.matched_signals),
+        "router_warnings": list(decision.warnings),
+        "draft_task_type": getattr(result.answer_draft, "task_type", None),
+        "answer_sections": sections,
+        "evidence_group_types": group_types,
+        "holding_evidence_groups": sum(
+            1 for value in group_types if value == "holding_event"
+        ),
+        "resolution_type": type(result.resolution).__name__
+        if result.resolution is not None
+        else None,
+        "answerable": generated.answerable,
+        "answer_basis": dict(generated.confidence or {}).get("basis"),
+        "answer_warnings": list(generated.warnings),
+    }
+
+
+def _event_constraints(event: Mapping[str, Any]) -> dict[str, Any]:
+    matches = event.get("matches_query")
+    temporal = event.get("temporal_match")
+    direction = event.get("direction_match")
+    return {
+        "reference_date": event.get("reference_date"),
+        "matches_query": matches,
+        "temporal_match": temporal,
+        "direction_match": direction,
+        "field_conflict": bool(event.get("field_conflict")),
+        # ``None`` means the question placed no such constraint, which is not a
+        # failure to satisfy one.
+        "satisfies_all": matches is True
+        and temporal is not False
+        and direction is not False
+        and not event.get("field_conflict"),
+    }
+
+
+def _duplicates(values: Sequence[str]) -> list[str]:
+    counts = Counter(values)
+    return sorted(value for value, count in counts.items() if count > 1)
+
+
+def _text_field(event: Mapping[str, Any], name: str) -> str | None:
+    value = event.get(name)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _as_tuple(value: Any) -> tuple[Any, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, Sequence):
+        return tuple(value)
+    return ()
 
 
 def _confirm(
