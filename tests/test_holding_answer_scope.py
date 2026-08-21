@@ -101,9 +101,21 @@ class Case1ExactDateSingleFieldTests(unittest.TestCase):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, self.generated.answer_text)
 
-    def test_unasked_fields_are_absent(self) -> None:
-        self.assertNotIn("변동 후 주식수", self.generated.answer_text)
-        self.assertNotIn("720,039", self.generated.answer_text)
+    def test_complementary_facts_of_the_same_event_are_preserved(self) -> None:
+        """The asked figure leads, but nothing verified is deleted.
+
+        Deleting them removed facts a reader needs to interpret the one they
+        asked for, and cost the internal regression set its evidence-term
+        coverage.
+        """
+
+        self.assertIn("변동 후 주식수", self.generated.answer_text)
+        self.assertIn("720,039주", self.generated.answer_text)
+
+    def test_the_asked_field_leads_the_event(self) -> None:
+        text = self.generated.answer_text
+
+        self.assertLess(text.index("변동 후 비율"), text.index("변동 후 주식수"))
 
     def test_the_answer_still_says_whose_holding_and_when(self) -> None:
         self.assertIn(REPORTER, self.generated.answer_text)
@@ -340,16 +352,38 @@ class HoldingFactLineScopeTests(unittest.TestCase):
         self.assertIn("보고일", rendered)
         self.assertIn("변동 방향", rendered)
 
-    def test_a_single_request_drops_the_rest(self) -> None:
+    def test_a_request_reorders_but_never_deletes(self) -> None:
         lines = _holding_fact_lines(self.EVENT, "[1]", ["after_ratio"])
 
         rendered = "\n".join(lines)
         self.assertIn("변동 후 비율: 7.12%", rendered)
-        self.assertNotIn("변동 후 주식수", rendered)
-        self.assertNotIn("보고일", rendered)
-        self.assertNotIn("변동 방향", rendered)
+        self.assertIn("변동 후 주식수", rendered)
+        self.assertIn("보고일", rendered)
+        self.assertIn("변동 방향", rendered)
 
-    def test_context_fields_always_survive(self) -> None:
+    def test_every_verified_value_survives_any_request(self) -> None:
+        full = set(_holding_fact_lines(self.EVENT, "[1]"))
+
+        for requested in (["after_ratio"], ["after_shares"], ["change_direction"]):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    set(_holding_fact_lines(self.EVENT, "[1]", requested)), full
+                )
+
+    def test_the_requested_field_leads_the_non_identity_lines(self) -> None:
+        lines = _holding_fact_lines(self.EVENT, "[1]", ["after_ratio"])
+
+        labels = [line.split(":", 1)[0] for line in lines]
+        self.assertEqual(labels[:3], ["회사", "보고자", "변동일"])
+        self.assertEqual(labels[3], "변동 후 비율")
+
+    def test_rendering_is_stable_for_the_same_request(self) -> None:
+        first = _holding_fact_lines(self.EVENT, "[1]", ["after_ratio"])
+        second = _holding_fact_lines(self.EVENT, "[1]", ["after_ratio"])
+
+        self.assertEqual(first, second)
+
+    def test_context_fields_always_lead(self) -> None:
         lines = _holding_fact_lines(self.EVENT, "[1]", ["after_ratio"])
 
         rendered = "\n".join(lines)

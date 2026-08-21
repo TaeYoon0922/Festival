@@ -225,9 +225,8 @@ def _holding_sections(
     return sections, warnings, supported
 
 
-#: Always rendered: they say whose holding this is and as of when, which is
-#: what makes the remaining lines a statement rather than a bare number.
-HOLDING_CONTEXT_FIELDS = ("corp_name", "reporter", "reference_date")
+#: Rendered first, always: they say whose holding this is and as of when.
+HOLDING_IDENTITY_FIELDS = ("corp_name", "reporter", "reference_date")
 
 
 def _holding_fact_lines(
@@ -235,47 +234,74 @@ def _holding_fact_lines(
     marker: str,
     requested_fields: Sequence[str] = (),
 ) -> list[str]:
-    """Render an event, limited to the fields the question asked for.
+    """Render every verified fact on an event, asked-for figures first.
 
-    With no requested field the full event is rendered, as before.  When the
-    question named fields, the others are left out: asked for a ratio, a reader
-    should not have to find it among five other figures.  Nothing is inferred
-    or reformatted here — omitted values simply stay in the evidence.
+    ``requested_fields`` decides order, never membership.  An earlier version
+    dropped the fields the question did not name, which read well but deleted
+    verified facts a reader needs to interpret the one they asked for: a change
+    ratio without the share count it applies to, or an after value with nothing
+    to compare it against.  Ordering gives the same directness without losing
+    anything.
     """
 
-    requested = set(requested_fields)
-
-    def wanted(field: str) -> bool:
-        return not requested or field in requested or field in HOLDING_CONTEXT_FIELDS
+    requested = tuple(dict.fromkeys(requested_fields))
+    identity = [
+        (field, label)
+        for field, label in _HOLDING_TEXT_FIELDS
+        if field in HOLDING_IDENTITY_FIELDS
+    ]
+    remaining = [
+        entry
+        for entry in (*_HOLDING_TEXT_FIELDS, *_HOLDING_NUMERIC_FIELDS, _HOLDING_DIRECTION)
+        if entry[0] not in HOLDING_IDENTITY_FIELDS
+    ]
+    # Hoist what the question named, keeping the canonical order inside each
+    # group so two questions never render the same event differently.
+    ordered = [
+        *identity,
+        *[entry for entry in remaining if entry[0] in requested],
+        *[entry for entry in remaining if entry[0] not in requested],
+    ]
 
     lines = []
-    text_fields = (
-        ("corp_name", "회사"),
-        ("reporter", "보고자"),
-        ("reference_date", "변동일"),
-        ("report_date", "보고일"),
-        ("receipt_date", "접수일"),
-    )
-    for field, label in text_fields:
-        value = _text(event.get(field))
-        if value and wanted(field):
-            lines.append(f"{label}: {value} {marker}")
-    numeric_fields = (
-        ("before_shares", "변동 전 주식수", "주"),
-        ("change_shares", "증감 주식수", "주"),
-        ("after_shares", "변동 후 주식수", "주"),
-        ("before_ratio", "변동 전 비율", "%"),
-        ("after_ratio", "변동 후 비율", "%"),
-        ("change_ratio", "증감 비율", "%"),
-    )
-    for field, label, unit in numeric_fields:
-        value = _numeric_text(event.get(field), unit)
-        if value and wanted(field):
-            lines.append(f"{label}: {value} {marker}")
-    direction = _direction_text(event.get("change_direction"))
-    if direction and wanted("change_direction"):
-        lines.append(f"변동 방향: {direction} {marker}")
+    for entry in ordered:
+        line = _holding_fact_line(event, entry, marker)
+        if line:
+            lines.append(line)
     return lines
+
+
+_HOLDING_TEXT_FIELDS = (
+    ("corp_name", "회사"),
+    ("reporter", "보고자"),
+    ("reference_date", "변동일"),
+    ("report_date", "보고일"),
+    ("receipt_date", "접수일"),
+)
+
+_HOLDING_NUMERIC_FIELDS = (
+    ("before_shares", "변동 전 주식수", "주"),
+    ("change_shares", "증감 주식수", "주"),
+    ("after_shares", "변동 후 주식수", "주"),
+    ("before_ratio", "변동 전 비율", "%"),
+    ("after_ratio", "변동 후 비율", "%"),
+    ("change_ratio", "증감 비율", "%"),
+)
+
+_HOLDING_DIRECTION = ("change_direction", "변동 방향")
+
+
+def _holding_fact_line(
+    event: Mapping[str, Any], entry: tuple[str, ...], marker: str
+) -> str | None:
+    field, label = entry[0], entry[1]
+    if len(entry) == 3:
+        value = _numeric_text(event.get(field), entry[2])
+    elif field == "change_direction":
+        value = _direction_text(event.get(field))
+    else:
+        value = _text(event.get(field))
+    return f"{label}: {value} {marker}" if value else None
 
 
 def _periodic_sections(
