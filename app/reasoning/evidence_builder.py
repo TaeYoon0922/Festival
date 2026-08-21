@@ -573,7 +573,7 @@ def _temporal_match(
             return None
         if item_year != constraint["year"]:
             return False
-    item_quarter = _item_quarter(item, item_date)
+    item_quarter = _temporal_item_quarter(item, item_date)
     if constraint.get("quarter") is not None:
         if item_quarter is None:
             return None
@@ -656,10 +656,6 @@ def _period_metadata(chunk: Mapping[str, Any]) -> dict[str, Any]:
     period = {
         key: copy.deepcopy(chunk[key]) for key in keys if chunk.get(key) is not None
     }
-    if period.get("quarter") is None:
-        quarter = _QUARTER_BY_BASE_MONTH.get(_integer(period.get("base_month")))
-        if quarter is not None:
-            period["quarter"] = quarter
     return period
 
 
@@ -687,7 +683,7 @@ def _section_key(path: Sequence[str]) -> str:
 
 def _item_period_signature(item: EvidenceItem) -> str | None:
     year = _item_year(item, _period_date(item.period))
-    quarter = _item_quarter(item, _period_date(item.period))
+    quarter = _stored_item_quarter(item)
     period_type = _first_text(
         item.period.get("period_type"), item.period.get("basis_period")
     )
@@ -718,7 +714,14 @@ def _item_year(item: EvidenceItem, item_date: str | None) -> int | None:
     return _integer(item_date[:4]) if item_date else None
 
 
-def _item_quarter(item: EvidenceItem, item_date: str | None) -> int | None:
+def _stored_item_quarter(item: EvidenceItem) -> int | None:
+    value = _integer(item.period.get("quarter"))
+    if value is not None and 1 <= value <= 4:
+        return value
+    return None
+
+
+def _temporal_item_quarter(item: EvidenceItem, item_date: str | None) -> int | None:
     value = _integer(item.period.get("quarter"))
     if value is not None and 1 <= value <= 4:
         return value

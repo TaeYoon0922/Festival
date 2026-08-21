@@ -506,6 +506,10 @@ def _periodic_claim_payload(line: str) -> str | None:
     text = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", text).strip()
     if not text or text.endswith(":"):
         return None
+    if re.fullmatch(r"\|(?:\s*:?-{3,}:?\s*\|)+", text):
+        return None
+    if not re.search(r"[0-9A-Za-z가-힣]", text):
+        return None
     if any(
         marker in text
         for marker in (

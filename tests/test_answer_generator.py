@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
+    _periodic_claim_payload,
     generate_answer,
     validate_periodic_citation_scope,
 )
@@ -90,6 +91,57 @@ def _repeated_periodic_draft():
 
 
 class AnswerGeneratorTests(unittest.TestCase):
+    def test_periodic_claim_payload_ignores_markdown_separator(self):
+        self.assertIsNone(_periodic_claim_payload("| --- | --- |"))
+
+    def test_periodic_claim_payload_ignores_aligned_markdown_separator(self):
+        self.assertIsNone(_periodic_claim_payload("| :--- | ---: | :---: |"))
+
+    def test_periodic_claim_payload_keeps_factual_table_row(self):
+        row = "| 익산공장 | 58.0 | 32.7 | 56% | [1]"
+        self.assertEqual(
+            _periodic_claim_payload(row),
+            "| 익산공장 | 58.0 | 32.7 | 56% |",
+        )
+
+    def test_periodic_claim_payload_keeps_table_header(self):
+        header = "| 사업소 | 생산능력 | 생산실적 | 평균가동률 | [1]"
+        self.assertEqual(
+            _periodic_claim_payload(header),
+            "| 사업소 | 생산능력 | 생산실적 | 평균가동률 |",
+        )
+
+    def test_periodic_markdown_separator_does_not_fail_citation_scope(self):
+        table_text = (
+            "| 사업소 | 생산능력 | 생산실적 | 평균가동률 |\n"
+            "| :--- | ---: | ---: | ---: |\n"
+            "| 익산공장 | 58.0 | 32.7 | 56% |"
+        )
+        item = _periodic_item(
+            "p07:ch_table",
+            "p07",
+            rank=1,
+            text=table_text,
+            year=2023,
+            table_id="t07",
+        )
+        evidence = _periodic_evidence(
+            [_periodic_group("g-table", item, group_type="document_evidence")]
+        )
+
+        generated = generate_answer(
+            compose_periodic_answer(resolve_periodic_facts(evidence), evidence)
+        )
+
+        self.assertTrue(generated.answerable)
+        self.assertIn("| :--- | ---: | ---: | ---: |", generated.answer_text)
+        self.assertFalse(
+            any(
+                warning.startswith("unsupported_periodic_claim_removed")
+                for warning in generated.warnings
+            )
+        )
+
     def test_holding_multiple_events_and_order_are_preserved(self):
         generated = CitationAwareAnswerGenerator().generate(
             _multiple_holding_draft()

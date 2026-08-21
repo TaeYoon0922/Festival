@@ -99,7 +99,7 @@ def test_p07_base_month_propagates_quarter_and_preserves_provenance() -> None:
 
     item = _items(evidence)[0]
     assert item.period["base_month"] == 3
-    assert item.period["quarter"] == 1
+    assert "quarter" not in item.period
     assert item.temporal_match is True
     assert selection.selected_chunk_ids == (chunk_id,)
     assert selection.resolution.facts[0].sources[0].source_refs == item.source_refs
@@ -123,7 +123,8 @@ def test_wrong_base_month_is_not_selected_for_explicit_quarter() -> None:
     )
 
     item = _items(evidence)[0]
-    assert item.period["quarter"] == 2
+    assert item.period["base_month"] == 6
+    assert "quarter" not in item.period
     assert item.temporal_match is False
     assert selection.selected_chunk_ids == ()
 
@@ -197,9 +198,58 @@ def test_quarter_without_year_preserves_all_years_and_ambiguity() -> None:
 
     items = _items(evidence)
     assert [item.period["base_year"] for item in items] == [2023, 2024, 2025]
-    assert all(item.period["quarter"] == 1 for item in items)
+    assert all(item.period["base_month"] == 3 for item in items)
+    assert all("quarter" not in item.period for item in items)
     assert all(item.temporal_match is True for item in items)
     assert len(selection.selected_chunk_ids) == 3
     assert set(selection.selected_chunk_ids) == {pair[0].chunk_id for pair in pairs}
     assert resolution.temporal_ambiguity is True
     assert "multiple_periodic_fact_alternatives" in resolution.warnings
+
+
+def test_p11_periodless_grouping_does_not_use_base_month_as_quarter() -> None:
+    q3_doc = "periodic_20241113000775"
+    gold_chunk_id = "periodic_20250319000952:ch_86b0baf3ab5f082c8dfd"
+    pairs = [
+        _candidate(
+            f"{q3_doc}:ch_seed",
+            rank=1,
+            year=2024,
+            month=9,
+            content="합병기일 관련 테이블원 흡수합병 진행사항",
+        ),
+        _candidate(
+            gold_chunk_id,
+            rank=2,
+            year=2024,
+            month=12,
+            content="테이블원 흡수합병 합병기일 2024년 11월 1일",
+        ),
+        _candidate(
+            f"{q3_doc}:ch_support_a",
+            rank=3,
+            year=2024,
+            month=9,
+            content="테이블원 흡수합병 진행사항",
+        ),
+        _candidate(
+            f"{q3_doc}:ch_support_b",
+            rank=4,
+            year=2024,
+            month=9,
+            content="테이블원 합병기일 진행사항",
+        ),
+    ]
+
+    evidence, _, selection = _pipeline(
+        pairs,
+        question="시프트업 테이블원 흡수합병 합병기일",
+        period=QueryPeriod(period_type="latest_valid_periodic"),
+        metric=None,
+        lexical_query="합병",
+    )
+
+    items = _items(evidence)
+    assert all(item.temporal_match is None for item in items)
+    assert all("quarter" not in item.period for item in items)
+    assert gold_chunk_id in selection.selected_chunk_ids
