@@ -93,7 +93,7 @@ class VerbalizerSuccessTests(unittest.TestCase):
 
         outcome = verbalizer.verbalize(_generated())
 
-        self.assertEqual(outcome.status, "applied")
+        self.assertEqual(outcome.status, "success")
         self.assertTrue(outcome.used_hcx)
         self.assertEqual(outcome.text, FAITHFUL_TEXT)
 
@@ -103,7 +103,7 @@ class VerbalizerSuccessTests(unittest.TestCase):
 
         outcome = verbalizer.verbalize(_generated())
 
-        self.assertEqual(outcome.status, "applied")
+        self.assertEqual(outcome.status, "success")
         self.assertEqual(outcome.text, FAITHFUL_TEXT)
 
     def test_request_uses_deterministic_generation_parameters(self) -> None:
@@ -126,6 +126,82 @@ class VerbalizerSuccessTests(unittest.TestCase):
         self.assertNotIn("chunk_id", body)
         self.assertNotIn("source_refs", body)
         self.assertNotIn("provenance", body)
+
+
+class OpenAiCompatibleContractTests(unittest.TestCase):
+    """Lock the CLOVA Studio OpenAI compatibility contract.
+
+    Two ways to break this request are guarded here.  The native
+    ``/v3/chat-completions`` route takes camelCase fields such as ``maxTokens``
+    and returns a different envelope.  And the compatibility layer does not
+    support every OpenAI sampling field: ``top_p`` in particular is unsupported,
+    so it must not be sent even though plain OpenAI would accept it.
+    """
+
+    def setUp(self) -> None:
+        self.transport = _Transport(_reply(FAITHFUL_TEXT))
+        HcxVerbalizer(_settings(), transport=self.transport).verbalize(_generated())
+        self.call = self.transport.calls[0]
+
+    def test_sends_only_supported_fields(self) -> None:
+        self.assertEqual(
+            set(self.call["payload"]),
+            {"model", "messages", "temperature", "max_tokens"},
+        )
+
+    def test_omits_the_unsupported_top_p_field(self) -> None:
+        self.assertNotIn("top_p", self.call["payload"])
+
+    def test_sends_no_native_camelcase_fields(self) -> None:
+        for field in ("maxTokens", "topP", "topK", "repeatPenalty", "stopBefore"):
+            self.assertNotIn(field, self.call["payload"])
+
+    def test_pins_deterministic_sampling(self) -> None:
+        self.assertEqual(self.call["payload"]["temperature"], 0.0)
+
+    def test_uses_a_system_and_user_message_pair(self) -> None:
+        roles = [message["role"] for message in self.call["payload"]["messages"]]
+
+        self.assertEqual(roles, ["system", "user"])
+
+    def test_sends_bearer_authorization(self) -> None:
+        self.assertEqual(self.call["headers"], {"Authorization": "Bearer test-key"})
+
+    def test_defaults_to_the_official_compatibility_endpoint(self) -> None:
+        settings = HcxSettings.from_env({})
+
+        self.assertEqual(
+            settings.endpoint,
+            "https://clovastudio.stream.ntruss.com/v1/openai/chat/completions",
+        )
+        self.assertEqual(settings.model, "HCX-005")
+
+    def test_default_endpoint_alone_does_not_enable_the_verbalizer(self) -> None:
+        self.assertFalse(HcxSettings.from_env({}).configured)
+
+    def test_reads_content_from_the_openai_envelope(self) -> None:
+        transport = _Transport(
+            {
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "model": "HCX-005",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": FAITHFUL_TEXT},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+            }
+        )
+
+        outcome = HcxVerbalizer(_settings(), transport=transport).verbalize(
+            _generated()
+        )
+
+        self.assertEqual(outcome.status, "success")
+        self.assertEqual(outcome.text, FAITHFUL_TEXT)
 
 
 class VerbalizerFallbackTests(unittest.TestCase):

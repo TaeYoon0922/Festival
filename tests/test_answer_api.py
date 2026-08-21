@@ -6,8 +6,17 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
-from app.api.pipeline import AnswerPipeline, AnswerPipelineError
-from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
+from app.api.pipeline import (
+    EMPTY_ANSWER_FALLBACK,
+    AnswerPipeline,
+    AnswerPipelineError,
+    _non_empty,
+)
+from app.generation.hcx_verbalizer import (
+    HcxSettings,
+    HcxVerbalizer,
+    VerbalizationOutcome,
+)
 from app.reasoning.query_plan import QueryPlan
 from app.retrieval.embeddings import EmbeddingHttpError
 from tests.test_agent_end_to_end_smoke import (
@@ -189,7 +198,7 @@ class HcxIntegrationTests(unittest.TestCase):
 
         payload = _ask(_client(factory)).json()
 
-        self.assertEqual(payload["think_trace"]["hcx_status"], "applied")
+        self.assertEqual(payload["think_trace"]["hcx_status"], "success")
         self.assertEqual(payload["answer"], rephrased)
         self.assertIn("hcx_verbalizer", payload["think_trace"]["stages"])
 
@@ -214,6 +223,41 @@ class HcxIntegrationTests(unittest.TestCase):
             payload["think_trace"]["hcx_status"], "fallback_validation_failed"
         )
         self.assertEqual(payload["answer"], deterministic)
+
+
+class NonEmptyAnswerTests(unittest.TestCase):
+    """A 200 always carries answer text, whatever the verbalizer did."""
+
+    def _answer(self, verbalizer) -> str:
+        def factory() -> AnswerPipeline:
+            return _pipeline(verbalizer=verbalizer)
+
+        payload = _ask(_client(factory)).json()
+        return payload["answer"]
+
+    def test_blank_hcx_reply_still_yields_text(self) -> None:
+        verbalizer = HcxVerbalizer(
+            HcxSettings(enabled=True, api_key="key"),
+            transport=_StubTransport("   "),
+        )
+
+        self.assertTrue(self._answer(verbalizer).strip())
+
+    def test_blank_verbalizer_output_falls_back_to_the_deterministic_text(
+        self,
+    ) -> None:
+        class _BlankVerbalizer:
+            def verbalize(self, generated, *, required_terms=()):
+                del generated, required_terms
+                return VerbalizationOutcome("", "fallback_error", "blank")
+
+        deterministic = _ask(_client()).json()["answer"]
+
+        self.assertEqual(self._answer(_BlankVerbalizer()), deterministic)
+
+    def test_last_resort_fallback_is_used_when_nothing_has_text(self) -> None:
+        self.assertEqual(_non_empty("", "   "), EMPTY_ANSWER_FALLBACK)
+        self.assertEqual(_non_empty("", "답변"), "답변")
 
 
 class RequestValidationTests(unittest.TestCase):

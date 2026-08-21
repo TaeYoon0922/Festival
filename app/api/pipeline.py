@@ -37,6 +37,10 @@ DATABASE_UNAVAILABLE = "database_unavailable"
 EMBEDDING_UNAVAILABLE = "embedding_unavailable"
 INTERNAL_ERROR = "internal_error"
 
+#: The contract promises answer text on every 200, including when nothing in
+#: the corpus supports the question.
+EMPTY_ANSWER_FALLBACK = "확인되지 않은 정보가 있습니다."
+
 _PUBLIC_MESSAGES = {
     DATABASE_UNAVAILABLE: "The disclosure database is unavailable.",
     EMBEDDING_UNAVAILABLE: "The embedding service is unavailable.",
@@ -122,7 +126,7 @@ class AnswerPipeline:
             "question": question,
             "retrieved_context": retrieved_context(execution, self.settings.top_k),
             "think_trace": think_trace(result, generated, outcome, execution),
-            "answer": outcome.text,
+            "answer": _non_empty(outcome.text, generated.answer_text),
         }
 
     def _retrieve(self, question: str) -> tuple[Any, Any]:
@@ -223,6 +227,13 @@ def _chunk_period(chunk: Mapping[str, Any]) -> dict[str, Any]:
         for key in ("base_year", "base_month", "fiscal_year", "quarter", "period_type")
         if chunk.get(key) is not None
     }
+
+
+def _non_empty(*candidates: str) -> str:
+    for value in candidates:
+        if value and value.strip():
+            return value
+    return EMPTY_ANSWER_FALLBACK
 
 
 def _classify(error: Exception) -> str:

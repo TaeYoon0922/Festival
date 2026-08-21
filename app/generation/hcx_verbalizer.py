@@ -33,6 +33,14 @@ from app.retrieval.embeddings import (
 
 ENV_PREFIX = "FESTIVAL_HCX_"
 
+#: CLOVA Studio's OpenAI compatibility API. The native /v3/chat-completions
+#: route is deliberately not used: this contract keeps one JSON transport and
+#: one response shape.
+DEFAULT_ENDPOINT = (
+    "https://clovastudio.stream.ntruss.com/v1/openai/chat/completions"
+)
+#: Verbalization restates verified facts, so the reasoning-oriented HCX-007
+#: is not needed here.
 DEFAULT_MODEL = "HCX-005"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_TOKENS = 1024
@@ -55,7 +63,7 @@ class HcxSettings:
     """Connection and generation settings for HyperCLOVA X."""
 
     enabled: bool = True
-    endpoint: str = ""
+    endpoint: str = DEFAULT_ENDPOINT
     api_key: str = field(default="", repr=False)
     api_key_header: str = "Authorization"
     api_key_prefix: str = "Bearer"
@@ -63,7 +71,6 @@ class HcxSettings:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.0
-    top_p: float = 0.1
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> "HcxSettings":
@@ -74,7 +81,7 @@ class HcxSettings:
 
         return cls(
             enabled=_parse_bool(read("ENABLED", "true")),
-            endpoint=read("API_URL", "").strip(),
+            endpoint=read("API_URL", DEFAULT_ENDPOINT).strip(),
             api_key=read("API_KEY", "").strip(),
             api_key_header=read("API_KEY_HEADER", "Authorization"),
             api_key_prefix=read("API_KEY_PREFIX", "Bearer"),
@@ -82,7 +89,6 @@ class HcxSettings:
             timeout_seconds=float(read("TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))),
             max_tokens=int(read("MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
             temperature=float(read("TEMPERATURE", "0.0")),
-            top_p=float(read("TOP_P", "0.1")),
         )
 
     @property
@@ -106,7 +112,7 @@ class VerbalizationOutcome:
 
     @property
     def used_hcx(self) -> bool:
-        return self.status == "applied"
+        return self.status == "success"
 
 
 class HcxVerbalizer:
@@ -154,7 +160,7 @@ class HcxVerbalizer:
             return VerbalizationOutcome(
                 reference, "fallback_validation_failed", result.reason
             )
-        return VerbalizationOutcome(candidate.strip(), "applied")
+        return VerbalizationOutcome(candidate.strip(), "success")
 
     def _request(self, generated: GeneratedAnswer) -> str:
         payload = {
@@ -164,7 +170,6 @@ class HcxVerbalizer:
                 {"role": "user", "content": _verified_facts(generated)},
             ],
             "temperature": self.settings.temperature,
-            "top_p": self.settings.top_p,
             "max_tokens": self.settings.max_tokens,
         }
         try:
