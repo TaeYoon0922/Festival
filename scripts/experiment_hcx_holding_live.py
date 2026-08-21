@@ -133,6 +133,63 @@ before A, C 다음에 after B, D로 재배열하는 것은 금지한다.
 """
 
 
+# Experimental only.  The production prompt in ``hcx_verbalizer.py`` and the
+# default live-experiment prompt imported above remain byte-for-byte unchanged.
+#
+# This variant exists because a model given a one-field claim treated it as a
+# question to answer: it invented a before value, a ratio, a formula, and a
+# placeholder nobody supplied.  The wording below removes the analyst role
+# entirely and leaves only a transcription task.  Every example is schema-only;
+# no real company, date, question, or answer appears here.
+LOSSLESS_VERBALIZER_SYSTEM_PROMPT = """당신은 이미 검증된 사실을 자연스러운 한국어 문장으로 옮기는 변환기입니다.
+
+당신의 역할:
+- 당신은 사용자의 질문에 독자적으로 답하지 않는다.
+- 당신은 공시를 분석하지 않는다.
+- 당신은 빠진 정보를 채우지 않는다.
+- 당신은 VERIFIED CLAIM에 이미 있는 사실만 자연스러운 한국어로 바꾼다.
+
+절대 규칙:
+1. VERIFIED CLAIM에 명시된 사실만 사용한다.
+2. 새로운 사실 항목을 추가하지 않는다.
+3. 다음을 추론하거나 복원하지 않는다: 변동 전 값, 변동 후 값, 증감 수량,
+   증감 비율, 기준일, 거래 행위, 사유, 계산, 비교.
+4. 어떤 계산도 하지 않는다.
+5. 수식, 예시, 가정된 숫자, 설명용 숫자, 번호 매긴 개요를 쓰지 않는다.
+6. 새로운 placeholder를 만들지 않는다. 입력에 없는 placeholder는
+   어떤 이름으로도 출력하지 않는다.
+7. 입력의 모든 placeholder는 출력에 정확히 한 번, 원형 그대로,
+   입력과 같은 순서로 나타나야 한다.
+8. placeholder의 의미 유형을 다시 해석하지 않는다. 비율에 쓰인 NUMBER
+   placeholder도 그대로 NUMBER placeholder로 유지한다. 이름을 바꾸지 않는다.
+9. 거래 의미를 유추하지 않는다. 매수, 매도, 매입, 처분, 취득, 사들이다 등의
+   표현은 그 의미가 검증된 값으로 직접 주어진 경우가 아니면 쓰지 않는다.
+10. "변동 현황은 다음과 같습니다" 같은 머리말을 쓰지 않는다. 그런 표현은
+    주어지지 않은 항목을 채우도록 유도한다. 주어진 사실만 담은 가장 짧은
+    문장을 쓴다.
+11. 결론 문장이나 설명 문장을 덧붙이지 않는다.
+12. citation을 쓰지 않는다. citation은 이 단계 밖에서 결정적으로 붙는다.
+
+형식 예시(값이 아니라 형태만 참고):
+
+VERIFIED CLAIM:
+보유 비율: __FESTIVAL_NUMBER_A__%
+
+GOOD:
+보유 비율은 __FESTIVAL_NUMBER_A__%입니다.
+
+BAD:
+이전 보유 비율은 5%였으며 현재는 __FESTIVAL_NUMBER_A__%입니다.
+
+BAD:
+변동률은 (__FESTIVAL_NUMBER_A__ - 5) / 5 * 100 입니다.
+
+BAD:
+보유 비율은 __FESTIVAL_PERCENTAGE_A__입니다.
+
+출력은 변환된 본문만 쓴다. 머리말, 설명, 목록, 결론을 붙이지 않는다."""
+
+
 class ExperimentPreparationError(ValueError):
     """A safe all-candidate claim could not be built."""
 
@@ -618,6 +675,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--lossless-verbalizer",
+        action="store_true",
+        help=(
+            "Use the experiment-only strict lossless-verbalizer prompt. "
+            "Requires --production-caps. The production and default "
+            "experiment prompts remain unchanged."
+        ),
+    )
+    parser.add_argument(
         "--strict-event-order",
         action="store_true",
         help=(
@@ -636,6 +702,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
+    if args.lossless_verbalizer and not args.production_caps:
+        parser.error("--lossless-verbalizer requires --production-caps")
 
     settings = HcxSettings.from_env()
     if not args.diagnose_prepare and not settings.configured:
@@ -661,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
             repeat=args.repeat,
             show_output=args.show_output,
             diagnose_only=args.diagnose_prepare,
+            lossless_verbalizer=args.lossless_verbalizer,
         )
     runs: list[dict[str, Any]] = []
     event_runs: list[dict[str, Any]] = []
@@ -768,6 +837,7 @@ def run_production_caps_experiment(
     repeat: int,
     show_output: bool,
     diagnose_only: bool,
+    lossless_verbalizer: bool = False,
 ) -> int:
     """One HCX call per run over the claim production would actually serve.
 
@@ -805,6 +875,7 @@ def run_production_caps_experiment(
                 repeat_index=repeat_index,
                 show_output=show_output,
                 strict_event_order=False,
+                lossless_verbalizer=lossless_verbalizer,
                 check_structured_text_leakage=True,
             )
             record["eligible_under_current_caps"] = True
@@ -821,6 +892,11 @@ def run_production_caps_experiment(
         "repeat": repeat,
         "event_wise": False,
         "strict_event_order": False,
+        "lossless_verbalizer": lossless_verbalizer,
+        "system_prompt_variant": experiment_prompt_variant(
+            strict_event_order=False,
+            lossless_verbalizer=lossless_verbalizer,
+        ),
         "citation_detached": True,
         "production_caps_applied": {
             "MAX_CLAIM_EVENTS": MAX_CLAIM_EVENTS,
@@ -1254,6 +1330,39 @@ def real_structure_diagnostics(
     }
 
 
+
+def experiment_prompt_variant(
+    *,
+    strict_event_order: bool,
+    lossless_verbalizer: bool,
+) -> str:
+    """Name the prompt in force so a result can be traced back to its wording."""
+
+    if lossless_verbalizer:
+        return "lossless_verbalizer"
+    if strict_event_order:
+        return "strict_event_order"
+    return "default_experiment"
+
+
+def select_experiment_prompt(
+    *,
+    strict_event_order: bool,
+    lossless_verbalizer: bool,
+) -> str:
+    """Pick the experimental system prompt; production wording is never used."""
+
+    variant = experiment_prompt_variant(
+        strict_event_order=strict_event_order,
+        lossless_verbalizer=lossless_verbalizer,
+    )
+    return {
+        "lossless_verbalizer": LOSSLESS_VERBALIZER_SYSTEM_PROMPT,
+        "strict_event_order": STRICT_EVENT_ORDER_SYSTEM_PROMPT,
+        "default_experiment": EXPERIMENT_SYSTEM_PROMPT,
+    }[variant]
+
+
 def run_prepared_question(
     prepared: PreparedHoldingQuestion,
     *,
@@ -1262,17 +1371,22 @@ def run_prepared_question(
     repeat_index: int,
     show_output: bool = False,
     strict_event_order: bool = False,
+    lossless_verbalizer: bool = False,
     check_structured_text_leakage: bool = False,
 ) -> dict[str, Any]:
     """Make one HCX call and run every detached-citation safety check."""
 
     record = base_run_record(prepared, repeat_index)
     record["strict_event_order"] = strict_event_order
+    record["lossless_verbalizer"] = lossless_verbalizer
     protection = prepared.detached.protection
-    system_prompt = (
-        STRICT_EVENT_ORDER_SYSTEM_PROMPT
-        if strict_event_order
-        else EXPERIMENT_SYSTEM_PROMPT
+    system_prompt = select_experiment_prompt(
+        strict_event_order=strict_event_order,
+        lossless_verbalizer=lossless_verbalizer,
+    )
+    record["system_prompt_variant"] = experiment_prompt_variant(
+        strict_event_order=strict_event_order,
+        lossless_verbalizer=lossless_verbalizer,
     )
     payload = {
         "model": settings.model,
