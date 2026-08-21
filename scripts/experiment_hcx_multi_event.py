@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.generation.answer_validator import (
     CITATION_MARKER_PATTERN,
+    extract_numeric_tokens,
     validate_verbalized_answer,
 )
 from app.generation.compact_claim import (
@@ -408,6 +409,7 @@ def _evaluate_detached_candidate(
     integrity = check_placeholder_integrity(raw, protection)
     breakdown = placeholder_type_breakdown(protection, found)
     unexpected_citation = CITATION_MARKER_PATTERN.search(raw) is not None
+    unprotected_numeric_tokens = _unprotected_numeric_tokens(raw, protection)
     record.update(
         {
             "output_chars": len(raw),
@@ -419,6 +421,13 @@ def _evaluate_detached_candidate(
             "placeholder_integrity_reason": integrity.reason,
             "all_events_kept": integrity.valid,
             "unexpected_citation_generation": unexpected_citation,
+            "unprotected_numeric_tokens_in_masked_candidate": (
+                unprotected_numeric_tokens
+            ),
+            "pre_validation_reference_kind": "citation_detached_compact_claim",
+            "final_validation_reference_kind": (
+                "deterministic_event_citation_attachment"
+            ),
             "candidate_valid_before_citation_attachment": False,
             "deterministic_citations_attached": False,
             "attached_citation_count": 0,
@@ -431,12 +440,30 @@ def _evaluate_detached_candidate(
         return record
 
     restored = restore_literals(raw, protection)
+    reference_numeric_tokens = extract_numeric_tokens(detached.text)
+    candidate_numeric_tokens = extract_numeric_tokens(restored)
     inference_markers = [
         marker for marker in INFERENCE_MARKERS if marker in restored
     ]
-    record["inference_markers"] = inference_markers
+    record.update(
+        {
+            "reference_numeric_tokens": sorted(reference_numeric_tokens),
+            "candidate_numeric_tokens": sorted(candidate_numeric_tokens),
+            "numbers_only_in_reference": sorted(
+                reference_numeric_tokens - candidate_numeric_tokens
+            ),
+            "numbers_only_in_candidate": sorted(
+                candidate_numeric_tokens - reference_numeric_tokens
+            ),
+            "reference_citations": _citation_markers(detached.text),
+            "candidate_citations": _citation_markers(restored),
+            "inference_markers": inference_markers,
+        }
+    )
     if show_output:
         record["restored_output"] = restored
+        record["validation_reference_text"] = detached.text
+        record["restored_candidate_text"] = restored
 
     if unexpected_citation:
         record["validator_reason"] = "unexpected_citation_generation"
@@ -478,6 +505,25 @@ def _evaluate_detached_candidate(
     if show_output:
         record["final_output"] = final_answer
     return record
+
+
+def _unprotected_numeric_tokens(raw: str, protection: Any) -> list[str]:
+    """Find numbers HCX wrote outside the expected protected placeholders."""
+
+    remainder = raw
+    for placeholder in protection.placeholders:
+        remainder = remainder.replace(placeholder, " ")
+    return sorted(extract_numeric_tokens(remainder))
+
+
+def _citation_markers(text: str) -> list[str]:
+    """Return rendered citation markers in deterministic first-seen order."""
+
+    return list(
+        dict.fromkeys(
+            match.group(0) for match in CITATION_MARKER_PATTERN.finditer(text)
+        )
+    )
 
 
 def _expected_attached_answer(detached: DetachedClaimInput) -> str:

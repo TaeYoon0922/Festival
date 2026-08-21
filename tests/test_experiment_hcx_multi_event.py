@@ -358,6 +358,23 @@ class DetachedCitationTests(unittest.TestCase):
         self.assertTrue(record["deterministic_citations_attached"])
         self.assertEqual(record["attached_citation_count"], 4)
         self.assertTrue(record["final_answer_valid"])
+        self.assertEqual(record["reference_numeric_tokens"], record["candidate_numeric_tokens"])
+        self.assertEqual(record["numbers_only_in_reference"], [])
+        self.assertEqual(record["numbers_only_in_candidate"], [])
+        self.assertEqual(record["reference_citations"], [])
+        self.assertEqual(record["candidate_citations"], [])
+        self.assertEqual(
+            record["pre_validation_reference_kind"],
+            "citation_detached_compact_claim",
+        )
+        self.assertEqual(
+            record["final_validation_reference_kind"],
+            "deterministic_event_citation_attachment",
+        )
+        self.assertEqual(
+            record["unprotected_numeric_tokens_in_masked_candidate"],
+            [],
+        )
 
     def test_model_generated_citation_is_rejected(self) -> None:
         record = run_once(
@@ -492,7 +509,50 @@ class DetachedCitationTests(unittest.TestCase):
 
         self.assertFalse(record["candidate_valid_before_citation_attachment"])
         self.assertEqual(record["validator_reason"], "numeric_token_changed")
+        self.assertEqual(
+            record["unprotected_numeric_tokens_in_masked_candidate"],
+            ["99,999"],
+        )
+        self.assertEqual(record["numbers_only_in_candidate"], ["99,999"])
         self.assertFalse(record["final_answer_valid"])
+
+    def test_diagnostics_expose_punctuation_sensitive_set_collision(self) -> None:
+        def respond(masked: str) -> str:
+            dates = [
+                token
+                for token in PLACEHOLDER_PATTERN.findall(masked)
+                if "_DATE_" in token
+            ]
+            for token in dates[:2]:
+                masked = masked.replace(f"{token},", f"{token}은", 1)
+            return masked
+
+        records = {
+            count: run_once(
+                _Transport(respond),
+                _settings(),
+                count,
+                detach_citations=True,
+            )
+            for count in (4, 6, 10)
+        }
+
+        self.assertEqual(records[4]["numbers_only_in_reference"], ["-01,", "-08,"])
+        self.assertEqual(records[4]["numbers_only_in_candidate"], ["-08"])
+        self.assertEqual(records[6]["numbers_only_in_reference"], [])
+        self.assertEqual(records[6]["numbers_only_in_candidate"], ["-08"])
+        self.assertEqual(records[10]["numbers_only_in_reference"], [])
+        self.assertEqual(records[10]["numbers_only_in_candidate"], [])
+        self.assertFalse(records[4]["candidate_valid_before_citation_attachment"])
+        self.assertFalse(records[6]["candidate_valid_before_citation_attachment"])
+        self.assertTrue(records[10]["candidate_valid_before_citation_attachment"])
+        for record in records.values():
+            self.assertTrue(record["field_placeholder_integrity_valid"])
+            self.assertTrue(record["all_events_kept"])
+            self.assertEqual(
+                record["unprotected_numeric_tokens_in_masked_candidate"],
+                [],
+            )
 
     def test_added_inference_fails_before_attachment(self) -> None:
         record = run_once(
@@ -518,6 +578,23 @@ class DetachedCitationTests(unittest.TestCase):
         self.assertNotIn("raw_hcx_candidate", record)
         self.assertNotIn("restored_output", record)
         self.assertNotIn("final_output", record)
+        self.assertNotIn("validation_reference_text", record)
+        self.assertNotIn("restored_candidate_text", record)
+
+    def test_validation_texts_are_shown_only_with_show_output(self) -> None:
+        record = run_once(
+            _Transport(lambda masked: masked),
+            _settings(),
+            4,
+            detach_citations=True,
+            show_output=True,
+        )
+
+        self.assertEqual(
+            record["validation_reference_text"],
+            detach_claim_citations(build_experiment_claim(4)).text,
+        )
+        self.assertEqual(record["restored_candidate_text"], record["restored_output"])
 
     def test_detached_summary_requires_every_final_check(self) -> None:
         clean = run_once(
