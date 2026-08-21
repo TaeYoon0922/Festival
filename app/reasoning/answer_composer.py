@@ -108,18 +108,22 @@ def compose_holding_answer(
 ) -> AnswerDraft:
     evidence_by_id = _evidence_by_id(evidence_set)
     citation_builder = _CitationBuilder(evidence_by_id)
+    reported_events = _reported_holding_events(resolution)
     event_rows = []
-    for index, event in enumerate(resolution.events, start=1):
+    for index, event in enumerate(reported_events, start=1):
         citation_builder.add_holding_event(index, event)
         event_rows.append(_holding_event_content(event))
     evidence_ids = _unique_text(
-        chunk_id for event in resolution.events for chunk_id in event.evidence_chunk_ids
+        chunk_id for event in reported_events for chunk_id in event.evidence_chunk_ids
     )
     sections = (
         (
             AnswerSection(
                 title="Holding events",
-                content={"events": event_rows},
+                content={
+                    "events": event_rows,
+                    "requested_fields": list(resolution.requested_fields),
+                },
                 supporting_evidence_ids=evidence_ids,
             ),
         )
@@ -207,6 +211,32 @@ def compose_periodic_answer(
         confidence=confidence,
         answerable=answerable,
     )
+
+
+def _reported_holding_events(
+    resolution: HoldingResolution,
+) -> tuple[HoldingEvent, ...]:
+    """Report the events the question actually asked about.
+
+    The resolver already decides which events satisfy the question's company,
+    reporter, direction, and date constraints.  Reporting every retrieved event
+    regardless answers a question nobody asked: given "2022-12-05 기준 보유
+    비율", the reader also gets 2023 and 2024 holdings.
+
+    Narrowing is deliberately limited to the unambiguous case — the question
+    named specific fields and exactly one event satisfies it.  A history
+    question names no field, and an ambiguous one matches several events; both
+    keep the existing multi-event answer, and no event is ever picked for being
+    the newest or the closest.
+    """
+
+    events = tuple(resolution.events)
+    if not resolution.requested_fields:
+        return events
+    matching = tuple(event for event in events if event.matches_query is True)
+    if len(matching) != 1:
+        return events
+    return matching
 
 
 def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:

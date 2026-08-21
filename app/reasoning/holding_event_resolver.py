@@ -53,6 +53,8 @@ _QUERY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "change_shares": (
         r"증감.{0,6}주식\s*수",
         r"(?:증가|감소)(?!\s*후).{0,5}주식\s*수",
+        # "증감 수량": the unit word is dropped in ordinary phrasing.
+        r"증감\s*수량",
     ),
     "after_shares": (
         r"변동\s*후.{0,8}주식\s*수",
@@ -60,7 +62,14 @@ _QUERY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         r"보유\s*(?:주식\s*)?(?:수|수량)",
     ),
     "before_ratio": (r"변동\s*전.{0,8}비율", r"직전.{0,8}(?:비율|지분율)"),
-    "after_ratio": (r"변동\s*후.{0,8}비율", r"보유\s*비율", r"지분\s*율"),
+    "after_ratio": (
+        r"변동\s*후.{0,8}비율",
+        r"보유\s*비율",
+        r"지분\s*율",
+        # "보유 수와 비율", "보유 수량과 비율": the second noun of a coordinated
+        # pair keeps no qualifier of its own, so "보유 비율" never appears.
+        r"(?:와|과)\s*비율",
+    ),
     "change_ratio": (r"증감\s*비율", r"(?:증가|감소)\s*비율"),
     "change_direction": (r"증감\s*방향", r"증가", r"감소", r"변동\s*없음"),
 }

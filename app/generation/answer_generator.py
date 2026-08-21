@@ -174,6 +174,13 @@ def _holding_sections(
         for section in draft.answer_sections
         for event in _mapping_list(section.content.get("events"))
     ]
+    requested_fields = _unique(
+        [
+            value
+            for section in draft.answer_sections
+            for value in _string_list(section.content.get("requested_fields"))
+        ]
+    )
     lines = ["확인된 보유 변동 내역은 다음과 같습니다."]
     section_citations: list[str] = []
     warnings: list[str] = []
@@ -188,7 +195,7 @@ def _holding_sections(
             supported = False
             continue
         marker = " ".join(citation_ids)
-        factual_lines = _holding_fact_lines(event, marker)
+        factual_lines = _holding_fact_lines(event, marker, requested_fields)
         if not factual_lines:
             lines.append("확인되지 않은 정보가 있습니다.")
             warnings.append(f"missing_fact_content:holding_event:{index}")
@@ -218,7 +225,29 @@ def _holding_sections(
     return sections, warnings, supported
 
 
-def _holding_fact_lines(event: Mapping[str, Any], marker: str) -> list[str]:
+#: Always rendered: they say whose holding this is and as of when, which is
+#: what makes the remaining lines a statement rather than a bare number.
+HOLDING_CONTEXT_FIELDS = ("corp_name", "reporter", "reference_date")
+
+
+def _holding_fact_lines(
+    event: Mapping[str, Any],
+    marker: str,
+    requested_fields: Sequence[str] = (),
+) -> list[str]:
+    """Render an event, limited to the fields the question asked for.
+
+    With no requested field the full event is rendered, as before.  When the
+    question named fields, the others are left out: asked for a ratio, a reader
+    should not have to find it among five other figures.  Nothing is inferred
+    or reformatted here — omitted values simply stay in the evidence.
+    """
+
+    requested = set(requested_fields)
+
+    def wanted(field: str) -> bool:
+        return not requested or field in requested or field in HOLDING_CONTEXT_FIELDS
+
     lines = []
     text_fields = (
         ("corp_name", "회사"),
@@ -229,7 +258,7 @@ def _holding_fact_lines(event: Mapping[str, Any], marker: str) -> list[str]:
     )
     for field, label in text_fields:
         value = _text(event.get(field))
-        if value:
+        if value and wanted(field):
             lines.append(f"{label}: {value} {marker}")
     numeric_fields = (
         ("before_shares", "변동 전 주식수", "주"),
@@ -241,10 +270,10 @@ def _holding_fact_lines(event: Mapping[str, Any], marker: str) -> list[str]:
     )
     for field, label, unit in numeric_fields:
         value = _numeric_text(event.get(field), unit)
-        if value:
+        if value and wanted(field):
             lines.append(f"{label}: {value} {marker}")
     direction = _direction_text(event.get("change_direction"))
-    if direction:
+    if direction and wanted("change_direction"):
         lines.append(f"변동 방향: {direction} {marker}")
     return lines
 
