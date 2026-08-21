@@ -13,3 +13,4 @@ __MACOSX/
 .DS_Store
 data/exports
 .env.*
+data/db_export
