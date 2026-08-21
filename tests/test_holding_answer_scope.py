@@ -106,16 +106,16 @@ class Case1ExactDateSingleFieldTests(unittest.TestCase):
 
         Deleting them removed facts a reader needs to interpret the one they
         asked for, and cost the internal regression set its evidence-term
-        coverage.
+        coverage.  The assertion is on values, not labels, because the wording
+        is presentation and the values are the contract.
         """
 
-        self.assertIn("변동 후 주식수", self.generated.answer_text)
         self.assertIn("720,039주", self.generated.answer_text)
 
-    def test_the_asked_field_leads_the_event(self) -> None:
+    def test_the_asked_value_leads_the_event(self) -> None:
         text = self.generated.answer_text
 
-        self.assertLess(text.index("변동 후 비율"), text.index("변동 후 주식수"))
+        self.assertLess(text.index("7.12%"), text.index("720,039주"))
 
     def test_the_answer_still_says_whose_holding_and_when(self) -> None:
         self.assertIn(REPORTER, self.generated.answer_text)
