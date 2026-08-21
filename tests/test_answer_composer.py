@@ -187,6 +187,245 @@ class AnswerComposerTests(unittest.TestCase):
         self.assertIn("after_shares", resolution.unresolved_fields)
         self.assertIn("answer_not_supported", draft.warnings)
 
+    def test_complete_holding_report_is_answerable_with_incomplete_detail(self):
+        report = _holding_item(
+            "h1:ch_report",
+            "h1",
+            rank=1,
+            projection_type="holding_report",
+            fields={
+                "reporter": "국민연금기금",
+                "reference_date": "2024-03-07",
+                "change_shares": "100",
+                "change_ratio": "1.00",
+            },
+        )
+        detail = _holding_item(
+            "h2:ch_detail",
+            "h2",
+            rank=2,
+            projection_type="holding_detail_row",
+            fields={
+                "reporter": "국민연금기금",
+                "reference_date": "2024-04-07",
+                "change_shares": "50",
+            },
+        )
+        evidence = _holding_evidence(
+            [_holding_group("g-report", report), _holding_group("g-detail", detail)],
+            question="국민연금 증가 주식수 증가 비율",
+            requested=["change_shares", "change_ratio"],
+        )
+
+        resolution = resolve_holding_events(evidence)
+        draft = compose_holding_answer(resolution, evidence)
+
+        self.assertEqual(resolution.matching_event_count, 2)
+        self.assertEqual(len(resolution.events), 2)
+        self.assertTrue(draft.answerable)
+        self.assertEqual(
+            draft.evidence_references,
+            ("h1:ch_report", "h2:ch_detail"),
+        )
+        self.assertTrue(draft.ambiguity["temporal_ambiguity"])
+        self.assertIn("multiple_matching_holding_events", draft.warnings)
+
+    def test_incomplete_holding_events_are_not_combined_for_answerability(self):
+        shares_only = _holding_item(
+            "h1:ch_shares",
+            "h1",
+            rank=1,
+            fields={
+                "reporter": "국민연금기금",
+                "change_shares": "100",
+            },
+        )
+        ratio_only = _holding_item(
+            "h2:ch_ratio",
+            "h2",
+            rank=2,
+            fields={
+                "reporter": "국민연금기금",
+                "change_ratio": "1.00",
+            },
+        )
+        evidence = _holding_evidence(
+            [
+                _holding_group("g-shares", shares_only),
+                _holding_group("g-ratio", ratio_only),
+            ],
+            question="국민연금 증감 주식수 증감 비율",
+            requested=["change_shares", "change_ratio"],
+        )
+
+        resolution = resolve_holding_events(evidence)
+        draft = compose_holding_answer(resolution, evidence)
+
+        self.assertFalse(draft.answerable)
+        self.assertIn(
+            "complete_requested_holding_fields",
+            draft.confidence["unresolved_requirements"],
+        )
+
+    def test_no_complete_holding_event_keeps_completeness_unresolved(self):
+        item = _holding_item(
+            "h1:ch_detail",
+            "h1",
+            rank=1,
+            fields={
+                "reporter": "국민연금기금",
+                "change_shares": "100",
+            },
+        )
+        evidence = _holding_evidence(
+            [_holding_group("g1", item)],
+            question="국민연금 증감 주식수 증감 비율",
+            requested=["change_shares", "change_ratio"],
+        )
+
+        draft = compose_holding_answer(resolve_holding_events(evidence), evidence)
+
+        self.assertFalse(draft.answerable)
+        self.assertIn(
+            "complete_requested_holding_fields",
+            draft.confidence["unresolved_requirements"],
+        )
+
+    def test_multiple_complete_holding_events_remain_ambiguous_and_answerable(self):
+        events = [
+            _holding_item(
+                f"h{index}:ch_report",
+                f"h{index}",
+                rank=index,
+                projection_type="holding_report",
+                fields={
+                    "reporter": "국민연금기금",
+                    "reference_date": f"202{index + 2}-06-30",
+                    "change_shares": str(index * 100),
+                    "change_ratio": f"{index}.00",
+                },
+            )
+            for index in (1, 2)
+        ]
+        evidence = _holding_evidence(
+            [
+                _holding_group("g1", events[0]),
+                _holding_group("g2", events[1]),
+            ],
+            question="국민연금 증감 주식수 증감 비율",
+            requested=["change_shares", "change_ratio"],
+        )
+
+        resolution = resolve_holding_events(evidence)
+        draft = compose_holding_answer(resolution, evidence)
+
+        self.assertTrue(draft.answerable)
+        self.assertEqual(resolution.matching_event_count, 2)
+        self.assertEqual(len(draft.answer_sections[0].content["events"]), 2)
+        self.assertTrue(draft.ambiguity["temporal_ambiguity"])
+        self.assertFalse(draft.ambiguity["latest_event_selected"])
+
+    def test_complete_event_with_wrong_direction_is_not_answerable(self):
+        decrease = _holding_item(
+            "h1:ch_report",
+            "h1",
+            rank=1,
+            projection_type="holding_report",
+            fields={
+                "reporter": "국민연금기금",
+                "change_shares": "-100",
+                "change_ratio": "-1.00",
+            },
+        )
+        evidence = _holding_evidence(
+            [_holding_group("g1", decrease)],
+            question="국민연금 증가 주식수 증가 비율",
+            requested=["change_shares", "change_ratio", "change_direction"],
+        )
+
+        resolution = resolve_holding_events(evidence)
+        draft = compose_holding_answer(resolution, evidence)
+
+        self.assertEqual(resolution.matching_event_count, 0)
+        self.assertFalse(draft.answerable)
+        self.assertIn(
+            "matching_holding_event",
+            draft.confidence["unresolved_requirements"],
+        )
+
+    def test_complete_event_for_different_reporter_is_not_answerable(self):
+        other_reporter = _holding_item(
+            "h1:ch_report",
+            "h1",
+            rank=1,
+            projection_type="holding_report",
+            fields={
+                "reporter": "다른 기관",
+                "change_shares": "100",
+                "change_ratio": "1.00",
+            },
+        )
+        evidence = _holding_evidence(
+            [_holding_group("g1", other_reporter)],
+            question="국민연금 증감 주식수 증감 비율",
+            reporter="국민연금",
+            requested=["change_shares", "change_ratio"],
+        )
+
+        resolution = resolve_holding_events(evidence)
+        draft = compose_holding_answer(resolution, evidence)
+
+        self.assertEqual(resolution.matching_event_count, 0)
+        self.assertFalse(draft.answerable)
+        self.assertIn(
+            "matching_holding_event",
+            draft.confidence["unresolved_requirements"],
+        )
+
+    def test_hx02_complete_previous_report_survives_partial_new_report(self):
+        complete = _holding_item(
+            "sm:ch_complete",
+            "sm",
+            rank=1,
+            projection_type="holding_report",
+            fields={
+                "reporter": "(주)하이브",
+                "before_shares": "2,098,811",
+                "after_shares": "2,967,759",
+            },
+        )
+        partial = _holding_item(
+            "sm-new:ch_partial",
+            "sm-new",
+            rank=2,
+            projection_type="holding_report",
+            fields={
+                "reporter": "다른 신규 보고자",
+                "after_shares": "2,212,237",
+            },
+        )
+        evidence = _holding_evidence(
+            [
+                _holding_group("g-complete", complete),
+                _holding_group("g-partial", partial),
+            ],
+            question="에스엠 하이브 직전보고 보유주식 수 비율",
+            reporter=None,
+            requested=["before_shares", "after_shares"],
+        )
+
+        resolution = resolve_holding_events(evidence)
+        draft = compose_holding_answer(resolution, evidence)
+
+        self.assertEqual(resolution.matching_event_count, 2)
+        self.assertTrue(draft.answerable)
+        self.assertEqual(len(draft.answer_sections[0].content["events"]), 2)
+        self.assertEqual(
+            draft.evidence_references,
+            ("sm:ch_complete", "sm-new:ch_partial"),
+        )
+        self.assertIn("multiple_matching_holding_events", draft.warnings)
+
     def test_no_matching_holding_event_is_not_answerable(self):
         item = _holding_item(
             "h1:ch_report",

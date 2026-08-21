@@ -379,7 +379,7 @@ def _holding_answerability(
         all(_holding_field_supported(event, field) for field in required)
         for event in candidates
     ]
-    if required and (not complete_events or not all(complete_events)):
+    if required and (not complete_events or not any(complete_events)):
         unresolved.append("complete_requested_holding_fields")
     return not unresolved, tuple(dict.fromkeys(unresolved))
 
