@@ -6,9 +6,10 @@ failure points at the HCX contract rather than at the agent.  Run it before
 wiring the API to a live key.
 
     python scripts/smoke_hcx_verbalizer.py
+    python scripts/smoke_hcx_verbalizer.py --diagnose
 
 The API key is read from ``FESTIVAL_HCX_API_KEY`` and is never printed, stored,
-or included in the JSON report.
+or included in the JSON report.  Request headers are never recorded.
 """
 
 from __future__ import annotations
@@ -29,8 +30,21 @@ from app.generation.answer_generator import (
     GeneratedCitation,
     GeneratedSection,
 )
-from app.generation.answer_validator import validate_verbalized_answer
-from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
+from app.generation.answer_validator import (
+    extract_citation_markers,
+    extract_numeric_tokens,
+    validate_verbalized_answer,
+)
+
+# ``_response_content`` is imported rather than reimplemented so the diagnostic
+# reads the reply exactly the way production does.  A local copy could drift and
+# then describe a candidate the verbalizer never saw.
+from app.generation.hcx_verbalizer import (
+    HcxSettings,
+    HcxVerbalizer,
+    _response_content,
+)
+from app.retrieval.embeddings import UrllibJsonTransport
 
 
 #: A short verified answer.  Real numbers, dates, and a citation marker so the
@@ -40,6 +54,25 @@ FIXTURE_TEXT = (
 )
 
 FIXTURE_COMPANY = "효성중공업"
+
+
+class _RecordingTransport:
+    """Pass a request through and keep only the response body.
+
+    Headers carry the bearer token, and the request payload is already known, so
+    neither is retained.  Only the reply is kept, and only so the raw candidate
+    can be compared against the deterministic reference.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.response: Any = None
+
+    def post_json(self, url, *, headers, payload, timeout_seconds):
+        self.response = self._inner.post_json(
+            url, headers=headers, payload=payload, timeout_seconds=timeout_seconds
+        )
+        return self.response
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,7 +85,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--show-answer",
         action="store_true",
-        help="Print the verbalized text as well as the contract checks.",
+        help="Print the answer that would be served.",
+    )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help=(
+            "Print the raw HCX candidate next to the reference, with the "
+            "citation markers and numeric tokens the validator compared."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -69,14 +110,31 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     fixture = _fixture()
-    verbalizer = HcxVerbalizer(settings)
+    recorder = _RecordingTransport(UrllibJsonTransport())
+    verbalizer = HcxVerbalizer(settings, transport=recorder)
     outcome = verbalizer.verbalize(fixture, required_terms=(FIXTURE_COMPANY,))
 
-    validation = validate_verbalized_answer(
-        outcome.text,
-        reference=FIXTURE_TEXT,
-        required_terms=(FIXTURE_COMPANY,),
+    candidate = (
+        _response_content(recorder.response)
+        if isinstance(recorder.response, dict)
+        else None
     )
+
+    # Two different questions.  ``served`` is what a caller receives, which on a
+    # fallback is the reference itself and therefore always valid.  ``candidate``
+    # is what HCX actually produced, and is the only one that explains a
+    # fallback.
+    served = validate_verbalized_answer(
+        outcome.text, reference=FIXTURE_TEXT, required_terms=(FIXTURE_COMPANY,)
+    )
+    candidate_result = (
+        validate_verbalized_answer(
+            candidate, reference=FIXTURE_TEXT, required_terms=(FIXTURE_COMPANY,)
+        )
+        if candidate is not None
+        else None
+    )
+
     report: dict[str, Any] = {
         "endpoint": settings.endpoint,
         "model": settings.model,
@@ -85,11 +143,20 @@ def main(argv: list[str] | None = None) -> int:
         "fallback_reason": outcome.reason,
         "used_hcx": outcome.used_hcx,
         "answer_non_empty": bool(outcome.text.strip()),
-        "numbers_and_citations_preserved": validation.valid,
         "deterministic_fallback_served": outcome.text == FIXTURE_TEXT,
+        "served_answer_valid": served.valid,
+        "hcx_candidate_received": candidate is not None,
+        "hcx_candidate_valid": (
+            None if candidate_result is None else candidate_result.valid
+        ),
+        "hcx_candidate_reason": (
+            None if candidate_result is None else candidate_result.reason
+        ),
     }
     if args.show_answer:
-        report["answer"] = outcome.text
+        report["served_answer"] = outcome.text
+    if args.diagnose:
+        report["diagnostic"] = _diagnostic(candidate, candidate_result)
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
@@ -104,7 +171,45 @@ def main(argv: list[str] | None = None) -> int:
         f"reason={outcome.reason}); the deterministic answer was served.",
         file=sys.stderr,
     )
+    if not args.diagnose:
+        print("Re-run with --diagnose to see what HCX changed.", file=sys.stderr)
     return 2
+
+
+def _diagnostic(candidate: str | None, result: Any) -> dict[str, Any]:
+    """Show exactly what the validator compared.  No headers, no credentials."""
+
+    reference_citations = extract_citation_markers(FIXTURE_TEXT)
+    reference_numbers = extract_numeric_tokens(FIXTURE_TEXT)
+    payload: dict[str, Any] = {
+        "reference_text": FIXTURE_TEXT,
+        "raw_hcx_candidate": candidate,
+        "reference_citations": sorted(reference_citations),
+        "candidate_citations": None,
+        "reference_numeric_tokens": sorted(reference_numbers),
+        "candidate_numeric_tokens": None,
+        "validator_reason": None if result is None else result.reason,
+    }
+    if candidate is None:
+        return payload
+
+    candidate_citations = extract_citation_markers(candidate)
+    candidate_numbers = extract_numeric_tokens(candidate)
+    payload["candidate_citations"] = sorted(candidate_citations)
+    payload["candidate_numeric_tokens"] = sorted(candidate_numbers)
+    payload["citations_only_in_reference"] = sorted(
+        reference_citations - candidate_citations
+    )
+    payload["citations_only_in_candidate"] = sorted(
+        candidate_citations - reference_citations
+    )
+    payload["numbers_only_in_reference"] = sorted(
+        reference_numbers - candidate_numbers
+    )
+    payload["numbers_only_in_candidate"] = sorted(
+        candidate_numbers - reference_numbers
+    )
+    return payload
 
 
 def _fixture() -> GeneratedAnswer:
