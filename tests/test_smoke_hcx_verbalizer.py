@@ -38,7 +38,8 @@ DIAGNOSTIC_KEYS = {
 }
 
 PROTECTION = protect_literals(FIXTURE_TEXT)
-P_DATE, P_NUMBER, P_CITATION = PROTECTION.placeholders
+#: date, its citation, the share count, and its citation.
+P_DATE, P_FIRST_CITE, P_NUMBER, P_SECOND_CITE = PROTECTION.placeholders
 
 
 def _diagnose(raw: str | None) -> dict:
@@ -111,8 +112,8 @@ class RecordingTransportTests(unittest.TestCase):
 MASKED = PROTECTION.masked
 
 MASKED_FAITHFUL = (
-    f"효성중공업에 대한 국민연금기금의 보유주식수는 {P_DATE} 기준으로 "
-    f"{P_NUMBER}주입니다.{P_CITATION}"
+    f"국민연금기금이 보유한 효성중공업 주식은 {P_DATE} 기준{P_FIRST_CITE} "
+    f"{P_NUMBER}주입니다{P_SECOND_CITE}"
 )
 
 
@@ -130,12 +131,12 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(payload["numbers_only_in_candidate"], [])
 
     def test_reports_a_dropped_placeholder(self) -> None:
-        payload = _diagnose(MASKED_FAITHFUL.replace(P_CITATION, ""))
+        payload = _diagnose(MASKED_FAITHFUL.replace(P_SECOND_CITE, ""))
 
         self.assertEqual(payload["placeholder_integrity_reason"], "placeholder_missing")
-        self.assertIn(P_CITATION, payload["placeholder_integrity_detail"])
+        self.assertIn(P_SECOND_CITE, payload["placeholder_integrity_detail"])
         self.assertIsNone(payload["restored_hcx_candidate"])
-        self.assertNotIn(P_CITATION, payload["found_placeholders"])
+        self.assertNotIn(P_SECOND_CITE, payload["found_placeholders"])
 
     def test_explains_the_observed_live_failure(self) -> None:
         """The reply HCX actually returned before literals were protected."""
@@ -148,7 +149,8 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(payload["placeholder_integrity_reason"], "placeholder_missing")
         self.assertEqual(payload["found_placeholders"], [])
         self.assertEqual(
-            payload["expected_placeholders"], [P_DATE, P_NUMBER, P_CITATION]
+            payload["expected_placeholders"],
+            [P_DATE, P_FIRST_CITE, P_NUMBER, P_SECOND_CITE],
         )
         self.assertIsNone(payload["restored_hcx_candidate"])
 
@@ -188,7 +190,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertIsNone(payload["validator_reason"])
 
     def test_exposes_no_field_outside_the_permitted_set(self) -> None:
-        for reply in (MASKED_FAITHFUL, MASKED_FAITHFUL.replace(P_CITATION, ""), None):
+        for reply in (MASKED_FAITHFUL, MASKED_FAITHFUL.replace(P_SECOND_CITE, ""), None):
             with self.subTest(reply=reply):
                 self.assertTrue(set(_diagnose(reply)).issubset(DIAGNOSTIC_KEYS))
 

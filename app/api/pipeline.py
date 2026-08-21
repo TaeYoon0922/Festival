@@ -21,7 +21,11 @@ from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
 )
-from app.generation.hcx_verbalizer import HcxVerbalizer, VerbalizationOutcome
+from app.generation.hcx_verbalizer import (
+    SKIPPED_NO_COMPACT_CLAIM,
+    HcxVerbalizer,
+    VerbalizationOutcome,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.retrieval.embeddings import (
     EmbeddingConfig,
@@ -40,6 +44,16 @@ INTERNAL_ERROR = "internal_error"
 #: The contract promises answer text on every 200, including when nothing in
 #: the corpus supports the question.
 EMPTY_ANSWER_FALLBACK = "확인되지 않은 정보가 있습니다."
+
+#: Statuses reached without ever calling the model.
+_HCX_NOT_CALLED = frozenset(
+    {
+        "disabled",
+        "not_configured",
+        "skipped_not_answerable",
+        SKIPPED_NO_COMPACT_CLAIM,
+    }
+)
 
 _PUBLIC_MESSAGES = {
     DATABASE_UNAVAILABLE: "The disclosure database is unavailable.",
@@ -119,7 +133,10 @@ class AnswerPipeline:
             raise AnswerPipelineError(_classify(error)) from error
 
         outcome = self.verbalizer.verbalize(
-            generated, required_terms=_required_terms(plan, result.evidence_set)
+            generated,
+            draft=result.answer_draft,
+            resolution=result.resolution,
+            task_type=result.task_decision.task_type,
         )
         return {
             "question_id": question_id,
@@ -183,7 +200,7 @@ def think_trace(
     """
 
     stages = [*result.execution_trace, "answer_generator"]
-    if outcome.status != "disabled":
+    if outcome.status not in _HCX_NOT_CALLED:
         stages.append("hcx_verbalizer")
     return {
         "task_type": result.task_decision.task_type,
@@ -202,20 +219,6 @@ def _route(result: Any) -> str:
         if stage.endswith("_resolver"):
             return stage
     return "general_evidence"
-
-
-def _required_terms(plan: Any, evidence_set: Any) -> tuple[str, ...]:
-    """Company names the verbalizer must keep verbatim."""
-
-    terms: list[str] = []
-    for value in (getattr(plan, "company", None), *getattr(plan, "companies", ())):
-        if value:
-            terms.append(str(value))
-    for group in getattr(evidence_set, "evidence_groups", ()):
-        for item in group.items:
-            if item.corp_name:
-                terms.append(str(item.corp_name))
-    return tuple(dict.fromkeys(terms))
 
 
 def _chunk_period(chunk: Mapping[str, Any]) -> dict[str, Any]:

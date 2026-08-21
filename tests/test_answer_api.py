@@ -18,6 +18,9 @@ from app.generation.hcx_verbalizer import (
     HcxVerbalizer,
     VerbalizationOutcome,
 )
+from app.agent.orchestrator import AgentOrchestrator
+from app.generation.answer_generator import CitationAwareAnswerGenerator
+from app.generation.compact_claim import build_compact_claim
 from app.generation.protected_literals import (
     PLACEHOLDER_PATTERN,
     protect_literals,
@@ -107,6 +110,20 @@ def _pipeline(*, executor=None, verbalizer=None) -> AnswerPipeline:
 def _client(pipeline_factory=None, **kwargs) -> TestClient:
     app = create_app(pipeline_factory=pipeline_factory or _pipeline)
     return TestClient(app, **kwargs)
+
+
+def _claim_protection():
+    """Rebuild the compact claim the pipeline will produce for this fixture."""
+
+    plan, execution = _plan_and_execution()
+    result = AgentOrchestrator().run(QUESTION, plan, execution)
+    claim = build_compact_claim(
+        result.answer_draft,
+        result.resolution,
+        task_type=result.task_decision.task_type,
+    )
+    generated = CitationAwareAnswerGenerator().generate(result.answer_draft)
+    return claim, protect_literals(claim.deterministic_text), generated.answer_text
 
 
 def _hcx_factory(reply: str):
@@ -202,28 +219,31 @@ class HcxIntegrationTests(unittest.TestCase):
         self.assertNotIn("hcx_verbalizer", payload["think_trace"]["stages"])
 
     def test_faithful_hcx_text_is_served(self) -> None:
-        deterministic = _ask(_client()).json()["answer"]
-        # The verbalizer masks the reference, so a faithful reply speaks in
-        # placeholders and is only readable again after restoration.
-        masked = protect_literals(deterministic).masked
+        claim, protection, _ = _claim_protection()
 
-        payload = _ask(_client(_hcx_factory(f"공시에 따르면 {masked}"))).json()
+        payload = _ask(_client(_hcx_factory(f"{protection.masked}입니다"))).json()
 
         self.assertEqual(payload["think_trace"]["hcx_status"], "success")
-        self.assertEqual(payload["answer"], f"공시에 따르면 {deterministic}")
+        self.assertEqual(payload["answer"], f"{claim.deterministic_text}입니다")
         self.assertIn("hcx_verbalizer", payload["think_trace"]["stages"])
 
-    def test_served_answer_never_leaks_a_placeholder(self) -> None:
-        deterministic = _ask(_client()).json()["answer"]
-        masked = protect_literals(deterministic).masked
+    def test_served_answer_is_shorter_than_the_full_report(self) -> None:
+        _, protection, deterministic = _claim_protection()
 
-        payload = _ask(_client(_hcx_factory(f"공시에 따르면 {masked}"))).json()
+        payload = _ask(_client(_hcx_factory(f"{protection.masked}입니다"))).json()
+
+        self.assertLess(len(payload["answer"]), len(deterministic))
+
+    def test_served_answer_never_leaks_a_placeholder(self) -> None:
+        _, protection, _ = _claim_protection()
+
+        payload = _ask(_client(_hcx_factory(f"{protection.masked}입니다"))).json()
 
         self.assertIsNone(PLACEHOLDER_PATTERN.search(payload["answer"]))
         self.assertNotIn("__FESTIVAL_", json.dumps(payload, ensure_ascii=False))
 
     def test_normalized_literals_fall_back(self) -> None:
-        """The live failure mode: HCX rewrites a date and drops a citation."""
+        """The live failure mode: HCX writes its own prose instead of restating."""
 
         deterministic = _ask(_client()).json()["answer"]
 
@@ -236,11 +256,10 @@ class HcxIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["answer"], deterministic)
 
     def test_hallucinating_hcx_falls_back_to_the_deterministic_answer(self) -> None:
-        deterministic = _ask(_client()).json()["answer"]
-        masked = protect_literals(deterministic).masked
+        _, protection, deterministic = _claim_protection()
 
         payload = _ask(
-            _client(_hcx_factory(masked + " 총 12,345주 늘었습니다."))
+            _client(_hcx_factory(protection.masked + " 총 12,345주 늘었습니다."))
         ).json()
 
         self.assertEqual(
@@ -271,8 +290,8 @@ class NonEmptyAnswerTests(unittest.TestCase):
         self,
     ) -> None:
         class _BlankVerbalizer:
-            def verbalize(self, generated, *, required_terms=()):
-                del generated, required_terms
+            def verbalize(self, generated, **kwargs):
+                del generated, kwargs
                 return VerbalizationOutcome("", "fallback_error", "blank")
 
         deterministic = _ask(_client()).json()["answer"]

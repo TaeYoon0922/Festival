@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.generation.answer_generator import GeneratedAnswer
+from app.generation.compact_claim import CompactClaim, build_compact_claim
 from app.generation.answer_validator import (
     ValidationPolicy,
     validate_verbalized_answer,
@@ -54,6 +55,10 @@ DEFAULT_MAX_TOKENS = 1024
 
 #: A protected literal did not survive the round trip.
 PLACEHOLDER_INTEGRITY_FAILED = "fallback_placeholder_integrity_failed"
+
+#: No compact verified claim could be built.  This is a deliberate skip that
+#: keeps the grounded deterministic answer, not an error.
+SKIPPED_NO_COMPACT_CLAIM = "skipped_no_compact_verified_claim"
 
 SYSTEM_PROMPT = """당신은 이미 검증된 공시 답변을 자연스러운 한국어로 다듬는 편집자입니다.
 
@@ -146,59 +151,82 @@ class HcxVerbalizer:
         self,
         generated: GeneratedAnswer,
         *,
+        draft: Any = None,
+        resolution: Any = None,
+        task_type: str | None = None,
+        claim: CompactClaim | None = None,
         required_terms: Iterable[str] = (),
     ) -> VerbalizationOutcome:
-        reference = generated.answer_text
+        """Restate a compact verified claim, or return the deterministic answer.
+
+        Production passes ``draft``/``resolution``/``task_type`` and the claim is
+        derived from them.  ``claim`` is an escape hatch for diagnostics that
+        already hold one; it never widens what the model is allowed to see.
+        """
+
+        deterministic = generated.answer_text
 
         if not self.settings.enabled:
-            return VerbalizationOutcome(reference, "disabled")
+            return VerbalizationOutcome(deterministic, "disabled")
         if not self.settings.configured:
-            return VerbalizationOutcome(reference, "not_configured")
+            return VerbalizationOutcome(deterministic, "not_configured")
         if not generated.answerable:
             # An unsupported answer must never be made to sound confident.
-            return VerbalizationOutcome(reference, "skipped_not_answerable")
+            return VerbalizationOutcome(deterministic, "skipped_not_answerable")
+
+        if claim is None:
+            claim = build_compact_claim(draft, resolution, task_type=task_type)
+        if claim is None:
+            # Grounding beats fluency: without a compact verified claim the
+            # model would be handed a whole report and would rewrite it.
+            return VerbalizationOutcome(deterministic, SKIPPED_NO_COMPACT_CLAIM)
+
+        # The model now restates the claim, so the claim is what its output is
+        # judged against.
+        reference = claim.deterministic_text
+        terms = tuple(required_terms) or claim.required_terms
 
         if contains_placeholder_syntax(reference):
             # Protection would be ambiguous, so the model is not consulted.
             return VerbalizationOutcome(
-                reference,
+                deterministic,
                 PLACEHOLDER_INTEGRITY_FAILED,
                 "reference already contains placeholder syntax",
             )
 
         protection = protect_literals(reference)
         try:
-            masked_candidate = self._request(generated, protection)
+            masked_candidate = self._request(claim, protection)
         except _VerbalizerFailure as failure:
-            return VerbalizationOutcome(reference, failure.status, failure.reason)
+            return VerbalizationOutcome(deterministic, failure.status, failure.reason)
 
         integrity = check_placeholder_integrity(masked_candidate, protection)
         if not integrity.valid:
             # Never repair a mangled placeholder: a guessed literal is worse
             # than the deterministic answer.
             return VerbalizationOutcome(
-                reference, PLACEHOLDER_INTEGRITY_FAILED, integrity.reason
+                deterministic, PLACEHOLDER_INTEGRITY_FAILED, integrity.reason
             )
 
         candidate = restore_literals(masked_candidate, protection)
         result = validate_verbalized_answer(
             candidate,
             reference=reference,
-            required_terms=required_terms,
+            required_terms=terms,
             policy=self.policy,
         )
         if not result.valid:
             return VerbalizationOutcome(
-                reference, "fallback_validation_failed", result.reason
+                deterministic, "fallback_validation_failed", result.reason
             )
         return VerbalizationOutcome(candidate.strip(), "success")
 
-    def _request(self, generated: GeneratedAnswer, protection: ProtectedText) -> str:
+    def _request(self, claim: CompactClaim, protection: ProtectedText) -> str:
         payload = {
             "model": self.settings.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _verified_facts(generated, protection)},
+                {"role": "user", "content": _verified_facts(claim, protection)},
             ],
             "temperature": self.settings.temperature,
             "max_tokens": self.settings.max_tokens,
@@ -239,19 +267,18 @@ class _VerbalizerFailure(Exception):
         self.reason = reason
 
 
-def _verified_facts(generated: GeneratedAnswer, protection: ProtectedText) -> str:
-    """Serialize the masked answer and nothing that would unmask it.
+def _verified_facts(claim: CompactClaim, protection: ProtectedText) -> str:
+    """Serialize the masked claim and nothing that would unmask it.
 
-    ``answer_text`` is rendered from the sections, so sending the sections too
-    would hand the model a second, unprotected copy of every number, date, and
-    citation marker — exactly what the placeholders exist to prevent.  Only the
-    section titles survive, as structural hints that carry no literals.
+    Only the masked rendering is sent.  The claim's own field values are left
+    out on purpose: including them would hand the model an unprotected copy of
+    every number and date, which is exactly what the placeholders prevent.
     """
 
     facts = {
-        "question": generated.question,
+        "question": claim.question,
         "answer_to_rewrite": protection.masked,
-        "section_titles": [section.title for section in generated.sections],
+        "field_labels": [field.label for field in claim.fields],
         "protected_tokens": list(protection.placeholders),
     }
     return json.dumps(facts, ensure_ascii=False, indent=2)

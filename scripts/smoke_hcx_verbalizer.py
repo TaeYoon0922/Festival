@@ -25,11 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.generation.answer_generator import (
-    GeneratedAnswer,
-    GeneratedCitation,
-    GeneratedSection,
-)
+from app.generation.compact_claim import ClaimCitation, ClaimField, CompactClaim
 from app.generation.answer_validator import (
     extract_citation_markers,
     extract_numeric_tokens,
@@ -55,9 +51,7 @@ from app.retrieval.embeddings import UrllibJsonTransport
 
 #: A short verified answer.  Real numbers, dates, and a citation marker so the
 #: validator has something meaningful to protect.
-FIXTURE_TEXT = (
-    "국민연금기금의 효성중공업 보유주식수는 2023년 03월 07일 기준 655,490주입니다.[1]"
-)
+FIXTURE_TEXT = "국민연금기금 효성중공업 변동일 2023년 03월 07일[1], 변동 후 주식수 655,490주[1]"
 
 FIXTURE_COMPANY = "효성중공업"
 
@@ -118,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
 
     recorder = _RecordingTransport(UrllibJsonTransport())
     verbalizer = HcxVerbalizer(settings, transport=recorder)
-    outcome = verbalizer.verbalize(_fixture(), required_terms=(FIXTURE_COMPANY,))
+    outcome = verbalizer.verbalize(
+        _deterministic_answer(), claim=_fixture(), required_terms=(FIXTURE_COMPANY,)
+    )
 
     # ``protect_literals`` is deterministic, so the same protection the
     # verbalizer built can be rebuilt here without production exposing it.
@@ -197,6 +193,22 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _deterministic_answer():
+    """The answer served on any fallback.  For this check it is the claim text."""
+
+    from app.generation.answer_generator import GeneratedAnswer
+
+    return GeneratedAnswer(
+        question="효성중공업 국민연금기금 변동일 변동후 주식수",
+        answer_text=FIXTURE_TEXT,
+        citations=(),
+        sections=(),
+        warnings=(),
+        confidence={"level": "high", "display_text": "높음"},
+        answerable=True,
+    )
+
+
 def _diagnostic(
     raw: str | None,
     restored: str | None,
@@ -244,31 +256,32 @@ def _diagnostic(
     return payload
 
 
-def _fixture() -> GeneratedAnswer:
-    return GeneratedAnswer(
+def _fixture() -> CompactClaim:
+    """A compact claim shaped exactly like one the holding adapter produces."""
+
+    citation = ClaimCitation(
+        marker="[1]",
+        chunk_id="smoke:fixture",
+        doc_id="smoke",
+        source_refs=({"table_id": "smoke", "row_start": 1, "row_end": 1},),
+    )
+    fields = (
+        ClaimField(
+            name="reference_date", label="변동일", value="2023년 03월 07일",
+            marker="[1]", chunk_id="smoke:fixture",
+        ),
+        ClaimField(
+            name="after_shares", label="변동 후 주식수", value="655,490주",
+            marker="[1]", chunk_id="smoke:fixture",
+        ),
+    )
+    return CompactClaim(
         question="효성중공업 국민연금기금 변동일 변동후 주식수",
-        answer_text=FIXTURE_TEXT,
-        citations=(
-            GeneratedCitation(
-                citation_id="1",
-                chunk_id="smoke:fixture",
-                doc_id="smoke",
-                source_refs=(),
-                section="보유주식등의 수 및 보유비율",
-                evidence_type="table",
-            ),
-        ),
-        sections=(
-            GeneratedSection(
-                title="보유 현황",
-                content=FIXTURE_TEXT,
-                citations=("1",),
-                metadata=("보고자: 국민연금기금",),
-            ),
-        ),
-        warnings=(),
-        confidence={"level": "high", "display_text": "높음"},
-        answerable=True,
+        company="효성중공업",
+        reporter="국민연금기금",
+        fields=fields,
+        citations=(citation,),
+        deterministic_text=FIXTURE_TEXT,
     )
 
 

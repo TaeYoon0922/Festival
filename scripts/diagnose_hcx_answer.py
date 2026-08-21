@@ -55,7 +55,7 @@ CAUSE_LABELS = {
     "D": "placeholder spelling changed",
     "E": "output truncation",
     "F": "max_tokens too small",
-    "G": "deterministic answer unsuitable for verbalization",
+    "G": "long full-answer rewrite unsuitable",
     "H": "other",
 }
 
@@ -108,7 +108,12 @@ def main(argv: list[str] | None = None) -> int:
 
     protection = protect_literals(generated.answer_text)
     recorder = _RecordingTransport(UrllibJsonTransport())
-    outcome = HcxVerbalizer(settings, transport=recorder).verbalize(generated)
+    outcome = HcxVerbalizer(settings, transport=recorder).verbalize(
+        generated,
+        draft=result.answer_draft,
+        resolution=result.resolution,
+        task_type=result.task_decision.task_type,
+    )
 
     raw = (
         _response_content(recorder.response)
@@ -240,6 +245,17 @@ def _classify(report: dict[str, Any]) -> dict[str, Any]:
     finish = (report.get("response_finish_reason") or "").lower()
     truncated = finish in {"length", "max_tokens", "stop_before", "token_limit"}
 
+    expected_count = int(report.get("expected_placeholder_count") or 0)
+    found_count = int(report.get("found_placeholder_count") or 0)
+
+    # An empty run is a prefix of every run, so the prefix test only carries
+    # information once at least one placeholder came back.  Without this guard a
+    # reply that ignored every placeholder looks identical to a truncated one.
+    prefix_signature = found_count > 0 and bool(
+        report.get("found_is_prefix_of_expected")
+    )
+    ignored_every_placeholder = expected_count > 0 and found_count == 0
+
     if report["hcx_candidate_received"] is False:
         codes.append("H")
     else:
@@ -249,7 +265,11 @@ def _classify(report: dict[str, Any]) -> dict[str, Any]:
             codes.append("D")
         if report["missing_placeholders"]:
             codes.append("A")
-            if truncated or report["found_is_prefix_of_expected"]:
+            if ignored_every_placeholder:
+                # The model discarded the masked text and wrote its own prose.
+                # More output room cannot fix that.
+                codes.append("G")
+            elif truncated or prefix_signature:
                 # A clean prefix of the expected run means the reply stopped
                 # early rather than the model editing a token.
                 codes.extend(["E", "F"])
@@ -277,7 +297,8 @@ def _classify(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "codes": ordered,
         "labels": [CAUSE_LABELS[code] for code in ordered],
-        "truncation_signature": truncated or report["found_is_prefix_of_expected"],
+        "truncation_signature": truncated or prefix_signature,
+        "ignored_every_placeholder": ignored_every_placeholder,
     }
 
 

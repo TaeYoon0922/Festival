@@ -34,6 +34,8 @@ def _report(found: list[str], finish: str, *, received: bool = True) -> dict:
         "response_finish_reason": finish,
         "found_is_prefix_of_expected": found == EXPECTED[: len(found)],
         "placeholder_integrity_valid": found == EXPECTED,
+        "expected_placeholder_count": len(EXPECTED),
+        "found_placeholder_count": len(found),
     }
 
 
@@ -82,6 +84,31 @@ class ClassificationTests(unittest.TestCase):
         codes = _classify(_report([], "stop", received=False))["codes"]
 
         self.assertEqual(codes, ["H"])
+
+    def test_ignoring_every_placeholder_is_not_truncation(self) -> None:
+        """The observed P07 failure: 96 expected, 0 returned, finish_reason=stop.
+
+        An empty run is a prefix of every run, so the prefix test would call this
+        truncation.  It is not: the model discarded the masked text and wrote its
+        own prose, and more output room cannot fix that.
+        """
+
+        result = _classify(_report([], "stop"))
+
+        self.assertEqual(result["codes"], ["A", "G"])
+        self.assertEqual(
+            result["labels"],
+            ["placeholder missing", "long full-answer rewrite unsuitable"],
+        )
+        self.assertFalse(result["truncation_signature"])
+        self.assertTrue(result["ignored_every_placeholder"])
+
+    def test_a_genuinely_truncated_reply_still_reports_truncation(self) -> None:
+        result = _classify(_report(EXPECTED[:1], "stop"))
+
+        self.assertIn("E", result["codes"])
+        self.assertNotIn("G", result["codes"])
+        self.assertTrue(result["truncation_signature"])
 
     def test_a_clean_run_reports_no_cause(self) -> None:
         result = _classify(_report(EXPECTED, "stop"))
