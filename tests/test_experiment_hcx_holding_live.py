@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
+from app.generation.answer_validator import FORBIDDEN_INVESTMENT_TERMS
 from app.generation.compact_claim import (
     ClaimCitation,
     ClaimField,
@@ -17,6 +19,7 @@ from app.generation.protected_literals import (
     restore_literals,
 )
 from scripts.experiment_hcx_holding_live import (
+    PreparedHoldingQuestion,
     STRICT_EVENT_ORDER_SYSTEM_PROMPT,
     TARGET_QUESTION_IDS,
     attach_live_detached_citations,
@@ -25,7 +28,11 @@ from scripts.experiment_hcx_holding_live import (
     orchestrator_exception_stage,
     placeholder_diagnostics,
     prepare_actual_question,
+    real_structure_diagnostics,
+    run_event_wise_question,
     run_prepared_question,
+    split_prepared_events,
+    summarize_event_wise_runs,
     summarize_live_runs,
     target_question_rows,
 )
@@ -136,6 +143,35 @@ def _structured_claim(event_fields):
         fields=tuple(fields),
         citations=tuple(citations),
         deterministic_text=text,
+    )
+
+
+def _structured_prepared(event_fields) -> PreparedHoldingQuestion:
+    prepared, _, _ = _prepared(events=len(event_fields))
+    claim = _structured_claim(event_fields)
+    detached = detach_live_claim_citations(claim)
+    requested = tuple(field.name for field in claim.fields[: len(event_fields[0])])
+    diagnostics = dict(prepared.prepare_diagnostics)
+    diagnostics.update(
+        {
+            "candidate_event_count": len(event_fields),
+            "claim_field_count": len(claim.fields),
+            "claim_citation_count": len(claim.citations),
+        }
+    )
+    return replace(
+        prepared,
+        requested_fields=requested,
+        candidate_event_count=len(event_fields),
+        claim=claim,
+        detached=detached,
+        structure=real_structure_diagnostics(
+            claim,
+            detached,
+            requested_fields=requested,
+            candidate_event_count=len(event_fields),
+        ),
+        prepare_diagnostics=diagnostics,
     )
 
 
@@ -420,6 +456,155 @@ class TextFieldPlaceholderTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(result.attached_citation_count, 6)
         self.assertEqual(len(detached.attachments), 6)
+
+
+class EventWiseHoldingExperimentTests(unittest.TestCase):
+    def test_each_hcx_call_receives_exactly_one_event_in_original_order(self) -> None:
+        prepared, _, _ = _prepared(events=3)
+        transport = _Transport()
+        clock_values = iter((0.0, 0.1, 0.1, 0.3, 0.3, 0.6))
+
+        question, events = run_event_wise_question(
+            prepared,
+            transport=transport,
+            settings=_settings(),
+            repeat_index=1,
+            clock=lambda: next(clock_values),
+        )
+
+        self.assertEqual(len(split_prepared_events(prepared)), 3)
+        self.assertEqual(len(transport.calls), 3)
+        self.assertEqual([event["event_index"] for event in events], [0, 1, 2])
+        self.assertTrue(question["question_served_success"])
+        self.assertTrue(question["question_all_events_hcx_success"])
+        self.assertEqual(question["total_hcx_calls"], 3)
+        self.assertEqual(question["total_completion_tokens"], 369)
+        self.assertEqual(question["total_elapsed_ms"], 600.0)
+        for call in transport.calls:
+            system_message, user_message = call["payload"]["messages"]
+            self.assertEqual(system_message["content"], STRICT_EVENT_ORDER_SYSTEM_PROMPT)
+            self.assertEqual(len(PLACEHOLDER_PATTERN.findall(user_message["content"])), 2)
+
+    def test_only_failed_event_uses_deterministic_fallback(self) -> None:
+        prepared, _, _ = _prepared(events=3)
+        call_index = 0
+
+        def fail_second(masked: str) -> str:
+            nonlocal call_index
+            call_index += 1
+            if call_index == 2:
+                return masked.replace(PLACEHOLDER_PATTERN.findall(masked)[0], "", 1)
+            return masked
+
+        question, events = run_event_wise_question(
+            prepared,
+            transport=_Transport(fail_second),
+            settings=_settings(),
+            repeat_index=1,
+            show_output=True,
+        )
+
+        self.assertEqual(
+            [event["hcx_event_success"] for event in events],
+            [True, False, True],
+        )
+        self.assertEqual(
+            [event["fallback_used"] for event in events],
+            [False, True, False],
+        )
+        self.assertEqual(events[1]["fallback_reason"], "placeholder_missing")
+        self.assertEqual(question["fallback_event_count"], 1)
+        self.assertFalse(question["question_all_events_hcx_success"])
+        self.assertTrue(question["question_served_success"])
+        self.assertEqual(question["served_event_indexes"], [0, 1, 2])
+        self.assertIn("2023-06-30", question["served_answer"])
+        self.assertIn("2024-06-30", question["served_answer"])
+        self.assertIn("2025-06-30", question["served_answer"])
+
+    def test_exact_structured_text_leakage_fails_closed(self) -> None:
+        prepared = _structured_prepared(
+            [[("change_direction", "증감 방향", "감소", "[1]")]]
+        )
+
+        question, events = run_event_wise_question(
+            prepared,
+            transport=_Transport(lambda masked: masked + " 감소"),
+            settings=_settings(),
+            repeat_index=1,
+        )
+
+        event = events[0]
+        self.assertTrue(event["placeholder_integrity_valid"])
+        self.assertEqual(
+            event["unprotected_text_literals_in_masked_candidate"],
+            ["감소"],
+        )
+        self.assertFalse(event["hcx_event_success"])
+        self.assertEqual(
+            event["fallback_reason"],
+            "unprotected_structured_text_leakage",
+        )
+        self.assertTrue(event["fallback_used"])
+        self.assertTrue(question["question_served_success"])
+
+    def test_forbidden_investment_language_fails_only_that_event(self) -> None:
+        prepared, _, _ = _prepared(events=1)
+        forbidden = next(
+            term
+            for term in FORBIDDEN_INVESTMENT_TERMS
+            if term not in prepared.detached.protection.masked
+        )
+
+        question, events = run_event_wise_question(
+            prepared,
+            transport=_Transport(lambda masked: masked + " " + forbidden),
+            settings=_settings(),
+            repeat_index=1,
+        )
+
+        event = events[0]
+        self.assertTrue(event["forbidden_investment_language_detected"])
+        self.assertEqual(event["fallback_reason"], "forbidden_investment_language")
+        self.assertFalse(event["hcx_event_success"])
+        self.assertTrue(event["fallback_used"])
+        self.assertEqual(question["fallback_event_count"], 1)
+        self.assertTrue(question["question_served_success"])
+
+    def test_event_wise_summary_aggregates_repeats_latency_and_fallback(self) -> None:
+        prepared, _, _ = _prepared(events=2)
+        question_one, events_one = run_event_wise_question(
+            prepared,
+            transport=_Transport(),
+            settings=_settings(),
+            repeat_index=1,
+        )
+        question_two, events_two = run_event_wise_question(
+            prepared,
+            transport=_Transport(
+                lambda masked: masked.replace(
+                    PLACEHOLDER_PATTERN.findall(masked)[0], "", 1
+                )
+            ),
+            settings=_settings(),
+            repeat_index=2,
+        )
+
+        summary = summarize_event_wise_runs(
+            [question_one, question_two],
+            [*events_one, *events_two],
+            repeat=2,
+        )
+
+        hx07 = summary["by_question"]["HX07"]
+        self.assertEqual(hx07["runs"], 2)
+        self.assertEqual(hx07["event_count"], 2)
+        self.assertEqual(hx07["total_hcx_calls"], 4)
+        self.assertEqual(hx07["hcx_event_success_count"], 2)
+        self.assertEqual(hx07["hcx_event_failure_count"], 2)
+        self.assertEqual(hx07["fallback_event_count"], 2)
+        self.assertEqual(hx07["failure_reasons"], {"placeholder_missing": 2})
+        self.assertTrue(hx07["question_served_success"])
+        self.assertFalse(hx07["question_all_events_hcx_success"])
 
 
 class ActualHoldingLiveRunTests(unittest.TestCase):
