@@ -29,6 +29,8 @@ def _item(
     temporal_match: bool | None = None,
     table_id: str | None = None,
     holding: dict | None = None,
+    statement_scope: str | None = None,
+    section_path: tuple[str, ...] | None = None,
 ) -> EvidenceItem:
     period = {}
     if year is not None:
@@ -37,11 +39,22 @@ def _item(
     if quarter is not None:
         period["quarter"] = quarter
         period["period_type"] = "fiscal_quarter"
+    if statement_scope:
+        period["statement_scope"] = statement_scope
     ref = {
         "table_id": table_id or f"table_{rank}",
         "row_start": rank,
         "row_end": rank,
     }
+    source_chunk = {
+        "chunk_id": chunk_id,
+        "doc_id": doc_id,
+        "content": text,
+        "source_refs": [ref],
+        "section_path": list(section_path or (section,)),
+    }
+    if statement_scope:
+        source_chunk["statement_scope"] = statement_scope
     return EvidenceItem(
         chunk_id=chunk_id,
         doc_id=doc_id,
@@ -50,7 +63,7 @@ def _item(
         corp_name="테스트회사",
         doc_group=doc_group,
         chunk_type="text",
-        section_path=(section,),
+        section_path=section_path or (section,),
         evidence_text=f"검색 헤더\n{text}",
         retrieval_rank=rank,
         retrieval_score=1.0 - rank / 100,
@@ -62,12 +75,7 @@ def _item(
             "source_chunk_id": chunk_id,
             "source_doc_id": doc_id,
             "source_refs": [ref],
-            "source_chunk": {
-                "chunk_id": chunk_id,
-                "doc_id": doc_id,
-                "content": text,
-                "source_refs": [ref],
-            },
+            "source_chunk": source_chunk,
         },
         holding=holding or {},
         temporal_match=temporal_match,

@@ -337,3 +337,91 @@ def test_p10_periodless_listing_query_keeps_exact_listing_source() -> None:
     assert selected.selected_chunk_ids == (
         "periodic_20250319000952:ch_listing",
     )
+
+
+_INCOME_STATEMENT_TABLE = """\
+| 열 1 | 제 58 기 1분기 / 3개월 | 제 57 기 1분기 / 3개월 |
+| --- | --- | --- |
+| 매출액 | 44,407,761 | 40,658,539 |
+| 매출원가 | 35,428,253 | 32,230,756 |
+| 영업이익 | 3,633,609 | 3,557,362 |
+| 보통주기본주당이익(손실) (단위 : 원) | 12,076 | 12,287 |
+"""
+
+_REVENUE_NOTE_TABLE = """\
+| 열 1 | 공시금액 |
+| --- | --- |
+| 매출액 | 44,407,761 |
+| 재화의 판매로 인한 수익(매출액) | 36,287,439 |
+| 금융업매출액 | 5,322,134 |
+"""
+
+_STANDALONE_TABLE = """\
+| 열 1 | 공시금액 |
+| --- | --- |
+| 매출액 | 12,000,000 |
+| 매출원가 | 8,000,000 |
+"""
+
+
+def test_selector_keeps_consolidated_income_statement_metric_row() -> None:
+    standalone = _item(
+        "p:ch_standalone",
+        "p-sep",
+        rank=1,
+        text=_STANDALONE_TABLE,
+        year=2025,
+        quarter=1,
+        section_path=("재무제표", "손익계산서"),
+        statement_scope="별도",
+        temporal_match=True,
+    )
+    note = _item(
+        "p:ch_note",
+        "p-con",
+        rank=2,
+        text=_REVENUE_NOTE_TABLE,
+        year=2025,
+        quarter=1,
+        section="수익",
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    income = _item(
+        "p:ch_income",
+        "p-con",
+        rank=4,
+        text=_INCOME_STATEMENT_TABLE,
+        year=2025,
+        quarter=1,
+        section_path=("연결포괄손익계산서",),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    evidence = _evidence(
+        [
+            _group("standalone", standalone),
+            _group("note", note),
+            _group("income", income),
+        ],
+        question="테스트회사 2025년 1분기 연결 매출액",
+        year=2025,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "매출액",
+            "basis": "consolidated",
+            "lexical_query": "연결 매출액",
+        }
+    )
+    plan["period"]["quarter"] = 1
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("p:ch_income",)
+    assert "periodic_metric_row_preferred" in selected.warnings
+    assert "p:ch_standalone" in selected.excluded_chunk_ids
+    assert "p:ch_note" in selected.excluded_chunk_ids

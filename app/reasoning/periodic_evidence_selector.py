@@ -18,6 +18,12 @@ from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactSource,
 )
+from app.reasoning.periodic_metric_view import (
+    has_exact_metric_row,
+    is_income_statement_section,
+    source_chunk_view,
+)
+from app.reasoning.router import _chunk_basis_classification
 
 
 DEFAULT_MAX_PERIODIC_EVIDENCE = 3
@@ -38,6 +44,24 @@ _QUERY_STOPWORDS = {
     "반기보고서",
     "사업보고서",
 }
+_BASIS_STOPWORDS = {
+    "연결",
+    "별도",
+    "개별",
+    "연결기준",
+    "별도기준",
+    "연결재무제표",
+    "별도재무제표",
+    "연결실적",
+    "별도실적",
+}
+_BASIS_SCORE = {
+    "match": 10.0,
+    "mixed": 4.0,
+    "opposite": -12.0,
+}
+_EXACT_METRIC_ROW_BOOST = 20.0
+_INCOME_STATEMENT_BOOST = 12.0
 _TABLE_METRIC_TERMS = {
     "가동률",
     "금액",
@@ -164,7 +188,28 @@ def select_periodic_evidence(
             for score, rank, chunk_id, fact, source in candidates
         ]
         candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
-    selected_rows = candidates[:max_evidence]
+    metric = str(plan.get("metric") or "").strip()
+    if _is_statement_metric_query(plan, signals):
+        exact_rows = [
+            row
+            for row in candidates
+            if has_exact_metric_row(row[4].fact_text, metric)
+        ]
+        if exact_rows:
+            income_rows = [
+                row
+                for row in exact_rows
+                if is_income_statement_section(row[4].section_path)
+            ]
+            candidates = income_rows or exact_rows
+            selected_rows = candidates[:1]
+            warnings_seed = ["periodic_metric_row_preferred"]
+        else:
+            selected_rows = candidates[:max_evidence]
+            warnings_seed = []
+    else:
+        selected_rows = candidates[:max_evidence]
+        warnings_seed = []
     selected_ids = tuple(row[4].chunk_id for row in selected_rows)
     selected_set = set(selected_ids)
     excluded_ids = tuple(
@@ -182,7 +227,7 @@ def select_periodic_evidence(
         key=lambda fact: min(source.retrieval_rank for source in fact.sources)
     )
 
-    warnings = []
+    warnings = list(warnings_seed)
     if excluded_ids:
         warnings.append("irrelevant_periodic_evidence_excluded")
     if len(candidates) > max_evidence:
@@ -296,6 +341,20 @@ def _source_relevance(
     )
     if any(term in text_tokens for term in core_terms):
         score += 1.0
+    if metric and has_exact_metric_row(source.fact_text, metric):
+        score += _EXACT_METRIC_ROW_BOOST
+    if is_income_statement_section(source.section_path):
+        score += _INCOME_STATEMENT_BOOST
+    requested_basis = str(plan.get("basis") or "").strip()
+    classification = _chunk_basis_classification(source_chunk_view(source))
+    if requested_basis in {"consolidated", "standalone"}:
+        if classification == requested_basis:
+            score += _BASIS_SCORE["match"]
+        elif classification == "mixed":
+            score += _BASIS_SCORE["mixed"]
+        elif classification in {"consolidated", "standalone"}:
+            score += _BASIS_SCORE["opposite"]
+            eligible = False
     return score, eligible
 
 
@@ -342,6 +401,7 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
             and _normalize(token) not in companies
             and _normalize(token) not in metric_norms
             and token not in _QUERY_STOPWORDS
+            and _normalize(token) not in _BASIS_STOPWORDS
             and not _PERIOD_TOKEN.fullmatch(token)
         )
     )
@@ -352,6 +412,7 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
             len(normalized) < 2
             or normalized in companies
             or token in _QUERY_STOPWORDS
+            or normalized in _BASIS_STOPWORDS
             or _PERIOD_TOKEN.fullmatch(token)
         ):
             continue
@@ -363,6 +424,26 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
         "focus_phrase": " ".join(focus_terms),
         "table_metrics": table_metrics,
     }
+
+
+def _is_statement_metric_query(
+    plan: Mapping[str, Any], signals: Mapping[str, Any]
+) -> bool:
+    """True when the question names one statement line, a period, and 연결/별도."""
+
+    metric = str(plan.get("metric") or "").strip()
+    basis = str(plan.get("basis") or "").strip()
+    if not metric or basis not in {"consolidated", "standalone"}:
+        return False
+    if not _explicit_period(plan):
+        return False
+    if signals.get("focus_terms"):
+        return False
+    metric_norm = _normalize(metric)
+    table_metrics = tuple(signals.get("table_metrics") or ())
+    if not table_metrics:
+        return False
+    return all(_normalize(term) == metric_norm for term in table_metrics)
 
 
 def _is_fiscal_year_query(plan: Mapping[str, Any]) -> bool:

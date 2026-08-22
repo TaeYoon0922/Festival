@@ -344,6 +344,54 @@ class AnswerGeneratorTests(unittest.TestCase):
         self.assertIn("답변 신뢰도: 중간", medium.answer_text)
         self.assertIn("추가 확인이 필요합니다", low.answer_text)
 
+    def test_periodic_renderer_keeps_named_metric_row_and_basis(self):
+        table = (
+            "| 열 1 | 제 58 기 1분기 / 3개월 | 제 57 기 1분기 / 3개월 |\n"
+            "| --- | --- | --- |\n"
+            "| 매출액 | 44,407,761 | 40,658,539 |\n"
+            "| 매출원가 | 35,428,253 | 32,230,756 |\n"
+            "| 보통주기본주당이익(손실) (단위 : 원) | 12,076 | 12,287 |\n"
+        )
+        item = _periodic_item(
+            "p:ch_income",
+            "p",
+            rank=1,
+            text=table,
+            year=2025,
+            quarter=1,
+            section_path=("연결포괄손익계산서",),
+            statement_scope="연결",
+            temporal_match=True,
+        )
+        evidence = _periodic_evidence(
+            [_periodic_group("g-income", item, group_type="document_evidence")],
+            question="테스트회사 2025년 1분기 연결 매출액",
+            year=2025,
+            task_type="financial_metric",
+        )
+        plan = copy.deepcopy(dict(evidence.query_plan))
+        plan.update(
+            {
+                "metric": "매출액",
+                "basis": "consolidated",
+                "lexical_query": "연결 매출액",
+            }
+        )
+        plan["period"]["quarter"] = 1
+        evidence = replace(evidence, query_plan=plan)
+        generated = generate_answer(
+            compose_periodic_answer(
+                resolve_periodic_facts(evidence, query_plan=plan), evidence
+            )
+        )
+
+        self.assertIn("44,407,761", generated.answer_text)
+        self.assertIn("매출액", generated.answer_text)
+        self.assertIn("재무제표 기준: 연결", generated.answer_text)
+        self.assertNotIn("매출원가", generated.answer_text)
+        self.assertNotIn("12,076", generated.answer_text)
+        self.assertNotIn("unsupported_periodic_claim_removed", " ".join(generated.warnings))
+
 
 if __name__ == "__main__":
     unittest.main()
