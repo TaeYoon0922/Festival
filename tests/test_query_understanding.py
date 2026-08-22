@@ -1,6 +1,7 @@
 import inspect
 import unittest
 
+from app.agent.task_router import route_task
 from app.reasoning import (
     QueryExecutor,
     QueryPeriod,
@@ -397,6 +398,53 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(holding.period.period_type, "latest_holding")
         self.assertEqual(event.period.period_type, "latest_event")
         self.assertIsNone(financial.backend_filters()["year"])
+
+    def test_facility_investment_with_cash_on_hand_stays_an_exchange_event(self) -> None:
+        understanding = QueryUnderstanding(
+            {
+                "고려아연": {"고려아연"},
+                "엘에스일렉트릭": {"엘에스일렉트릭"},
+                "LS ELECTRIC": {"엘에스일렉트릭"},
+                "삼성전자": {"삼성전자"},
+            }
+        )
+        queries = (
+            "고려아연이 최근 공시한 신규시설투자 금액은 자기자본 대비 어느 정도 수준이며, "
+            "현재 보유 중인 현금성 자산으로 자체 조달이 가능한가요?",
+            "엘에스일렉트릭이 최근 공시한 신규시설투자 금액은 자기자본 대비 비율이며 "
+            "현재 보유 중인 현금성 자산으로 자체 조달이 가능한가",
+            "삼성전자 최근 공시 시설투자 금액과 자기자본 대비 수준",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                plan = understanding.understand(query)
+                route = QueryRouter().route(plan)
+                decision = route_task(query, plan)
+
+                self.assertEqual(plan.task_type, "corporate_event")
+                self.assertEqual(plan.event_type, "facility_investment")
+                self.assertIsNone(plan.metric)
+                self.assertEqual(plan.disclosure_route, ("exchange",))
+                self.assertEqual(plan.doc_subtype, "신규시설투자등")
+                self.assertEqual(plan.period.period_type, "latest_event")
+                self.assertIsNone(plan.comparison)
+                self.assertEqual(route.hard_routes["doc_group"], "exchange")
+                self.assertEqual(route.hard_routes["event_type"], "facility_investment")
+                self.assertEqual(route.soft_boosts.get("doc_subtype"), "신규시설투자등")
+                self.assertNotIn("doc_subtype", route.hard_routes)
+                self.assertEqual(decision.task_type, "corporate_event")
+                self.assertIsNone(decision.resolver_type)
+
+    def test_share_holding_questions_are_not_reclassified_as_facility_investment(
+        self,
+    ) -> None:
+        plan = QueryUnderstanding({"파마리서치": {"파마리서치"}}).understand(
+            "파마리서치 국민연금 2022년 12월 5일 현재 보유 비율"
+        )
+        self.assertEqual(plan.task_type, "holding_change")
+        self.assertEqual(plan.disclosure_route, ("holding",))
+        self.assertIsNone(plan.event_type)
+        self.assertIsNone(plan.doc_subtype)
 
 
 class QueryRouterTests(unittest.TestCase):
