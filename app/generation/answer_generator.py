@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.answer_composer import AnswerDraft
+from app.reasoning.periodic_metric_view import project_periodic_metric_table
 
 
 @dataclass(frozen=True)
@@ -740,6 +741,8 @@ def _periodic_sections(
         fact = answer_section.content.get("fact")
         if not isinstance(fact, Mapping):
             continue
+        request = answer_section.content.get("request")
+        request = dict(request) if isinstance(request, Mapping) else {}
         facts_seen += 1
         lines = ["확인된 사업 또는 공시 내용:"]
         metadata_lines: list[str] = []
@@ -759,7 +762,7 @@ def _periodic_sections(
                     supported = False
                     continue
                 marker = " ".join(source_ids)
-                source_lines = _periodic_source_lines(source, marker)
+                source_lines = _periodic_source_lines(source, marker, request=request)
                 if not source_lines:
                     lines.append("확인되지 않은 정보가 있습니다.")
                     warnings.append(
@@ -768,7 +771,7 @@ def _periodic_sections(
                     supported = False
                     continue
                 metadata_lines.extend(
-                    _periodic_source_metadata(source, source_index)
+                    _periodic_source_metadata(source, source_index, request=request)
                 )
                 lines.extend(source_lines)
                 citation_ids.extend(source_ids)
@@ -777,7 +780,9 @@ def _periodic_sections(
                 _string_list(fact.get("evidence_chunk_ids"))
                 or answer_section.supporting_evidence_ids
             )
-            fallback_lines = _periodic_fact_fallback_lines(fact, fallback_ids)
+            fallback_lines = _periodic_fact_fallback_lines(
+                fact, fallback_ids, request=request
+            )
             if fallback_lines:
                 metadata_lines.extend(_periodic_fact_fallback_metadata(fact))
                 lines.extend(fallback_lines)
@@ -826,13 +831,25 @@ def _periodic_sections(
     return output, warnings, bool(facts_seen) and supported
 
 
-def _periodic_source_lines(source: Mapping[str, Any], marker: str) -> list[str]:
+def _periodic_source_lines(
+    source: Mapping[str, Any],
+    marker: str,
+    *,
+    request: Mapping[str, Any] | None = None,
+) -> list[str]:
     fact_text = _text(source.get("fact_text"))
-    return [f"내용: {fact_text} {marker}"] if fact_text else []
+    if not fact_text:
+        return []
+    metric = _text((request or {}).get("metric"))
+    display = project_periodic_metric_table(fact_text, metric=metric) or fact_text
+    return [f"내용: {display} {marker}"]
 
 
 def _periodic_source_metadata(
-    source: Mapping[str, Any], source_index: int
+    source: Mapping[str, Any],
+    source_index: int,
+    *,
+    request: Mapping[str, Any] | None = None,
 ) -> list[str]:
     lines = []
     period = source.get("reporting_period")
@@ -842,17 +859,43 @@ def _periodic_source_metadata(
     report_name = _text(source.get("report_name"))
     if report_name:
         lines.append(f"근거 {source_index} 보고서: {report_name}")
+    basis_label = _basis_label(request, source)
+    if basis_label:
+        lines.append(f"근거 {source_index} 재무제표 기준: {basis_label}")
     return lines
 
 
+def _basis_label(
+    request: Mapping[str, Any] | None, source: Mapping[str, Any]
+) -> str | None:
+    requested = _text((request or {}).get("basis"))
+    if requested == "consolidated":
+        return "연결"
+    if requested == "standalone":
+        return "별도"
+    section = " ".join(str(part) for part in (source.get("section_path") or []) if part)
+    if "연결" in section:
+        return "연결"
+    if "별도" in section or "개별" in section:
+        return "별도"
+    return None
+
+
 def _periodic_fact_fallback_lines(
-    fact: Mapping[str, Any], citation_ids: Sequence[str]
+    fact: Mapping[str, Any],
+    citation_ids: Sequence[str],
+    *,
+    request: Mapping[str, Any] | None = None,
 ) -> list[str]:
     if not citation_ids:
         return []
     marker = " ".join(citation_ids)
     fact_text = _text(fact.get("fact_text"))
-    return [f"내용: {fact_text} {marker}"] if fact_text else []
+    if not fact_text:
+        return []
+    metric = _text((request or {}).get("metric"))
+    display = project_periodic_metric_table(fact_text, metric=metric) or fact_text
+    return [f"내용: {display} {marker}"]
 
 
 def _periodic_fact_fallback_metadata(fact: Mapping[str, Any]) -> list[str]:

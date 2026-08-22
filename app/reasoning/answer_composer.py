@@ -170,13 +170,14 @@ def compose_periodic_answer(
 ) -> AnswerDraft:
     evidence_by_id = _evidence_by_id(evidence_set)
     citation_builder = _CitationBuilder(evidence_by_id)
+    request = _periodic_request(evidence_set.query_plan)
     sections: list[AnswerSection] = []
     for index, fact in enumerate(resolution.facts, start=1):
         citation_builder.add_periodic_fact(index, fact)
         sections.append(
             AnswerSection(
                 title=f"Periodic fact {index}",
-                content=_periodic_fact_content(fact),
+                content=_periodic_fact_content(fact, request=request),
                 supporting_evidence_ids=fact.evidence_chunk_ids,
             )
         )
@@ -270,8 +271,10 @@ def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:
     }
 
 
-def _periodic_fact_content(fact: PeriodicFact) -> dict[str, Any]:
-    return {
+def _periodic_fact_content(
+    fact: PeriodicFact, *, request: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    content = {
         "fact": {
             "corp_name": fact.corp_name,
             "fact_type": fact.fact_type,
@@ -294,6 +297,19 @@ def _periodic_fact_content(fact: PeriodicFact) -> dict[str, Any]:
             "confidence": copy.deepcopy(dict(fact.confidence)),
             "evidence_chunk_ids": list(fact.evidence_chunk_ids),
         }
+    }
+    if request:
+        content["request"] = copy.deepcopy(dict(request))
+    return content
+
+
+def _periodic_request(query_plan: Mapping[str, Any] | None) -> dict[str, Any]:
+    plan = dict(query_plan or {})
+    period = plan.get("period")
+    return {
+        "metric": plan.get("metric"),
+        "basis": plan.get("basis"),
+        "period": copy.deepcopy(dict(period)) if isinstance(period, Mapping) else {},
     }
 
 
