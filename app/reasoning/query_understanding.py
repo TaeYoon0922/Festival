@@ -34,6 +34,9 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("contract_termination", ("계약해지", "공급계약해지"), "exchange"),
     ("facility_investment", ("시설투자", "신규시설투자"), "exchange"),
 )
+_EVENT_DOC_SUBTYPES = {
+    "facility_investment": "신규시설투자등",
+}
 
 _SECTION_BOOSTS: dict[str, dict[str, float]] = {
     "매출액": {
@@ -213,13 +216,17 @@ class QueryUnderstanding:
         comparison = _comparison_from_query(raw_query, companies, mentioned_years)
 
         subtype = extracted["doc_subtype"]
+        if not subtype:
+            subtype = _EVENT_DOC_SUBTYPES.get(event_type or "")
         if subtype:
             explicit_report = any(
                 term in re.sub(r"\s+", "", raw_query)
                 for term in ("분기보고서", "반기보고서", "사업보고서")
             )
             route_confidence["doc_subtype"] = 0.99 if explicit_report else 0.90
-            route_evidence["doc_subtype"] = extracted["doc_subtype_evidence"]
+            route_evidence["doc_subtype"] = (
+                extracted["doc_subtype_evidence"] or event_evidence
+            )
         if basis != "unspecified":
             route_confidence["basis"] = 0.99
             route_evidence["basis"] = basis_evidence

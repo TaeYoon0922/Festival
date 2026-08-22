@@ -53,8 +53,9 @@ class RRFTests(unittest.TestCase):
 
 
 class FakeHybridBackend:
-    def __init__(self, *, vector_mode: str = "ok") -> None:
+    def __init__(self, *, vector_mode: str = "ok", lexical_mode: str = "ok") -> None:
         self.vector_mode = vector_mode
+        self.lexical_mode = lexical_mode
         self.document_filters = None
         self.vector_candidate_ids = None
         self.documents = [
@@ -94,6 +95,8 @@ class FakeHybridBackend:
         return self.chunks
 
     def retrieve(self, _query, candidates, *, top_k=None):
+        if self.lexical_mode == "empty":
+            return []
         by_id = {candidate.chunk_id: candidate for candidate in candidates}
         return [
             RetrievalResult(
@@ -268,6 +271,35 @@ class HybridExecutorTests(unittest.TestCase):
         self.assertEqual(execution.vector_coverage["embedded_count"], 0)
         self.assertIsNone(backend.vector_candidate_ids)
         self.assertEqual([item.chunk_id for item in execution.results], ["lex"])
+
+    def test_empty_lexical_and_vector_keep_filtered_candidate_chunks(self) -> None:
+        backend = FakeHybridBackend(vector_mode="empty", lexical_mode="empty")
+        backend.existing_embedding_chunk_ids = lambda *_args, **_kwargs: set()
+        execution = self.executor(backend).execute(
+            QueryPlan(
+                query="시설투자 금액 자기자본 대비 현금성 자산 조달",
+                top_k=10,
+            )
+        )
+
+        self.assertTrue(execution.results)
+        self.assertEqual(
+            {item.chunk_id for item in execution.results},
+            {"lex", "vec"},
+        )
+        self.assertEqual(
+            execution.results[0].metadata_match["hybrid"]["fallback"],
+            "filtered_candidates",
+        )
+
+    def test_empty_lexical_still_uses_vector_hits(self) -> None:
+        backend = FakeHybridBackend(lexical_mode="empty")
+        execution = self.executor(backend).execute(QueryPlan(query="revenue", top_k=10))
+        self.assertEqual([item.chunk_id for item in execution.results], ["vec"])
+        self.assertNotEqual(
+            execution.results[0].metadata_match.get("hybrid", {}).get("fallback"),
+            "filtered_candidates",
+        )
 
     def test_vector_error_can_be_strict(self) -> None:
         backend = FakeHybridBackend(vector_mode="error")

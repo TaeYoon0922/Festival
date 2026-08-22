@@ -287,6 +287,18 @@ class HybridQueryExecutor:
                 document_metadata,
                 top_k=min(plan.top_k, self.config.final_top_k),
             )
+        if not final_results and chunks:
+            final_results = self._filtered_candidate_fallback(
+                chunks,
+                route,
+                document_metadata,
+                top_k=min(plan.top_k, self.config.final_top_k),
+            )
+            vector_status = (
+                vector_status
+                if vector_status not in {"ok", "empty"}
+                else "filtered_candidates"
+            )
         routing = {
             **route.to_dict(),
             "hybrid": {
@@ -361,6 +373,58 @@ class HybridQueryExecutor:
                 else 0.0
             ),
         }
+
+    def _filtered_candidate_fallback(
+        self,
+        chunks: Sequence[CandidateChunk],
+        route: Any,
+        document_metadata: Mapping[str, Mapping[str, Any]],
+        *,
+        top_k: int,
+    ) -> list[RetrievalResult]:
+        """Keep metadata-filtered chunks when FTS and vector both miss.
+
+        PostgreSQL ``websearch_to_tsquery`` ANDs every token. A compound
+        question can therefore score zero against the already-correct event
+        document. Returning nothing in that case throws away evidence the
+        router already isolated.
+        """
+
+        synthetic = [
+            RetrievalResult(
+                chunk_id=chunk.chunk_id,
+                doc_id=chunk.doc_id,
+                bm25_score=0.0,
+                rank=index,
+                metadata_match=chunk.metadata_match.to_dict(),
+            )
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+        reranked = self.router.rerank(
+            synthetic,
+            route,
+            chunks=chunks,
+            document_metadata=document_metadata,
+            top_k=top_k,
+        )
+        output: list[RetrievalResult] = []
+        for result in reranked:
+            match = dict(result.metadata_match)
+            match["hybrid"] = {
+                **dict(match.get("hybrid") or {}),
+                "fallback": "filtered_candidates",
+                "final_rank": result.rank,
+            }
+            output.append(
+                RetrievalResult(
+                    chunk_id=result.chunk_id,
+                    doc_id=result.doc_id,
+                    bm25_score=result.bm25_score,
+                    rank=result.rank,
+                    metadata_match=match,
+                )
+            )
+        return output
 
     def _hybrid_rerank(
         self,

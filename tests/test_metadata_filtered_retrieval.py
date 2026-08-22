@@ -30,6 +30,39 @@ class MetadataFilterExtractionTests(unittest.TestCase):
         self.assertEqual(result["doc_group"], "exchange")
         self.assertEqual(result["doc_subtype"], "신규시설투자등")
 
+    def test_facility_investment_with_cash_on_hand_is_not_holding(self) -> None:
+        companies = {
+            **self.companies,
+            "고려아연": {"고려아연"},
+        }
+        queries = (
+            "고려아연이 최근 공시한 신규시설투자 금액은 자기자본 대비 어느 정도 수준이며, "
+            "현재 보유 중인 현금성 자산으로 자체 조달이 가능한가요?",
+            "LS ELECTRIC 최근 공시한 시설투자 금액은 자기자본 대비 비율이며 "
+            "현재 보유 중인 현금성 자산으로 자체 조달이 가능한가",
+            "삼성전자 최근 공시 신규시설투자 금액과 자기자본 대비",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                result = extract_metadata_filters(query, companies)
+                self.assertEqual(result["doc_group"], "exchange")
+                self.assertEqual(result["doc_subtype"], "신규시설투자등")
+
+    def test_current_share_holding_is_still_holding(self) -> None:
+        result = extract_metadata_filters(
+            "파마리서치 국민연금 2022년 12월 5일 현재 보유 비율",
+            {**self.companies, "파마리서치": {"파마리서치"}},
+        )
+        self.assertEqual(result["doc_group"], "holding")
+        self.assertIsNone(result["doc_subtype"])
+
+    def test_cash_on_hand_alone_is_not_a_holding_disclosure(self) -> None:
+        result = extract_metadata_filters(
+            "삼성전자가 현재 보유 중인 현금성 자산", self.companies
+        )
+        self.assertNotEqual(result["doc_group"], "holding")
+        self.assertIsNone(result["doc_subtype"])
+
     def test_all_explicit_company_mentions_are_or_candidates(self) -> None:
         result = extract_metadata_filters(
             "에스엠 하이브 보유주식 수와 비율", self.companies

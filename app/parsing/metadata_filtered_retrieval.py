@@ -65,10 +65,6 @@ def _doc_group_from_query(query: str) -> tuple[str | None, str | None]:
     )
     if periodic_term:
         return "periodic", periodic_term
-    if "보유" in compact and any(
-        term in compact for term in ("주식", "수량", "비율", "증감", "증가", "감소")
-    ):
-        return "holding", "보유+주식/수량/비율/증감"
     if all(term in compact for term in ("풋옵션", "주식", "수량")):
         return "holding", "풋옵션+주식+수량"
     rules = (
@@ -79,7 +75,6 @@ def _doc_group_from_query(query: str) -> tuple[str | None, str | None]:
                 "보유수량",
                 "보유수와비율",
                 "보유비율",
-                "현재보유",
                 "증감주식",
                 "증감수량",
                 "증가주식수",
@@ -109,6 +104,12 @@ def _doc_group_from_query(query: str) -> tuple[str | None, str | None]:
         matched = next((term for term in terms if term in compact), None)
         if matched:
             return group, matched
+    # Weak share-holding collocation. Checked after explicit event terms so
+    # "시설투자 ... 현재 보유 중인 현금성 자산" is not stolen by incidental 보유.
+    if "보유" in compact and any(
+        term in compact for term in ("주식", "수량", "비율", "증감", "증가", "감소")
+    ):
+        return "holding", "보유+주식/수량/비율/증감"
     return None, None
 
 
