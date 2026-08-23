@@ -27,7 +27,7 @@ from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 
 MAX_GENERAL_EVIDENCE = 3
-MAX_GENERAL_EVIDENCE_TEXT_CHARS = 1000
+MAX_GENERAL_EVIDENCE_TEXT_CHARS = 600
 
 
 @dataclass(frozen=True)

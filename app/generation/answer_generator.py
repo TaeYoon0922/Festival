@@ -78,6 +78,8 @@ class CitationAwareAnswerGenerator:
 
 AnswerGenerator = CitationAwareAnswerGenerator
 
+MAX_PERIODIC_DISPLAY_CHARS = 600
+
 
 def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
     registry = _CitationRegistry(draft)
@@ -851,6 +853,7 @@ def _periodic_source_lines(
         )
         or fact_text
     )
+    display = _bounded_periodic_display(display)
     return [f"내용: {display} {marker}"]
 
 
@@ -913,6 +916,7 @@ def _periodic_fact_fallback_lines(
         )
         or fact_text
     )
+    display = _bounded_periodic_display(display)
     return [f"내용: {display} {marker}"]
 
 
@@ -925,6 +929,13 @@ def _periodic_fact_fallback_metadata(fact: Mapping[str, Any]) -> list[str]:
     for report_name in _string_list(fact.get("report_names")):
         lines.append(f"보고서: {report_name}")
     return lines
+
+
+def _bounded_periodic_display(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) <= MAX_PERIODIC_DISPLAY_CHARS:
+        return text
+    return text[:MAX_PERIODIC_DISPLAY_CHARS].rstrip()
 
 
 def _periodic_alternative_lines(
@@ -1073,10 +1084,13 @@ def _is_periodic_table_header(text: str) -> bool:
     if len(cells) < 2:
         return False
     first = re.sub(r"[^0-9a-z가-힣]+", "", cells[0].casefold())
-    if first not in {"열1", "구분", "계정과목", "과목"}:
+    if first not in {"", "열1", "구분", "계정과목", "과목"}:
         return False
     return any(
-        re.search(r"제\s*\d+\s*기|20\d{2}\s*년|분기|반기|누적|3\s*개월", cell)
+        re.search(
+            r"제\s*\d+\s*(?:\([^)]*\)\s*)?기|20\d{2}\s*년|분기|반기|누적|3\s*개월",
+            cell,
+        )
         for cell in cells[1:]
     )
 

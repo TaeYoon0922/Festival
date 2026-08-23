@@ -25,12 +25,36 @@ _FINANCIAL_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 _FINANCIAL_METRIC_SEARCH_TERMS = {
     "당기순이익": ("분기순이익", "연결분기순이익", "당기순손익", "분기순손익"),
+    "자산총계": ("자산 총계", "자산 총 계", "자 산 총 계"),
+    "부채총계": ("부채 총계", "부채 총 계", "부 채 총 계"),
+    "자본총계": ("자본 총계", "자본 총 계", "자 본 총 계"),
 }
 
 _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("capital_increase", ("유상증자",), "major"),
     ("convertible_bond", ("전환사채",), "major"),
     ("treasury_share_disposal", ("자기주식처분", "자사주처분"), "major"),
+    (
+        "treasury_share_trust_termination",
+        (
+            "자기주식취득신탁계약해지",
+            "자기주식 취득 신탁계약 해지",
+            "신탁계약해지",
+            "신탁계약 해지",
+        ),
+        "major",
+    ),
+    (
+        "write_down_contingent_capital_security",
+        (
+            "상각형조건부자본증권",
+            "상각형 조건부자본증권",
+            "조건부자본증권",
+            "자본증권발행",
+            "자본증권 발행",
+        ),
+        "major",
+    ),
     ("spin_off", ("회사분할", "분할신설", "분할비율"), "major"),
     ("merger", ("합병", "흡수합병"), "major"),
     ("supply_contract", ("단일판매", "공급계약", "수주계약"), "exchange"),
@@ -39,6 +63,16 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 )
 _EVENT_DOC_SUBTYPES = {
     "facility_investment": "신규시설투자등",
+}
+_EVENT_SECTION_BOOSTS: dict[str, dict[str, float]] = {
+    "treasury_share_trust_termination": {
+        "자기주식취득 신탁계약 해지 결정": 1.0,
+        "자기주식취득신탁계약해지결정": 1.0,
+    },
+    "write_down_contingent_capital_security": {
+        "상각형 조건부자본증권 발행결정": 1.0,
+        "상각형조건부자본증권발행결정": 1.0,
+    },
 }
 
 _SECTION_BOOSTS: dict[str, dict[str, float]] = {
@@ -63,9 +97,24 @@ _SECTION_BOOSTS: dict[str, dict[str, float]] = {
         "당기순이익": 0.95,
         "당기순손익": 0.95,
     },
-    "자산총계": {"재무상태표": 1.0, "자산총계": 0.95},
-    "부채총계": {"재무상태표": 1.0, "부채총계": 0.95},
-    "자본총계": {"재무상태표": 1.0, "자본총계": 0.95},
+    "자산총계": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "자산총계": 0.95,
+    },
+    "부채총계": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "부채총계": 0.95,
+    },
+    "자본총계": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "자본총계": 0.95,
+    },
     "주당순이익": {
         "주당이익": 1.0,
         "포괄손익계산서": 0.85,
@@ -182,12 +231,12 @@ class QueryUnderstanding:
         if holding_metric:
             task_type = "holding_change"
             metric = holding_metric
-        elif financial_metric:
-            task_type = "financial_metric"
-            metric = financial_metric
         elif event_type:
             task_type = "corporate_event"
             metric = None
+        elif financial_metric:
+            task_type = "financial_metric"
+            metric = financial_metric
         else:
             task_type = "disclosure_lookup"
             metric = None
@@ -283,7 +332,7 @@ class QueryUnderstanding:
             comparison=comparison,
             doc_subtype=subtype,
             section_path=section_path,
-            section_boosts=_section_boosts(metric, periodic_intent),
+            section_boosts=_section_boosts(metric, periodic_intent, event_type),
             route_confidence=route_confidence,
             route_evidence=route_evidence,
             top_k=top_k,
@@ -363,12 +412,14 @@ def _periodic_intent_allowed(
 
 
 def _section_boosts(
-    metric: str | None, periodic_intent: str | None
+    metric: str | None, periodic_intent: str | None, event_type: str | None = None
 ) -> dict[str, float]:
     merged = dict(_SECTION_BOOSTS.get(metric or "", {}))
     for section, weight in _PERIODIC_SECTION_BOOSTS.get(
         periodic_intent or "", {}
     ).items():
+        merged[section] = max(merged.get(section, 0.0), weight)
+    for section, weight in _EVENT_SECTION_BOOSTS.get(event_type or "", {}).items():
         merged[section] = max(merged.get(section, 0.0), weight)
     return merged
 

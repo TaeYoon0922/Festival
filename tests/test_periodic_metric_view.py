@@ -24,6 +24,49 @@ def test_project_keeps_exact_metric_row_only() -> None:
     assert has_exact_metric_row(_TABLE, "매출액")
 
 
+def test_project_treats_operating_revenue_as_sales_metric() -> None:
+    table = """\
+| 열 1 | 제 27 기 1분기 / 3개월 | 제 26 기 1분기 / 3개월 |
+| --- | --- | --- |
+| 영업수익 (주5) | 2,786,783,351,907 | 2,526,055,415,876 |
+| 영업비용 | (2,281,482,017,970) | (2,086,762,309,546) |
+"""
+
+    projected = project_periodic_metric_table(
+        table,
+        metric="매출액",
+        period={"year": 2025, "quarter": 1, "period_type": "fiscal_quarter"},
+    )
+
+    assert projected is not None
+    assert "영업수익" in projected
+    assert "2,786,783,351,907" in projected
+    assert "영업비용" not in projected
+
+
+def test_project_treats_spaced_balance_sheet_label_as_exact_metric() -> None:
+    table = """\
+| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |
+| --- | --- | --- |
+| 유 동 자 산 | 227,062,134 | 195,936,557 |
+| 자 산 총 계 | 514,531,948 | 455,905,980 |
+| 부 채 총 계 | 121,721,227 | 92,228,115 |
+"""
+
+    projected = project_periodic_metric_table(
+        table,
+        metric="자산총계",
+        period={"year": 2024, "period_type": "fiscal_year"},
+    )
+
+    assert projected is not None
+    assert "자 산 총 계" in projected
+    assert "514,531,948" in projected
+    assert "455,905,980" not in projected
+    assert "유 동 자 산" not in projected
+    assert "부 채 총 계" not in projected
+
+
 def test_project_keeps_requested_current_period_columns_only() -> None:
     table = """\
 | 열 1 | 제 58 기 1분기 / 3개월 | 제 58 기 1분기 / 누적 | 제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |

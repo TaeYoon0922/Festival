@@ -18,6 +18,15 @@ _EVENT_DOCUMENT_TERMS: dict[str, tuple[str, ...]] = {
     "capital_increase": ("유상증자",),
     "convertible_bond": ("전환사채",),
     "treasury_share_disposal": ("자기주식처분", "자사주처분"),
+    "treasury_share_trust_termination": (
+        "자기주식취득신탁계약해지",
+        "신탁계약해지",
+    ),
+    "write_down_contingent_capital_security": (
+        "상각형조건부자본증권발행",
+        "상각형조건부자본증권",
+        "조건부자본증권발행",
+    ),
     "spin_off": ("회사분할", "분할신설"),
     "merger": ("회사합병", "흡수합병"),
     "supply_contract": ("단일판매공급계약", "공급계약", "수주계약"),
@@ -522,11 +531,22 @@ def _exact_term_score(query: str, chunk: Mapping[str, Any]) -> float:
 
 
 def _section_score(boosts: Mapping[str, float], chunk: Mapping[str, Any]) -> float:
-    section = _normalized(_section_text(chunk))
+    section_text = _section_text(chunk)
+    section = _normalized(section_text)
+    compact_section = _compact_alnum(section_text)
     return max(
-        (weight for term, weight in boosts.items() if _normalized(term) in section),
+        (
+            weight
+            for term, weight in boosts.items()
+            if _normalized(term) in section
+            or _compact_alnum(term) in compact_section
+        ),
         default=0.0,
     )
+
+
+def _compact_alnum(value: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
 
 
 def _metadata_score(

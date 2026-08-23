@@ -70,6 +70,7 @@ _TABLE_METRIC_TERMS = {
     "가동률",
     "금액",
     "당기순이익",
+    "부채총계",
     "매출",
     "매출액",
     "생산능력",
@@ -80,6 +81,8 @@ _TABLE_METRIC_TERMS = {
     "수주잔고",
     "순이익",
     "영업이익",
+    "자본총계",
+    "자산총계",
     "주식수",
     "판매량",
     "평균가동률",
@@ -473,9 +476,10 @@ def _is_statement_metric_query(
         return False
     if not (_explicit_period(plan) or _is_period_comparison(plan)):
         return False
-    if signals.get("focus_terms"):
-        return False
     metric_norm = _normalize(metric)
+    focus_norm = _normalize(signals.get("focus_phrase") or "")
+    if signals.get("focus_terms") and focus_norm != metric_norm:
+        return False
     table_metrics = tuple(signals.get("table_metrics") or ())
     if not table_metrics:
         return False

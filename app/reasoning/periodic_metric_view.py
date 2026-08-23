@@ -20,6 +20,11 @@ _INCOME_STATEMENT_MARKERS = (
 )
 _TABLE_SEP = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _METRIC_LABEL_ALIASES = {
+    "매출액": {
+        "매출액",
+        "매출",
+        "영업수익",
+    },
     "당기순이익": {
         "당기순이익",
         "당기순이익손실",
@@ -33,6 +38,24 @@ _METRIC_LABEL_ALIASES = {
         "연결당기순이익",
         "연결당기순이익손실",
         "연결당기순손익",
+    },
+    "자산총계": {
+        "자산총계",
+        "자산총액",
+        "자산계",
+        "총자산",
+    },
+    "부채총계": {
+        "부채총계",
+        "부채총액",
+        "부채계",
+        "총부채",
+    },
+    "자본총계": {
+        "자본총계",
+        "자본총액",
+        "자본계",
+        "총자본",
     },
 }
 
@@ -190,7 +213,7 @@ def _max_fiscal_term(cells: Sequence[str]) -> int | None:
 
 
 def _fiscal_term(value: str) -> int | None:
-    match = re.search(r"제\s*(\d+)\s*기", str(value or ""))
+    match = re.search(r"제\s*(\d+)\s*(?:\([^)]*\)\s*)?기", str(value or ""))
     return int(match.group(1)) if match else None
 
 
