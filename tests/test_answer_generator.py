@@ -234,6 +234,13 @@ class AnswerGeneratorTests(unittest.TestCase):
             any(value.startswith("unsupported_periodic_claim_removed") for value in warnings)
         )
 
+    def test_periodic_projected_table_header_is_not_a_standalone_claim(self):
+        header = "내용: | 열 1 | 제 58 기 1분기 / 누적 |"
+        row = "| 매출액 | 44,407,761 | [1]"
+
+        self.assertIsNone(_periodic_claim_payload(header))
+        self.assertEqual(_periodic_claim_payload(row), "| 매출액 | 44,407,761 |")
+
     def test_periodic_conflict_alternatives_are_preserved(self):
         first = _periodic_item(
             "p1:ch_a", "p1", rank=1, text="제품 수는 10개", year=2024

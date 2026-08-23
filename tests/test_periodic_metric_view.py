@@ -24,6 +24,79 @@ def test_project_keeps_exact_metric_row_only() -> None:
     assert has_exact_metric_row(_TABLE, "매출액")
 
 
+def test_project_keeps_requested_current_period_columns_only() -> None:
+    table = """\
+| 열 1 | 제 58 기 1분기 / 3개월 | 제 58 기 1분기 / 누적 | 제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |
+| --- | --- | --- | --- | --- |
+| 매출액 | 44,407,761 | 44,407,761 | 40,658,539 | 40,658,539 |
+| 매출원가 | 35,428,253 | 35,428,253 | 32,230,756 | 32,230,756 |
+"""
+
+    projected = project_periodic_metric_table(
+        table,
+        metric="매출액",
+        period={"year": 2025, "quarter": 1, "period_type": "fiscal_quarter"},
+    )
+
+    assert projected is not None
+    assert "44,407,761" in projected
+    assert "40,658,539" not in projected
+    assert "제 58 기" in projected
+    assert "제 57 기" not in projected
+    assert "3개월" in projected
+    assert "누적" not in projected
+
+
+def test_project_keeps_cumulative_column_when_requested() -> None:
+    table = """\
+| 열 1 | 제 58 기 1분기 / 3개월 | 제 58 기 1분기 / 누적 | 제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |
+| --- | --- | --- | --- | --- |
+| 매출액 | 44,407,761 | 44,407,761 | 40,658,539 | 40,658,539 |
+"""
+
+    projected = project_periodic_metric_table(
+        table,
+        metric="매출액",
+        period={"year": 2025, "quarter": 1, "period_type": "fiscal_quarter"},
+        raw_query="현대자동차 2025년 1분기 누적 연결 매출액",
+    )
+
+    assert projected is not None
+    assert "누적" in projected
+    assert "3개월" not in projected
+
+
+def test_project_preserves_comparison_period_columns() -> None:
+    projected = project_periodic_metric_table(
+        _TABLE,
+        metric="매출액",
+        period={"year": 2025, "quarter": 1, "period_type": "fiscal_quarter"},
+        comparison={"type": "year_over_year", "years": [2024, 2025]},
+    )
+
+    assert projected is not None
+    assert "44,407,761" in projected
+    assert "40,658,539" in projected
+
+
+def test_project_uses_explicit_year_when_header_has_calendar_years() -> None:
+    table = """\
+| 열 1 | 2025년 1분기 | 2024년 1분기 |
+| --- | --- | --- |
+| 매출액 | 44,407,761 | 40,658,539 |
+"""
+
+    projected = project_periodic_metric_table(
+        table,
+        metric="매출액",
+        period={"year": 2025, "quarter": 1, "period_type": "fiscal_quarter"},
+    )
+
+    assert projected is not None
+    assert "2025년" in projected
+    assert "2024년" not in projected
+
+
 def test_project_treats_footnoted_statement_label_as_exact_metric() -> None:
     table = """\
 | 열 1 | 제 57 기 1분기 / 3개월 | 제 56 기 1분기 / 3개월 |

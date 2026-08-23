@@ -248,6 +248,8 @@ class QueryUnderstanding:
         if basis_span:
             structured_spans.append(basis_span)
         structured_spans.extend(_metadata_term_spans(raw_query, extracted, period.period_type))
+        if task_type == "financial_metric":
+            structured_spans.extend(_period_column_spans(raw_query))
         structured_spans.extend(_correction_spans(raw_query, correction_evidence))
         lexical_query = _normalize_lexical_query(
             raw_query,
@@ -769,6 +771,13 @@ def _metadata_term_spans(
     for term in terms:
         spans.extend(match.span() for match in re.finditer(re.escape(term), query))
     return spans
+
+
+def _period_column_spans(query: str) -> list[tuple[int, int]]:
+    return [
+        match.span()
+        for match in re.finditer(r"누적|누계|3\s*개월", query)
+    ]
 
 
 def _correction_spans(query: str, evidence: str | None) -> list[tuple[int, int]]:

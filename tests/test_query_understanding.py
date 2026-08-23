@@ -390,6 +390,18 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.period.quarter, 3)
         self.assertEqual(plan.lexical_query, "매출액")
 
+    def test_cumulative_period_column_word_is_not_kept_as_search_noise(self) -> None:
+        plan = QueryUnderstanding(self.aliases).understand(
+            "삼성전자 2025년 1분기 누적 연결 매출액"
+        )
+
+        self.assertEqual(plan.metric, "매출액")
+        self.assertEqual(plan.period.year, 2025)
+        self.assertEqual(plan.period.quarter, 1)
+        self.assertEqual(plan.basis, "consolidated")
+        self.assertEqual(plan.lexical_query, "매출액")
+        self.assertIn("누적", plan.raw_query)
+
     def test_multi_year_financial_comparison_keeps_all_explicit_fiscal_years(self) -> None:
         plan = QueryUnderstanding(self.aliases).understand(
             "삼성전자 2022년부터 2024년까지 매출액 추이"

@@ -14,6 +14,9 @@
 
 - `app/reasoning/periodic_metric_view.py`
   - 재무지표 표에서 질문 지표에 해당하는 행만 남기는 공통 projection 로직을 보강했다.
+  - 단일 기간 질문에서는 선택된 보고서의 현재 기수/명시 연도에 해당하는 열만 남긴다.
+  - 분기 질문은 기본적으로 `3개월` 열을 남기고, 질문에 `누적` 또는 `누계`가 있을 때만 누적 열을 남긴다.
+  - 전년동기대비, 기간 비교, 추이 질문에서는 비교 열을 유지한다.
   - `(주26)` 같은 주석 번호 suffix를 제거하고 행 이름을 비교한다.
   - `당기순이익`을 `분기순이익`, `연결분기순이익`, `당기순손익` 등 손익계산서 실제 행 이름과 매칭한다.
 
@@ -26,6 +29,14 @@
 
 - `app/reasoning/query_understanding.py`
   - `당기순이익` 검색어에 `분기순이익`, `연결분기순이익`, `당기순손익`, `분기순손익`을 추가해 실제 손익계산서 chunk recall을 높였다.
+  - `누적`, `누계`, `3개월` 같은 기간 열 선택 단어를 lexical 검색어에서 제거해 주석의 `누적비지배지분` 같은 무관 chunk recall을 줄였다.
+
+- `app/reasoning/answer_composer.py`
+  - 답변 렌더링 단계에서 사용할 수 있도록 정기공시 request에 `comparison` 정보를 포함했다.
+
+- `app/generation/answer_generator.py`
+  - 정기공시 답변 표를 렌더링할 때 metric, period, comparison 정보를 함께 넘겨 행/열 projection을 적용한다.
+  - projection된 표 header/separator 줄은 독립적인 fact claim이 아니므로 citation scope 검증에서 제거하지 않도록 했다.
 
 - `app/agent/orchestrator.py`
   - resolver가 없는 general evidence 경로의 답변 근거를 상위 3개로 제한했다.
@@ -42,7 +53,7 @@
 서버 API에서 다음 케이스를 확인했다.
 
 - `현대자동차 2025년 1분기 연결 매출액`
-  - 연결 손익계산서 `매출액` 행만 선택
+  - 연결 손익계산서 `매출액` 행만 선택하고, 단일 기간 질문에서는 2025년 1분기 `3개월` 열만 표시
 - `현대자동차 2025년 1분기 별도 매출액`
   - 별도 손익계산서 `매출액` 행만 선택
 - `현대자동차 2025년 1분기 매출액과 2024년 1분기 매출액 비교`
@@ -61,6 +72,13 @@ Local:
 ```text
 93 passed, 1 warning, 16 subtests passed
 94 passed, 1 warning, 16 subtests passed
+32 passed, 1 warning
+78 passed, 1 warning, 16 subtests passed
+79 passed, 1 warning, 16 subtests passed
+80 passed, 1 warning, 16 subtests passed
+851 passed, 1 skipped, 1 warning, 500 subtests passed
+81 passed, 1 warning, 16 subtests passed
+852 passed, 1 skipped, 1 warning, 500 subtests passed
 ```
 
 Server:
