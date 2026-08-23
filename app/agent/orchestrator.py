@@ -26,6 +26,10 @@ from app.reasoning.periodic_fact_resolver import (
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 
+MAX_GENERAL_EVIDENCE = 3
+MAX_GENERAL_EVIDENCE_TEXT_CHARS = 1000
+
+
 @dataclass(frozen=True)
 class AgentResult:
     question: str
@@ -190,13 +194,16 @@ def _compose_general_evidence(
         for chunk_id in evidence.retrieval_order
         if chunk_id in item_by_id
     ]
-    evidence_rows = [_general_evidence_row(item) for item in ordered_items]
-    citations = tuple(_general_citation(item) for item in ordered_items)
-    evidence_ids = tuple(item.chunk_id for item in ordered_items)
+    selected_items = ordered_items[:MAX_GENERAL_EVIDENCE]
+    evidence_rows = [_general_evidence_row(item) for item in selected_items]
+    citations = tuple(_general_citation(item) for item in selected_items)
+    evidence_ids = tuple(item.chunk_id for item in selected_items)
     unknown = task_type == "unknown"
-    answerable = bool(ordered_items and citations) and not unknown
+    answerable = bool(selected_items and citations) and not unknown
     warnings = list(evidence.warnings)
     warnings.append("resolver_not_required" if not unknown else "unknown_task")
+    if len(ordered_items) > len(selected_items):
+        warnings.append(f"general_evidence_limited:max={MAX_GENERAL_EVIDENCE}")
     if not answerable:
         warnings.append("answer_not_supported")
     sections = (
@@ -233,15 +240,27 @@ def _compose_general_evidence(
 
 
 def _general_evidence_row(item: EvidenceItem) -> dict[str, Any]:
+    evidence_text, truncated = _bounded_general_evidence_text(item.evidence_text)
     return {
         "chunk_id": item.chunk_id,
         "doc_id": item.doc_id,
         "section_path": list(item.section_path),
-        "evidence_text": item.evidence_text,
+        "evidence_text": evidence_text,
+        "truncated": truncated,
         "retrieval_rank": item.retrieval_rank,
         "retrieval_score": item.retrieval_score,
         "source_refs": copy.deepcopy(list(item.source_refs)),
     }
+
+
+def _bounded_general_evidence_text(value: str) -> tuple[str, bool]:
+    text = str(value or "")
+    if len(text) <= MAX_GENERAL_EVIDENCE_TEXT_CHARS:
+        return text, False
+    return (
+        text[:MAX_GENERAL_EVIDENCE_TEXT_CHARS].rstrip() + "\n[truncated]",
+        True,
+    )
 
 
 def _general_citation(item: EvidenceItem) -> EvidenceCitation:

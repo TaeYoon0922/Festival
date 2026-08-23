@@ -19,13 +19,29 @@ _INCOME_STATEMENT_MARKERS = (
     "연결포괄손익",
 )
 _TABLE_SEP = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
+_METRIC_LABEL_ALIASES = {
+    "당기순이익": {
+        "당기순이익",
+        "당기순이익손실",
+        "당기순손익",
+        "분기순이익",
+        "분기순이익손실",
+        "분기순손익",
+        "연결분기순이익",
+        "연결분기순이익손실",
+        "연결분기순손익",
+        "연결당기순이익",
+        "연결당기순이익손실",
+        "연결당기순손익",
+    },
+}
 
 
 def project_periodic_metric_table(text: str, *, metric: str | None) -> str | None:
     """Return header plus exact metric rows, or None when the table has no such row."""
 
-    label = _normalize(metric)
-    if not label or not str(text or "").strip():
+    labels = _metric_labels(metric)
+    if not labels or not str(text or "").strip():
         return None
     rows = [line for line in str(text).splitlines() if line.strip().startswith("|")]
     if len(rows) < 2:
@@ -33,7 +49,7 @@ def project_periodic_metric_table(text: str, *, metric: str | None) -> str | Non
     header = rows[0]
     separator = rows[1] if _TABLE_SEP.fullmatch(rows[1].strip()) else None
     data = rows[2:] if separator is not None else rows[1:]
-    matched = [row for row in data if _row_label(row) == label]
+    matched = [row for row in data if _row_label(row) in labels]
     if not matched:
         return None
     parts = [header]
@@ -83,8 +99,19 @@ def source_chunk_view(source: Any) -> dict[str, Any]:
 
 def _row_label(row: str) -> str:
     cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
-    return _normalize(cells[0] if cells else "")
+    return _normalize(_strip_footnote_suffix(cells[0] if cells else ""))
+
+
+def _strip_footnote_suffix(value: str) -> str:
+    return re.sub(r"\s*[\(\[]\s*주\s*\d+\s*[\)\]]\s*$", "", str(value or "")).strip()
+
+
+def _metric_labels(metric: str | None) -> set[str]:
+    label = _normalize(metric)
+    if not label:
+        return set()
+    return {label, *(_METRIC_LABEL_ALIASES.get(label) or set())}
 
 
 def _normalize(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "")).casefold()
+    return re.sub(r"[^0-9a-z가-힣]+", "", str(value or "").casefold())

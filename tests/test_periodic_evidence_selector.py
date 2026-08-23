@@ -425,3 +425,181 @@ def test_selector_keeps_consolidated_income_statement_metric_row() -> None:
     assert "periodic_metric_row_preferred" in selected.warnings
     assert "p:ch_standalone" in selected.excluded_chunk_ids
     assert "p:ch_note" in selected.excluded_chunk_ids
+
+
+def test_selector_prefers_footnoted_income_statement_over_segment_note() -> None:
+    segment = _item(
+        "p:ch_segment",
+        "p-con",
+        rank=1,
+        text="""\
+| 열 1 | 영업부문 / DX 부문 | 영업부문 / DS 부문 | 기업 전체 총계 합계 |
+| --- | --- | --- | --- |
+| 매출액 | 47,292,742 | 23,137,290 | 71,915,601 |
+""",
+        year=2025,
+        quarter=1,
+        section_path=("연결재무제표 주석", "부문별 보고 (연결)",),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    income = _item(
+        "p:ch_income_footnoted",
+        "p-con",
+        rank=4,
+        text="""\
+| 열 1 | 제 57 기 1분기 / 3개월 | 제 56 기 1분기 / 3개월 |
+| --- | --- | --- |
+| 매출액 (주26) | 79,140,503 | 71,915,601 |
+| 영업이익 (주26) | 6,685,272 | 6,606,009 |
+""",
+        year=2025,
+        quarter=1,
+        section_path=("재무제표", "연결 손익계산서"),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    evidence = _evidence(
+        [_group("segment", segment), _group("income", income)],
+        question="테스트회사 2025년 1분기 연결 매출액",
+        year=2025,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "매출액",
+            "basis": "consolidated",
+            "lexical_query": "연결 매출액",
+        }
+    )
+    plan["period"]["quarter"] = 1
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("p:ch_income_footnoted",)
+    assert "p:ch_segment" in selected.excluded_chunk_ids
+
+
+def test_period_comparison_keeps_metric_row_without_single_period_match() -> None:
+    prior_income = _item(
+        "p:ch_income_prior",
+        "p-con",
+        rank=1,
+        text="""\
+| 열 1 | 제 57 기 1분기 / 3개월 | 제 56 기 1분기 / 3개월 |
+| --- | --- | --- |
+| 매출액 | 40,658,539 | 37,770,005 |
+""",
+        year=2024,
+        quarter=1,
+        section_path=("연결포괄손익계산서",),
+        statement_scope="연결",
+        temporal_match=False,
+    )
+    prior_income = replace(
+        prior_income,
+        period={"base_year": 2024, "base_month": 3, "statement_scope": "연결"},
+    )
+    income = _item(
+        "p:ch_income_compare",
+        "p-con",
+        rank=2,
+        text=_INCOME_STATEMENT_TABLE,
+        year=2025,
+        quarter=1,
+        section_path=("연결포괄손익계산서",),
+        statement_scope="연결",
+        temporal_match=False,
+    )
+    income = replace(
+        income,
+        period={"base_year": 2025, "base_month": 3, "statement_scope": "연결"},
+    )
+    evidence = _evidence(
+        [_group("prior", prior_income), _group("income", income)],
+        question="테스트회사 2025년 1분기 매출액과 2024년 1분기 매출액 비교",
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "매출액",
+            "basis": "unspecified",
+            "lexical_query": "매출액과 1분기 매출액 비교",
+            "comparison": {"type": "period_comparison", "years": [2024, 2025]},
+        }
+    )
+    plan["period"] = {
+        "year": None,
+        "quarter": 1,
+        "from": None,
+        "to": None,
+        "period_type": "fiscal_quarter",
+    }
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("p:ch_income_compare",)
+    assert "p:ch_income_prior" in selected.excluded_chunk_ids
+    assert selected.resolution.unresolved_requirements == ()
+    assert "explicit_period_unmatched" not in selected.warnings
+
+
+def test_selector_prefers_income_statement_net_income_over_cash_flow() -> None:
+    cash_flow = _item(
+        "p:ch_cash_flow",
+        "p-con",
+        rank=1,
+        text="""\
+| 열 1 | 열 2 | 차량 | 금융 |
+| --- | --- | --- | --- |
+| 영업활동현금흐름 | 당기순이익(손실) | 5,574,692 | 349,298 |
+| 영업활동현금흐름 | 조정 | 156,165 | 3,027,690 |
+""",
+        year=2025,
+        quarter=1,
+        section_path=("연결현금흐름표",),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    income = _item(
+        "p:ch_income_net",
+        "p-con",
+        rank=5,
+        text="""\
+| 열 1 | 제 58 기 1분기 / 3개월 | 제 57 기 1분기 / 3개월 |
+| --- | --- | --- |
+| 계속영업연결분기순이익 | 3,382,174 | 3,695,111 |
+| 연결분기순이익 | 3,382,174 | 3,376,001 |
+| 보통주기본주당이익(손실) (단위 : 원) | 12,076 | 12,287 |
+""",
+        year=2025,
+        quarter=1,
+        section_path=("재무제표", "연결 손익계산서"),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    evidence = _evidence(
+        [_group("cash_flow", cash_flow), _group("income", income)],
+        question="테스트회사 2025년 1분기 연결 당기순이익",
+        year=2025,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "당기순이익",
+            "basis": "consolidated",
+            "lexical_query": "연결 당기순이익",
+        }
+    )
+    plan["period"]["quarter"] = 1
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("p:ch_income_net",)
+    assert "p:ch_cash_flow" in selected.excluded_chunk_ids
