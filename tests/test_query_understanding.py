@@ -402,6 +402,16 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.lexical_query, "매출액")
         self.assertIn("누적", plan.raw_query)
 
+    def test_balance_sheet_metric_expands_spaced_statement_label(self) -> None:
+        plan = QueryUnderstanding(self.aliases).understand(
+            "삼성전자 2024년 사업보고서 연결 자산총계는 얼마야?"
+        )
+
+        self.assertEqual(plan.metric, "자산총계")
+        self.assertIn("자산 총 계", plan.lexical_query)
+        self.assertIn("자 산 총 계", plan.lexical_query)
+        self.assertEqual(plan.section_boosts["첨부연결재무제표"], 1.0)
+
     def test_multi_year_financial_comparison_keeps_all_explicit_fiscal_years(self) -> None:
         plan = QueryUnderstanding(self.aliases).understand(
             "삼성전자 2022년부터 2024년까지 매출액 추이"
@@ -457,6 +467,19 @@ class QueryUnderstandingTests(unittest.TestCase):
                 self.assertNotIn("doc_subtype", route.hard_routes)
                 self.assertEqual(decision.task_type, "corporate_event")
                 self.assertIsNone(decision.resolver_type)
+
+    def test_supply_contract_with_sales_ratio_stays_an_exchange_event(self) -> None:
+        plan = QueryUnderstanding({"한국항공우주": {"한국항공우주"}}).understand(
+            "한국항공우주 최근 공급계약 금액과 매출액 대비 비율은?"
+        )
+        route = QueryRouter().route(plan)
+
+        self.assertEqual(plan.task_type, "corporate_event")
+        self.assertEqual(plan.event_type, "supply_contract")
+        self.assertIsNone(plan.metric)
+        self.assertEqual(plan.disclosure_route, ("exchange",))
+        self.assertEqual(route.hard_routes["doc_group"], "exchange")
+        self.assertEqual(route.hard_routes["event_type"], "supply_contract")
 
     def test_share_holding_questions_are_not_reclassified_as_facility_investment(
         self,

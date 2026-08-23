@@ -14,6 +14,7 @@
 
 - `app/reasoning/periodic_metric_view.py`
   - 재무지표 표에서 질문 지표에 해당하는 행만 남기는 공통 projection 로직을 보강했다.
+  - `매출액` 질문에서 NAVER처럼 손익계산서 row가 `영업수익`으로 표기되는 경우도 같은 매출 지표로 처리한다.
   - 단일 기간 질문에서는 선택된 보고서의 현재 기수/명시 연도에 해당하는 열만 남긴다.
   - 분기 질문은 기본적으로 `3개월` 열을 남기고, 질문에 `누적` 또는 `누계`가 있을 때만 누적 열을 남긴다.
   - 전년동기대비, 기간 비교, 추이 질문에서는 비교 열을 유지한다.
@@ -29,7 +30,9 @@
 
 - `app/reasoning/query_understanding.py`
   - `당기순이익` 검색어에 `분기순이익`, `연결분기순이익`, `당기순손익`, `분기순손익`을 추가해 실제 손익계산서 chunk recall을 높였다.
+  - `자산총계`, `부채총계`, `자본총계` 검색어에 `자산 총 계`처럼 공시 표에 띄어쓰기된 계정명을 추가해 재무상태표 recall을 높였다.
   - `누적`, `누계`, `3개월` 같은 기간 열 선택 단어를 lexical 검색어에서 제거해 주석의 `누적비지배지분` 같은 무관 chunk recall을 줄였다.
+  - `공급계약 금액과 매출액 대비 비율`처럼 이벤트 질문에 재무지표 단어가 포함된 경우에도 기업 이벤트 라우팅을 우선하도록 했다.
 
 - `app/reasoning/answer_composer.py`
   - 답변 렌더링 단계에서 사용할 수 있도록 정기공시 request에 `comparison` 정보를 포함했다.
@@ -37,10 +40,11 @@
 - `app/generation/answer_generator.py`
   - 정기공시 답변 표를 렌더링할 때 metric, period, comparison 정보를 함께 넘겨 행/열 projection을 적용한다.
   - projection된 표 header/separator 줄은 독립적인 fact claim이 아니므로 citation scope 검증에서 제거하지 않도록 했다.
+  - 정기공시 서술형 근거가 과도하게 길어지는 경우 표시 텍스트를 항목당 600자로 제한해 제품/사업 설명 질문에서 원문 전체를 덤프하지 않도록 했다.
 
 - `app/agent/orchestrator.py`
   - resolver가 없는 general evidence 경로의 답변 근거를 상위 3개로 제한했다.
-  - 근거 본문은 항목당 1,000자로 제한하고 `[truncated]` 표시를 남긴다.
+  - 근거 본문은 항목당 600자로 제한하고 `[truncated]` 표시를 남긴다.
 
 - Tests
   - `tests/test_periodic_metric_view.py`
@@ -79,7 +83,16 @@ Local:
 851 passed, 1 skipped, 1 warning, 500 subtests passed
 81 passed, 1 warning, 16 subtests passed
 852 passed, 1 skipped, 1 warning, 500 subtests passed
+55 passed, 1 warning, 16 subtests passed
+854 passed, 1 skipped, 1 warning, 500 subtests passed
 ```
+
+Additional diagnostic run:
+
+- `local-test/questions_extra70.jsonl` 중 49개를 우선 실행했다.
+- 발견한 즉시 수정 대상:
+  - `X027 셀트리온 2024년 사업보고서 주요 제품은?`: 서술형 정기공시 근거가 24,000자 이상 출력됨.
+  - `X035 한국항공우주 최근 공급계약 금액과 매출액 대비 비율은?`: `매출액` 단어 때문에 공급계약 질문이 정기공시 재무지표로 잘못 라우팅됨.
 
 Server:
 

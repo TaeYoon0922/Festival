@@ -25,6 +25,9 @@ _FINANCIAL_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 _FINANCIAL_METRIC_SEARCH_TERMS = {
     "당기순이익": ("분기순이익", "연결분기순이익", "당기순손익", "분기순손익"),
+    "자산총계": ("자산 총계", "자산 총 계", "자 산 총 계"),
+    "부채총계": ("부채 총계", "부채 총 계", "부 채 총 계"),
+    "자본총계": ("자본 총계", "자본 총 계", "자 본 총 계"),
 }
 
 _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
@@ -63,9 +66,24 @@ _SECTION_BOOSTS: dict[str, dict[str, float]] = {
         "당기순이익": 0.95,
         "당기순손익": 0.95,
     },
-    "자산총계": {"재무상태표": 1.0, "자산총계": 0.95},
-    "부채총계": {"재무상태표": 1.0, "부채총계": 0.95},
-    "자본총계": {"재무상태표": 1.0, "자본총계": 0.95},
+    "자산총계": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "자산총계": 0.95,
+    },
+    "부채총계": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "부채총계": 0.95,
+    },
+    "자본총계": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "자본총계": 0.95,
+    },
     "주당순이익": {
         "주당이익": 1.0,
         "포괄손익계산서": 0.85,
@@ -182,12 +200,12 @@ class QueryUnderstanding:
         if holding_metric:
             task_type = "holding_change"
             metric = holding_metric
-        elif financial_metric:
-            task_type = "financial_metric"
-            metric = financial_metric
         elif event_type:
             task_type = "corporate_event"
             metric = None
+        elif financial_metric:
+            task_type = "financial_metric"
+            metric = financial_metric
         else:
             task_type = "disclosure_lookup"
             metric = None

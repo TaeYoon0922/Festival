@@ -241,6 +241,26 @@ class AnswerGeneratorTests(unittest.TestCase):
         self.assertIsNone(_periodic_claim_payload(header))
         self.assertEqual(_periodic_claim_payload(row), "| 매출액 | 44,407,761 |")
 
+    def test_periodic_long_source_text_is_bounded_for_display(self):
+        item = _periodic_item(
+            "p25:ch_long",
+            "p25",
+            rank=1,
+            text="주요 제품 설명 " + ("가" * 2000),
+            year=2025,
+            table_id="t25",
+        )
+        evidence = _periodic_evidence(
+            [_periodic_group("g-long", item, group_type="document_evidence")]
+        )
+        draft = compose_periodic_answer(resolve_periodic_facts(evidence), evidence)
+
+        generated = generate_answer(draft)
+
+        self.assertTrue(generated.answerable)
+        self.assertLess(len(generated.answer_text), 1100)
+        self.assertIn("[1]", generated.answer_text)
+
     def test_periodic_conflict_alternatives_are_preserved(self):
         first = _periodic_item(
             "p1:ch_a", "p1", rank=1, text="제품 수는 10개", year=2024

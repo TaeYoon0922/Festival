@@ -20,6 +20,11 @@ _INCOME_STATEMENT_MARKERS = (
 )
 _TABLE_SEP = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _METRIC_LABEL_ALIASES = {
+    "매출액": {
+        "매출액",
+        "매출",
+        "영업수익",
+    },
     "당기순이익": {
         "당기순이익",
         "당기순이익손실",
