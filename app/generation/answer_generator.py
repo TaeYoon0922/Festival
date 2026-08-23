@@ -1084,10 +1084,13 @@ def _is_periodic_table_header(text: str) -> bool:
     if len(cells) < 2:
         return False
     first = re.sub(r"[^0-9a-z가-힣]+", "", cells[0].casefold())
-    if first not in {"열1", "구분", "계정과목", "과목"}:
+    if first not in {"", "열1", "구분", "계정과목", "과목"}:
         return False
     return any(
-        re.search(r"제\s*\d+\s*기|20\d{2}\s*년|분기|반기|누적|3\s*개월", cell)
+        re.search(
+            r"제\s*\d+\s*(?:\([^)]*\)\s*)?기|20\d{2}\s*년|분기|반기|누적|3\s*개월",
+            cell,
+        )
         for cell in cells[1:]
     )
 

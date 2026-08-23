@@ -52,6 +52,7 @@
 - `app/generation/answer_generator.py`
   - 정기공시 답변 표를 렌더링할 때 metric, period, comparison 정보를 함께 넘겨 행/열 projection을 적용한다.
   - projection된 표 header/separator 줄은 독립적인 fact claim이 아니므로 citation scope 검증에서 제거하지 않도록 했다.
+  - 재무상태표 header에서 `제 56 (당) 기`, 빈 계정명 칸 등이 등장해도 표 구조로 인식해 citation 검증에서 오탐 제거되지 않도록 했다.
   - 정기공시 서술형 근거가 과도하게 길어지는 경우 표시 텍스트를 항목당 600자로 제한해 제품/사업 설명 질문에서 원문 전체를 덤프하지 않도록 했다.
 
 - `app/agent/orchestrator.py`
@@ -64,6 +65,7 @@
 - `tests/test_query_understanding.py`
 - `tests/test_orchestrator.py`
 - `tests/test_hybrid_retrieval.py`
+- `tests/test_answer_generator.py`
 
 ## Verified Questions
 
@@ -103,6 +105,7 @@ Local:
 55 passed, 1 warning, 16 subtests passed
 854 passed, 1 skipped, 1 warning, 500 subtests passed
 858 passed, 1 skipped
+859 passed, 1 skipped
 ```
 
 Additional diagnostic run:

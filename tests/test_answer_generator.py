@@ -111,6 +111,16 @@ class AnswerGeneratorTests(unittest.TestCase):
             "| 사업소 | 생산능력 | 생산실적 | 평균가동률 |",
         )
 
+    def test_periodic_claim_payload_ignores_balance_sheet_period_header(self):
+        self.assertIsNone(
+            _periodic_claim_payload(
+                "내용: | 열 1 | 주 석 | 제 56 (당) 기 | 제 55 (전) 기 | [1]"
+            )
+        )
+        self.assertIsNone(
+            _periodic_claim_payload("내용: |  |  | 제 56 기 | [1]")
+        )
+
     def test_periodic_markdown_separator_does_not_fail_citation_scope(self):
         table_text = (
             "| 사업소 | 생산능력 | 생산실적 | 평균가동률 |\n"
