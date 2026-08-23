@@ -306,10 +306,15 @@ def _periodic_fact_content(
 def _periodic_request(query_plan: Mapping[str, Any] | None) -> dict[str, Any]:
     plan = dict(query_plan or {})
     period = plan.get("period")
+    comparison = plan.get("comparison")
     return {
         "metric": plan.get("metric"),
         "basis": plan.get("basis"),
         "period": copy.deepcopy(dict(period)) if isinstance(period, Mapping) else {},
+        "comparison": (
+            copy.deepcopy(dict(comparison)) if isinstance(comparison, Mapping) else {}
+        ),
+        "raw_query": plan.get("raw_query"),
     }
 
 

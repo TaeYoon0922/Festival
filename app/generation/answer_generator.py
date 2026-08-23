@@ -841,7 +841,16 @@ def _periodic_source_lines(
     if not fact_text:
         return []
     metric = _text((request or {}).get("metric"))
-    display = project_periodic_metric_table(fact_text, metric=metric) or fact_text
+    display = (
+        project_periodic_metric_table(
+            fact_text,
+            metric=metric,
+            period=(request or {}).get("period"),
+            comparison=(request or {}).get("comparison"),
+            raw_query=_text((request or {}).get("raw_query")),
+        )
+        or fact_text
+    )
     return [f"내용: {display} {marker}"]
 
 
@@ -894,7 +903,16 @@ def _periodic_fact_fallback_lines(
     if not fact_text:
         return []
     metric = _text((request or {}).get("metric"))
-    display = project_periodic_metric_table(fact_text, metric=metric) or fact_text
+    display = (
+        project_periodic_metric_table(
+            fact_text,
+            metric=metric,
+            period=(request or {}).get("period"),
+            comparison=(request or {}).get("comparison"),
+            raw_query=_text((request or {}).get("raw_query")),
+        )
+        or fact_text
+    )
     return [f"내용: {display} {marker}"]
 
 
@@ -1031,6 +1049,9 @@ def _periodic_claim_payload(line: str) -> str | None:
         return None
     if re.fullmatch(r"\|(?:\s*:?-{3,}:?\s*\|)+", text):
         return None
+    payload = re.sub(r"^(?:내용|대안\s+\d+):\s*", "", text).strip()
+    if _is_periodic_table_header(payload):
+        return None
     if not re.search(r"[0-9A-Za-z가-힣]", text):
         return None
     if any(
@@ -1042,7 +1063,22 @@ def _periodic_claim_payload(line: str) -> str | None:
         )
     ):
         return None
-    return re.sub(r"^(?:내용|대안\s+\d+):\s*", "", text).strip() or None
+    return payload or None
+
+
+def _is_periodic_table_header(text: str) -> bool:
+    if not str(text or "").strip().startswith("|"):
+        return False
+    cells = [cell.strip() for cell in str(text).strip().strip("|").split("|")]
+    if len(cells) < 2:
+        return False
+    first = re.sub(r"[^0-9a-z가-힣]+", "", cells[0].casefold())
+    if first not in {"열1", "구분", "계정과목", "과목"}:
+        return False
+    return any(
+        re.search(r"제\s*\d+\s*기|20\d{2}\s*년|분기|반기|누적|3\s*개월", cell)
+        for cell in cells[1:]
+    )
 
 
 def _claim_in_selected_source(claim: str, source_text: str) -> bool:
