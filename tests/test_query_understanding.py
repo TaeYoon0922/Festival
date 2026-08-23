@@ -490,6 +490,9 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.task_type, "corporate_event")
         self.assertEqual(plan.event_type, "treasury_share_trust_termination")
         self.assertEqual(plan.disclosure_route, ("major",))
+        self.assertEqual(
+            plan.section_boosts["자기주식취득 신탁계약 해지 결정"], 1.0
+        )
         self.assertEqual(route.hard_routes["event_type"], "treasury_share_trust_termination")
 
     def test_write_down_capital_security_is_a_major_event(self) -> None:
@@ -501,6 +504,9 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.task_type, "corporate_event")
         self.assertEqual(plan.event_type, "write_down_contingent_capital_security")
         self.assertEqual(plan.disclosure_route, ("major",))
+        self.assertEqual(
+            plan.section_boosts["상각형 조건부자본증권 발행결정"], 1.0
+        )
         self.assertEqual(route.hard_routes["event_type"], "write_down_contingent_capital_security")
 
     def test_share_holding_questions_are_not_reclassified_as_facility_investment(

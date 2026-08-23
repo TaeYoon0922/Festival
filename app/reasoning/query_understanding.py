@@ -64,6 +64,16 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 _EVENT_DOC_SUBTYPES = {
     "facility_investment": "신규시설투자등",
 }
+_EVENT_SECTION_BOOSTS: dict[str, dict[str, float]] = {
+    "treasury_share_trust_termination": {
+        "자기주식취득 신탁계약 해지 결정": 1.0,
+        "자기주식취득신탁계약해지결정": 1.0,
+    },
+    "write_down_contingent_capital_security": {
+        "상각형 조건부자본증권 발행결정": 1.0,
+        "상각형조건부자본증권발행결정": 1.0,
+    },
+}
 
 _SECTION_BOOSTS: dict[str, dict[str, float]] = {
     "매출액": {
@@ -322,7 +332,7 @@ class QueryUnderstanding:
             comparison=comparison,
             doc_subtype=subtype,
             section_path=section_path,
-            section_boosts=_section_boosts(metric, periodic_intent),
+            section_boosts=_section_boosts(metric, periodic_intent, event_type),
             route_confidence=route_confidence,
             route_evidence=route_evidence,
             top_k=top_k,
@@ -402,12 +412,14 @@ def _periodic_intent_allowed(
 
 
 def _section_boosts(
-    metric: str | None, periodic_intent: str | None
+    metric: str | None, periodic_intent: str | None, event_type: str | None = None
 ) -> dict[str, float]:
     merged = dict(_SECTION_BOOSTS.get(metric or "", {}))
     for section, weight in _PERIODIC_SECTION_BOOSTS.get(
         periodic_intent or "", {}
     ).items():
+        merged[section] = max(merged.get(section, 0.0), weight)
+    for section, weight in _EVENT_SECTION_BOOSTS.get(event_type or "", {}).items():
         merged[section] = max(merged.get(section, 0.0), weight)
     return merged
 
