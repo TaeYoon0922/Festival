@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -235,9 +236,36 @@ def _reported_holding_events(
     if not resolution.requested_fields:
         return events
     matching = tuple(event for event in events if event.matches_query is True)
+    reporter_constraint = getattr(resolution, "reporter_constraint", None)
+    if (
+        reporter_constraint
+        and not matching
+        and not any(
+            _holding_reporter_matches(event.reporter, reporter_constraint)
+            for event in events
+        )
+    ):
+        return ()
     if len(matching) != 1:
         return events
     return matching
+
+
+def _holding_reporter_matches(value: str | None, constraint: str | None) -> bool:
+    left = _normalize_holding_reporter(value)
+    right = _normalize_holding_reporter(constraint)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    suffixes = ("공단", "기금", "조합", "법인", "회사")
+    return any(
+        left == right + suffix or right == left + suffix for suffix in suffixes
+    )
+
+
+def _normalize_holding_reporter(value: str | None) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
 
 
 def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:

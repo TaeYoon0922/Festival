@@ -50,6 +50,10 @@
 
 - `app/reasoning/answer_composer.py`
   - 답변 렌더링 단계에서 사용할 수 있도록 정기공시 request에 `comparison` 정보를 포함했다.
+  - 보유공시에서 질문에 보고자/reporter가 명시됐는데 후보 event의 reporter가 모두 불일치하면 무관한 event를 fallback으로 출력하지 않는다.
+
+- `app/reasoning/holding_event_resolver.py`
+  - composer가 reporter 제약 여부를 판단할 수 있도록 `HoldingResolution`에 `reporter_constraint`를 보존한다.
 
 - `app/generation/answer_generator.py`
   - 정기공시 답변 표를 렌더링할 때 metric, period, comparison 정보를 함께 넘겨 행/열 projection을 적용한다.
@@ -68,6 +72,7 @@
 - `tests/test_orchestrator.py`
 - `tests/test_hybrid_retrieval.py`
 - `tests/test_answer_generator.py`
+- `tests/test_answer_composer.py`
 
 ## Verified Questions
 
@@ -108,6 +113,7 @@ Local:
 854 passed, 1 skipped, 1 warning, 500 subtests passed
 858 passed, 1 skipped
 859 passed, 1 skipped
+860 passed, 1 skipped
 860 passed, 1 skipped
 ```
 

@@ -247,6 +247,7 @@ class HoldingResolution:
     temporal_ambiguity: bool
     unresolved_fields: tuple[str, ...]
     warnings: tuple[str, ...]
+    reporter_constraint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -257,6 +258,7 @@ class HoldingResolution:
             "temporal_ambiguity": self.temporal_ambiguity,
             "unresolved_fields": list(self.unresolved_fields),
             "warnings": list(self.warnings),
+            "reporter_constraint": self.reporter_constraint,
         }
 
 
@@ -324,6 +326,7 @@ def resolve_holding_events(
         temporal_ambiguity=temporal_ambiguity,
         unresolved_fields=unresolved,
         warnings=tuple(dict.fromkeys(warnings)),
+        reporter_constraint=reporter_constraint,
     )
 
 

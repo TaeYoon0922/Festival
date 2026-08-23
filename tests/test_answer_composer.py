@@ -377,6 +377,7 @@ class AnswerComposerTests(unittest.TestCase):
 
         self.assertEqual(resolution.matching_event_count, 0)
         self.assertFalse(draft.answerable)
+        self.assertEqual(draft.answer_sections, ())
         self.assertIn(
             "matching_holding_event",
             draft.confidence["unresolved_requirements"],
