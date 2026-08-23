@@ -39,6 +39,8 @@
   - 기간 비교 질문에서는 단일 명시 기간 필터를 강제하지 않고, 비교 연도 중 최신 보고서를 우선한다.
   - exact metric row가 확인된 source는 eligibility 단계에서 탈락하지 않도록 했다.
   - 재무지표 단일 행을 선택한 경우 불필요한 기간 모호성 경고를 제거한다.
+  - `자산총계`, `부채총계`, `자본총계`도 단일 재무제표 행 선택 대상으로 포함한다.
+  - `자산 총계`처럼 공백 때문에 남은 focus term이 요청 metric과 같으면 불필요한 추가 조건으로 보지 않는다.
 
 - `app/reasoning/query_understanding.py`
   - `당기순이익` 검색어에 `분기순이익`, `연결분기순이익`, `당기순손익`, `분기순손익`을 추가해 실제 손익계산서 chunk recall을 높였다.
@@ -106,6 +108,7 @@ Local:
 854 passed, 1 skipped, 1 warning, 500 subtests passed
 858 passed, 1 skipped
 859 passed, 1 skipped
+860 passed, 1 skipped
 ```
 
 Additional diagnostic run:

@@ -427,6 +427,58 @@ def test_selector_keeps_consolidated_income_statement_metric_row() -> None:
     assert "p:ch_note" in selected.excluded_chunk_ids
 
 
+def test_selector_limits_balance_sheet_metric_to_best_exact_row() -> None:
+    balance = _item(
+        "p:ch_balance",
+        "p-con",
+        rank=1,
+        text="""\
+| 과 목 | 주 석 | 제 56 (당) 기 | 제 55 (전) 기 |
+| --- | --- | --- | --- |
+| 자 산 총 계 |  | 514,531,948 | 455,905,980 |
+""",
+        year=2024,
+        section_path=("(첨부)연 결 재 무 제 표",),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    equity = _item(
+        "p:ch_equity",
+        "p-con",
+        rank=2,
+        text="""\
+| 과 목 | 지배기업 소유주지분 / 자본금 | 총 계 |
+| --- | --- | --- |
+| 2023.1.1(전기초) | 897,514 | 354,749,604 |
+""",
+        year=2024,
+        section_path=("(첨부)연 결 재 무 제 표",),
+        statement_scope="연결",
+        temporal_match=True,
+    )
+    evidence = _evidence(
+        [_group("balance", balance), _group("equity", equity)],
+        question="삼성전자 2024년 사업보고서 연결 자산총계",
+        year=2024,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "자산총계",
+            "basis": "consolidated",
+            "lexical_query": "자산총계 자산 총계 자 산 총 계",
+        }
+    )
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("p:ch_balance",)
+    assert "periodic_metric_row_preferred" in selected.warnings
+    assert "p:ch_equity" in selected.excluded_chunk_ids
+
+
 def test_selector_prefers_footnoted_income_statement_over_segment_note() -> None:
     segment = _item(
         "p:ch_segment",
