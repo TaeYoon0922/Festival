@@ -522,11 +522,22 @@ def _exact_term_score(query: str, chunk: Mapping[str, Any]) -> float:
 
 
 def _section_score(boosts: Mapping[str, float], chunk: Mapping[str, Any]) -> float:
-    section = _normalized(_section_text(chunk))
+    section_text = _section_text(chunk)
+    section = _normalized(section_text)
+    compact_section = _compact_alnum(section_text)
     return max(
-        (weight for term, weight in boosts.items() if _normalized(term) in section),
+        (
+            weight
+            for term, weight in boosts.items()
+            if _normalized(term) in section
+            or _compact_alnum(term) in compact_section
+        ),
         default=0.0,
     )
+
+
+def _compact_alnum(value: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
 
 
 def _metadata_score(

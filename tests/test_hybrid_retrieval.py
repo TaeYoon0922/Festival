@@ -301,6 +301,50 @@ class HybridExecutorTests(unittest.TestCase):
             "filtered_candidates",
         )
 
+    def test_balance_sheet_metric_rescue_adds_statement_chunk(self) -> None:
+        backend = FakeHybridBackend(vector_mode="empty")
+        backend.chunks.append(
+            CandidateChunk(
+                "balance-sheet",
+                "d1",
+                {
+                    "chunk_id": "balance-sheet",
+                    "doc_group": "periodic",
+                    "section_path": ["(첨부)연 결 재 무 제 표"],
+                    "statement_scope": "consolidated",
+                    "content": (
+                        "| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |\n"
+                        "| --- | --- | --- |\n"
+                        "| 자 산 총 계 | 514,531,948 | 455,905,980 |"
+                    ),
+                    "retrieval_text": (
+                        "| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |\n"
+                        "| --- | --- | --- |\n"
+                        "| 자 산 총 계 | 514,531,948 | 455,905,980 |"
+                    ),
+                },
+                MetadataMatch(),
+            )
+        )
+        execution = self.executor(backend).execute(
+            QueryPlan(
+                query="자산총계 자산 총계 자산 총 계 자 산 총 계",
+                task_type="financial_metric",
+                metric="자산총계",
+                disclosure_route=("periodic",),
+                basis="consolidated",
+                years=(2024,),
+                section_boosts={"첨부연결재무제표": 1.0, "재무상태표": 1.0},
+                top_k=10,
+            )
+        )
+
+        self.assertEqual(execution.results[0].chunk_id, "balance-sheet")
+        self.assertEqual(
+            execution.results[0].metadata_match["hybrid"]["fallback"],
+            "balance_sheet_metric_rescue",
+        )
+
     def test_vector_error_can_be_strict(self) -> None:
         backend = FakeHybridBackend(vector_mode="error")
         executor = self.executor(backend, fallback_on_vector_error=False)

@@ -24,6 +24,7 @@ DIAGNOSTIC_WEIGHT_GRID: tuple[tuple[float, float], ...] = (
     (0.75, 0.25),
     (0.80, 0.20),
 )
+_BALANCE_SHEET_METRICS = frozenset({"자산총계", "부채총계", "자본총계"})
 
 
 @dataclass(frozen=True)
@@ -299,6 +300,13 @@ class HybridQueryExecutor:
                 if vector_status not in {"ok", "empty"}
                 else "filtered_candidates"
             )
+        final_results = self._rescue_balance_sheet_metric_candidates(
+            final_results,
+            chunks,
+            route,
+            document_metadata,
+            top_k=min(plan.top_k, self.config.final_top_k),
+        )
         routing = {
             **route.to_dict(),
             "hybrid": {
@@ -425,6 +433,75 @@ class HybridQueryExecutor:
                 )
             )
         return output
+
+    def _rescue_balance_sheet_metric_candidates(
+        self,
+        results: Sequence[RetrievalResult],
+        chunks: Sequence[CandidateChunk],
+        route: Any,
+        document_metadata: Mapping[str, Mapping[str, Any]],
+        *,
+        top_k: int,
+    ) -> list[RetrievalResult]:
+        """Promote statement rows that lexical/vector retrieval missed.
+
+        Balance-sheet labels are often spaced out in DART tables, for example
+        ``자 산 총 계``.  PostgreSQL FTS can rank broader note tables above the
+        actual statement row, so use the already-filtered candidate universe as
+        a narrow rescue source for these exact metrics only.
+        """
+
+        if route.ranking_context.get("task_type") != "financial_metric":
+            return list(results)
+        if route.ranking_context.get("metric") not in _BALANCE_SHEET_METRICS:
+            return list(results)
+        if not chunks or top_k <= 0:
+            return list(results)
+
+        synthetic = [
+            RetrievalResult(
+                chunk_id=chunk.chunk_id,
+                doc_id=chunk.doc_id,
+                bm25_score=0.0,
+                rank=index,
+                metadata_match=chunk.metadata_match.to_dict(),
+            )
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+        ranked = self.router.rerank(
+            synthetic,
+            route,
+            chunks=chunks,
+            document_metadata=document_metadata,
+            top_k=top_k,
+        )
+        rescue: list[RetrievalResult] = []
+        for result in ranked:
+            components = dict(result.metadata_match.get("score_components") or {})
+            if (
+                float(components.get("exact_term", 0.0)) < 0.65
+                or float(components.get("section", 0.0)) < 0.85
+            ):
+                continue
+            match = dict(result.metadata_match)
+            match["hybrid"] = {
+                **dict(match.get("hybrid") or {}),
+                "fallback": "balance_sheet_metric_rescue",
+                "final_rank": result.rank,
+            }
+            rescue.append(
+                RetrievalResult(
+                    chunk_id=result.chunk_id,
+                    doc_id=result.doc_id,
+                    bm25_score=result.bm25_score,
+                    rank=result.rank,
+                    metadata_match=match,
+                )
+            )
+
+        if not rescue:
+            return list(results)
+        return _merge_priority_results(rescue, results, top_k=top_k)
 
     def _hybrid_rerank(
         self,
@@ -695,6 +772,41 @@ def _annotate_lexical_fallback(
                 doc_id=result.doc_id,
                 bm25_score=result.bm25_score,
                 rank=result.rank,
+                metadata_match=match,
+            )
+        )
+    return output
+
+
+def _merge_priority_results(
+    priority: Sequence[RetrievalResult],
+    existing: Sequence[RetrievalResult],
+    *,
+    top_k: int,
+) -> list[RetrievalResult]:
+    rows: list[RetrievalResult] = []
+    seen: set[str] = set()
+    for result in (*priority, *existing):
+        if result.chunk_id in seen:
+            continue
+        seen.add(result.chunk_id)
+        rows.append(result)
+        if len(rows) >= top_k:
+            break
+
+    output: list[RetrievalResult] = []
+    for rank, result in enumerate(rows, start=1):
+        match = dict(result.metadata_match)
+        hybrid = dict(match.get("hybrid") or {})
+        if hybrid:
+            hybrid["final_rank"] = rank
+            match["hybrid"] = hybrid
+        output.append(
+            RetrievalResult(
+                chunk_id=result.chunk_id,
+                doc_id=result.doc_id,
+                bm25_score=result.bm25_score,
+                rank=rank,
                 metadata_match=match,
             )
         )

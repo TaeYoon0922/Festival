@@ -9,6 +9,7 @@
 - 2025년 1분기와 2024년 1분기 비교 질문에서 2024년 보고서를 우선 선택하거나 `확인 필요`로 떨어짐
 - `당기순이익` 질문에서 손익계산서가 아니라 현금흐름표/주석의 `당기순이익(손실)` 표를 선택함
 - 주요사항/거래소/일반근거 답변이 Top-K 표 전체를 덤프해 지나치게 길어짐
+- `자 산 총 계`처럼 띄어쓰기된 재무상태표 행이 실제 DB에는 있어도 검색 상위권에 들지 못해 `확인 필요`로 떨어짐
 
 ## Changed Files
 
@@ -20,6 +21,17 @@
   - 전년동기대비, 기간 비교, 추이 질문에서는 비교 열을 유지한다.
   - `(주26)` 같은 주석 번호 suffix를 제거하고 행 이름을 비교한다.
   - `당기순이익`을 `분기순이익`, `연결분기순이익`, `당기순손익` 등 손익계산서 실제 행 이름과 매칭한다.
+  - `자 산 총 계`, `부 채 총 계`, `자 본 총 계`처럼 공백이 포함된 재무상태표 행을 각각 `자산총계`, `부채총계`, `자본총계`와 매칭한다.
+  - `제 56 (당) 기`처럼 `(당)`/`(전)` 표시가 들어간 헤더도 현재 회계 기수로 인식한다.
+
+- `app/reasoning/router.py`
+  - section boost 비교 시 괄호/문장부호를 제거한 비교도 함께 수행한다.
+  - 예: chunk section `"(첨부)연 결 재 무 제 표"`가 boost key `"첨부연결재무제표"`와 매칭된다.
+
+- `app/retrieval/hybrid.py`
+  - `자산총계`, `부채총계`, `자본총계` 질문에서는 lexical/vector 상위 결과에 실제 재무상태표 chunk가 빠지는 경우를 보강한다.
+  - 이미 회사/연도/정기공시로 좁혀진 candidate universe 안에서 exact metric term과 재무제표 section boost가 모두 높은 chunk만 rescue한다.
+  - 일반 질문에는 적용하지 않고, 재무상태표 3개 지표에만 적용한다.
 
 - `app/reasoning/periodic_evidence_selector.py`
   - 연결/별도 기준과 손익계산서 섹션을 우선하는 evidence selection을 보강했다.
@@ -49,8 +61,9 @@
 - Tests
   - `tests/test_periodic_metric_view.py`
   - `tests/test_periodic_evidence_selector.py`
-  - `tests/test_query_understanding.py`
-  - `tests/test_orchestrator.py`
+- `tests/test_query_understanding.py`
+- `tests/test_orchestrator.py`
+- `tests/test_hybrid_retrieval.py`
 
 ## Verified Questions
 
@@ -68,6 +81,10 @@
   - 현금흐름표가 아니라 연결 손익계산서 `연결분기순이익` 행 선택
 - `삼성전자 2025년 1분기 연결 당기순이익`
   - 연결 손익계산서 `분기순이익` 행 선택
+- `NAVER 2025년 1분기 연결 매출액`
+  - 손익계산서의 `영업수익 (주5)` 행을 매출액으로 선택
+- `삼성전자 2024년 사업보고서 연결 자산총계`
+  - `(첨부)연결재무제표`의 `자 산 총 계` 행을 선택하도록 보강 중
 
 ## Test Results
 
@@ -85,6 +102,7 @@ Local:
 852 passed, 1 skipped, 1 warning, 500 subtests passed
 55 passed, 1 warning, 16 subtests passed
 854 passed, 1 skipped, 1 warning, 500 subtests passed
+858 passed, 1 skipped
 ```
 
 Additional diagnostic run:
