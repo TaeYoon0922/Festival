@@ -33,6 +33,7 @@
   - `자산총계`, `부채총계`, `자본총계` 질문에서는 lexical/vector 상위 결과에 실제 재무상태표 chunk가 빠지는 경우를 보강한다.
   - 이미 회사/연도/정기공시로 좁혀진 candidate universe 안에서 exact metric term과 재무제표 section boost가 모두 높은 chunk만 rescue한다.
   - 일반 질문에는 적용하지 않고, 재무상태표 3개 지표에만 적용한다.
+  - `latest_event` 주요사항/거래소 질문에서는 이벤트 hard route 이후 후보 중 접수일이 가장 최신인 문서의 chunk를 우선 병합한다.
 
 - `app/reasoning/periodic_evidence_selector.py`
   - 연결/별도 기준과 손익계산서 섹션을 우선하는 evidence selection을 보강했다.
@@ -118,6 +119,7 @@ Local:
 860 passed, 1 skipped
 860 passed, 1 skipped
 862 passed, 1 skipped
+863 passed, 1 skipped
 ```
 
 Additional diagnostic run:

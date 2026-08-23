@@ -1,6 +1,6 @@
 import unittest
 
-from app.reasoning.query_plan import QueryPlan
+from app.reasoning.query_plan import QueryPeriod, QueryPlan
 from app.reasoning.router import QueryRouter
 from app.retrieval.embeddings import DeterministicHashEmbedder, EmbeddingConfig
 from app.retrieval.hybrid import (
@@ -197,6 +197,63 @@ class SingleSourcePreservationBackend:
         return set(chunk_ids)
 
 
+class LatestEventBackend:
+    def __init__(self) -> None:
+        self.documents = [
+            CandidateDocument(
+                "old",
+                {"doc_group": "major", "rcept_dt": "2023-01-31"},
+                MetadataMatch(),
+            ),
+            CandidateDocument(
+                "new",
+                {"doc_group": "major", "rcept_dt": "2026-03-10"},
+                MetadataMatch(),
+            ),
+        ]
+        self.chunks = [
+            CandidateChunk(
+                "old:ch",
+                "old",
+                {
+                    "chunk_id": "old:ch",
+                    "doc_group": "major",
+                    "rcept_dt": "2023-01-31",
+                    "content": "상각형 조건부자본증권 발행 금액 1,000억원",
+                    "retrieval_text": "상각형 조건부자본증권 발행 금액 1,000억원",
+                },
+                MetadataMatch(),
+            ),
+            CandidateChunk(
+                "new:ch",
+                "new",
+                {
+                    "chunk_id": "new:ch",
+                    "doc_group": "major",
+                    "rcept_dt": "2026-03-10",
+                    "content": "상각형 조건부자본증권 발행 금액 3,000억원",
+                    "retrieval_text": "상각형 조건부자본증권 발행 금액 3,000억원",
+                },
+                MetadataMatch(),
+            ),
+        ]
+
+    def get_candidate_documents(self, **_filters):
+        return self.documents
+
+    def get_candidate_chunks(self, _documents):
+        return self.chunks
+
+    def retrieve(self, _query, _candidates, *, top_k=None):
+        return [RetrievalResult("old:ch", "old", 1.0, 1, {})]
+
+    def vector_search(self, *_args, **_kwargs):
+        return []
+
+    def existing_embedding_chunk_ids(self, _chunk_ids, **_identity):
+        return set()
+
+
 class HybridExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.embedding_config = EmbeddingConfig(
@@ -343,6 +400,24 @@ class HybridExecutorTests(unittest.TestCase):
         self.assertEqual(
             execution.results[0].metadata_match["hybrid"]["fallback"],
             "balance_sheet_metric_rescue",
+        )
+
+    def test_latest_event_rescue_promotes_newest_routed_document(self) -> None:
+        execution = self.executor(LatestEventBackend()).execute(
+            QueryPlan(
+                query="상각형 조건부자본증권 발행 금액",
+                task_type="corporate_event",
+                event_type="write_down_contingent_capital_security",
+                disclosure_route=("major",),
+                period=QueryPeriod(period_type="latest_event"),
+                top_k=10,
+            )
+        )
+
+        self.assertEqual(execution.results[0].chunk_id, "new:ch")
+        self.assertEqual(
+            execution.results[0].metadata_match["hybrid"]["fallback"],
+            "latest_event_document_rescue",
         )
 
     def test_vector_error_can_be_strict(self) -> None:

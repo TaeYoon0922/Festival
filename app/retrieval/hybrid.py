@@ -300,6 +300,13 @@ class HybridQueryExecutor:
                 if vector_status not in {"ok", "empty"}
                 else "filtered_candidates"
             )
+        final_results = self._rescue_latest_event_candidates(
+            final_results,
+            chunks,
+            route,
+            document_metadata,
+            top_k=min(plan.top_k, self.config.final_top_k),
+        )
         final_results = self._rescue_balance_sheet_metric_candidates(
             final_results,
             chunks,
@@ -433,6 +440,76 @@ class HybridQueryExecutor:
                 )
             )
         return output
+
+    def _rescue_latest_event_candidates(
+        self,
+        results: Sequence[RetrievalResult],
+        chunks: Sequence[CandidateChunk],
+        route: Any,
+        document_metadata: Mapping[str, Mapping[str, Any]],
+        *,
+        top_k: int,
+    ) -> list[RetrievalResult]:
+        """Prefer the newest routed event document for latest-event questions."""
+
+        if route.ranking_context.get("task_type") != "corporate_event":
+            return list(results)
+        if route.ranking_context.get("period_type") != "latest_event":
+            return list(results)
+        if not chunks or top_k <= 0:
+            return list(results)
+
+        dates_by_doc = {
+            chunk.doc_id: _compact_date(
+                chunk.chunk.get("rcept_dt")
+                or document_metadata.get(chunk.doc_id, {}).get("rcept_dt")
+            )
+            for chunk in chunks
+        }
+        latest = max((value for value in dates_by_doc.values() if value), default="")
+        if not latest:
+            return list(results)
+        latest_chunks = [
+            chunk for chunk in chunks if dates_by_doc.get(chunk.doc_id) == latest
+        ]
+        if not latest_chunks:
+            return list(results)
+
+        synthetic = [
+            RetrievalResult(
+                chunk_id=chunk.chunk_id,
+                doc_id=chunk.doc_id,
+                bm25_score=0.0,
+                rank=index,
+                metadata_match=chunk.metadata_match.to_dict(),
+            )
+            for index, chunk in enumerate(latest_chunks, start=1)
+        ]
+        ranked = self.router.rerank(
+            synthetic,
+            route,
+            chunks=latest_chunks,
+            document_metadata=document_metadata,
+            top_k=top_k,
+        )
+        priority: list[RetrievalResult] = []
+        for result in ranked:
+            match = dict(result.metadata_match)
+            match["hybrid"] = {
+                **dict(match.get("hybrid") or {}),
+                "fallback": "latest_event_document_rescue",
+                "final_rank": result.rank,
+            }
+            priority.append(
+                RetrievalResult(
+                    chunk_id=result.chunk_id,
+                    doc_id=result.doc_id,
+                    bm25_score=result.bm25_score,
+                    rank=result.rank,
+                    metadata_match=match,
+                )
+            )
+        return _merge_priority_results(priority, results, top_k=top_k)
 
     def _rescue_balance_sheet_metric_candidates(
         self,
@@ -811,6 +888,11 @@ def _merge_priority_results(
             )
         )
     return output
+
+
+def _compact_date(value: Any) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits[:8] if len(digits) >= 8 else ""
 
 
 def _require_method(backend: object, method: str) -> Any:
