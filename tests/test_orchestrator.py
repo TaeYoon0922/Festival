@@ -274,6 +274,37 @@ class AgentOrchestratorTests(unittest.TestCase):
         rows = result.answer_draft.answer_sections[0].content["evidence"]
         self.assertEqual([row["retrieval_rank"] for row in rows], [1, 2])
 
+    def test_general_evidence_is_bounded_for_answer_display(self):
+        items = [
+            _candidate(
+                f"m1:ch_{index}",
+                "m1",
+                rank=index,
+                doc_group="major",
+                content=("합병 공시 근거 " + str(index) + " ") * 200,
+                section="합병",
+            )
+            for index in range(1, 6)
+        ]
+        plan = QueryPlan(
+            query="합병 공시 내용",
+            task_type="corporate_event",
+            disclosure_route=("major",),
+        )
+        execution = _execution(plan, *items)
+
+        result = AgentOrchestrator().run(plan.raw_query, plan, execution)
+
+        self.assertIn("general_evidence_limited:max=3", result.answer_draft.warnings)
+        self.assertEqual(
+            result.answer_draft.evidence_references,
+            ("m1:ch_1", "m1:ch_2", "m1:ch_3"),
+        )
+        rows = result.answer_draft.answer_sections[0].content["evidence"]
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row["truncated"] for row in rows))
+        self.assertTrue(all(len(row["evidence_text"]) < 1100 for row in rows))
+
     def test_input_plan_candidates_results_and_scores_are_not_mutated(self):
         pair = _candidate(
             "p1:ch_fact",

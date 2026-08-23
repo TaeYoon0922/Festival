@@ -251,6 +251,17 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.company, "고려아연")
         self.assertEqual(plan.lexical_query, "매출액")
 
+    def test_net_income_query_expands_statement_row_aliases(self) -> None:
+        plan = QueryUnderstanding().understand(
+            "현대자동차 2025년 1분기 연결 당기순이익"
+        )
+
+        self.assertEqual(plan.task_type, "financial_metric")
+        self.assertEqual(plan.metric, "당기순이익")
+        self.assertIn("당기순이익", plan.lexical_query)
+        self.assertIn("분기순이익", plan.lexical_query)
+        self.assertIn("연결분기순이익", plan.lexical_query)
+
     def test_receipt_year_is_not_a_fiscal_year_filter(self) -> None:
         plan = QueryUnderstanding(self.aliases).understand(
             "고려아연이 2024년에 공시한 유상증자"

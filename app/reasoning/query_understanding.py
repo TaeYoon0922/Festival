@@ -23,6 +23,9 @@ _FINANCIAL_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("자본총계", ("자본총계", "총자본")),
     ("주당순이익", ("주당순이익", "EPS")),
 )
+_FINANCIAL_METRIC_SEARCH_TERMS = {
+    "당기순이익": ("분기순이익", "연결분기순이익", "당기순손익", "분기순손익"),
+}
 
 _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("capital_increase", ("유상증자",), "major"),
@@ -795,14 +798,23 @@ def _normalize_lexical_query(
         value = re.sub(re.escape(metric_evidence), metric, value, flags=re.IGNORECASE)
     value = re.sub(r"\s+", " ", value).strip()
     if value:
-        return value
+        return _expand_metric_lexical_query(value, metric)
     if metric:
-        return metric
+        return _expand_metric_lexical_query(metric, metric)
     if event_evidence:
         return event_evidence
     if event_type:
         return event_type
     return raw_query
+
+
+def _expand_metric_lexical_query(value: str, metric: str | None) -> str:
+    terms = [value]
+    normalized = re.sub(r"\s+", "", value).casefold()
+    for term in _FINANCIAL_METRIC_SEARCH_TERMS.get(metric or "", ()):
+        if term.casefold() not in normalized:
+            terms.append(term)
+    return " ".join(terms)
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:

@@ -29,11 +29,15 @@ from app.reasoning.router import _chunk_basis_classification
 DEFAULT_MAX_PERIODIC_EVIDENCE = 3
 _TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣]+")
 _PERIOD_TOKEN = re.compile(r"^(?:(?:19|20)\d{2}년?|[1-4]분기|\d{1,2}월)$")
+_METRIC_PARTICLE_SUFFIXES = ("과", "와", "은", "는", "이", "가", "을", "를", "의", "도", "만")
 _QUERY_STOPWORDS = {
     "무엇인가",
     "무엇인지",
     "얼마인가",
     "알려줘",
+    "비교",
+    "증감",
+    "추이",
     "확인",
     "기준",
     "관련",
@@ -80,6 +84,22 @@ _TABLE_METRIC_TERMS = {
     "판매량",
     "평균가동률",
     "비율",
+}
+_METRIC_TERM_ALIASES = {
+    "당기순이익": {
+        "당기순이익",
+        "당기순이익손실",
+        "당기순손익",
+        "분기순이익",
+        "분기순이익손실",
+        "분기순손익",
+        "연결분기순이익",
+        "연결분기순이익손실",
+        "연결분기순손익",
+        "연결당기순이익",
+        "연결당기순이익손실",
+        "연결당기순손익",
+    },
 }
 
 # A product/facility phrase identifies which row the question is asking for,
@@ -141,7 +161,7 @@ def select_periodic_evidence(
     ):
         raise ValueError("max_evidence must be a positive integer")
     plan = _plan_mapping(query_plan)
-    explicit_period = _explicit_period(plan)
+    explicit_period = _explicit_period(plan) and not _is_period_comparison(plan)
     signals = _query_signals(resolution.question, plan)
     candidates: list[tuple[float, int, str, PeriodicFact, PeriodicFactSource]] = []
     all_sources = [source for fact in resolution.facts for source in fact.sources]
@@ -241,6 +261,9 @@ def select_periodic_evidence(
         resolution,
         tuple(selected_facts),
         explicit_period=explicit_period,
+        suppress_temporal_ambiguity=(
+            _is_statement_metric_query(plan, signals) and len(selected_facts) == 1
+        ),
         selection_warnings=warnings,
     )
     return PeriodicEvidenceSelection(
@@ -295,6 +318,7 @@ def _source_relevance(
     table_metrics_complete = bool(
         table_metrics and len(matched_table_metrics) == len(table_metrics)
     )
+    exact_metric_row = bool(metric and has_exact_metric_row(source.fact_text, metric))
 
     if len(core_terms) <= 1:
         eligible = bool(
@@ -304,6 +328,7 @@ def _source_relevance(
             or subject_match
             or matched_focus_terms
             or matched_table_metrics
+            or exact_metric_row
         )
     else:
         non_metric_matches = [
@@ -320,6 +345,7 @@ def _source_relevance(
                 table_metrics_complete
                 and (not focus_terms or bool(matched_focus_terms))
             )
+            or exact_metric_row
         )
     score = (
         len(phrase_matches) * 8.0
@@ -341,10 +367,17 @@ def _source_relevance(
     )
     if any(term in text_tokens for term in core_terms):
         score += 1.0
-    if metric and has_exact_metric_row(source.fact_text, metric):
+    if exact_metric_row:
         score += _EXACT_METRIC_ROW_BOOST
     if is_income_statement_section(source.section_path):
         score += _INCOME_STATEMENT_BOOST
+    comparison_years = _period_comparison_years(plan)
+    if comparison_years:
+        source_year = _source_period_year(source)
+        if source_year == max(comparison_years):
+            score += 6.0
+        elif source_year in comparison_years:
+            score += 2.0
     requested_basis = str(plan.get("basis") or "").strip()
     classification = _chunk_basis_classification(source_chunk_view(source))
     if requested_basis in {"consolidated", "standalone"}:
@@ -382,14 +415,15 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
     )
     term_source = " ".join([question, *phrases])
     metric = str(plan.get("metric") or "").strip()
+    metric_norm = _normalize(metric)
     lexical_query = str(plan.get("lexical_query") or question).strip()
     lexical_tokens = _tokens(lexical_query)
     table_metrics = tuple(
         dict.fromkeys(
-            token
+            metric if metric and _metric_term_norm(token, metric) == metric_norm else token
             for token in lexical_tokens
-            if _normalize(token) in _TABLE_METRIC_TERMS
-            or (metric and _normalize(token) == _normalize(metric))
+            if _metric_term_norm(token, metric) in _TABLE_METRIC_TERMS
+            or (metric and _metric_term_norm(token, metric) == metric_norm)
         )
     )
     metric_norms = {_normalize(value) for value in table_metrics}
@@ -399,7 +433,7 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
             for token in lexical_tokens
             if len(_normalize(token)) >= 2
             and _normalize(token) not in companies
-            and _normalize(token) not in metric_norms
+            and _metric_term_norm(token, metric) not in metric_norms
             and token not in _QUERY_STOPWORDS
             and _normalize(token) not in _BASIS_STOPWORDS
             and not _PERIOD_TOKEN.fullmatch(token)
@@ -429,13 +463,15 @@ def _query_signals(question: str, plan: Mapping[str, Any]) -> dict[str, Any]:
 def _is_statement_metric_query(
     plan: Mapping[str, Any], signals: Mapping[str, Any]
 ) -> bool:
-    """True when the question names one statement line, a period, and 연결/별도."""
+    """True when the question names one statement line and a usable period."""
 
     metric = str(plan.get("metric") or "").strip()
     basis = str(plan.get("basis") or "").strip()
-    if not metric or basis not in {"consolidated", "standalone"}:
+    if not metric:
         return False
-    if not _explicit_period(plan):
+    if basis not in {"consolidated", "standalone", "unspecified", ""}:
+        return False
+    if not (_explicit_period(plan) or _is_period_comparison(plan)):
         return False
     if signals.get("focus_terms"):
         return False
@@ -444,6 +480,48 @@ def _is_statement_metric_query(
     if not table_metrics:
         return False
     return all(_normalize(term) == metric_norm for term in table_metrics)
+
+
+def _metric_term_norm(value: Any, metric: str) -> str:
+    normalized = _normalize(value)
+    metric_norm = _normalize(metric)
+    if not metric_norm:
+        return normalized
+    if normalized in _METRIC_TERM_ALIASES.get(metric_norm, set()):
+        return metric_norm
+    if normalized == metric_norm:
+        return normalized
+    for suffix in _METRIC_PARTICLE_SUFFIXES:
+        if normalized == f"{metric_norm}{suffix}":
+            return metric_norm
+    return normalized
+
+
+def _period_comparison_years(plan: Mapping[str, Any]) -> tuple[int, ...]:
+    comparison = plan.get("comparison")
+    if not isinstance(comparison, Mapping):
+        return ()
+    if str(comparison.get("type") or "") not in {"period_comparison", "year_over_year"}:
+        return ()
+    years = []
+    for value in comparison.get("years") or ():
+        try:
+            years.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return tuple(sorted(set(years)))
+
+
+def _source_period_year(source: PeriodicFactSource) -> int | None:
+    for key in ("year", "fiscal_year", "base_year"):
+        value = source.reporting_period.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _is_fiscal_year_query(plan: Mapping[str, Any]) -> bool:
@@ -457,6 +535,16 @@ def _is_fiscal_year_query(plan: Mapping[str, Any]) -> bool:
         and quarter is None
         and period_type in {"", "fiscalyear", "year", "annual"}
     )
+
+
+def _is_period_comparison(plan: Mapping[str, Any]) -> bool:
+    comparison = plan.get("comparison")
+    if not isinstance(comparison, Mapping):
+        return False
+    return str(comparison.get("type") or "") in {
+        "period_comparison",
+        "year_over_year",
+    }
 
 
 def _is_annual_source(source: PeriodicFactSource) -> bool:
@@ -542,6 +630,7 @@ def _selected_resolution(
     facts: tuple[PeriodicFact, ...],
     *,
     explicit_period: bool,
+    suppress_temporal_ambiguity: bool,
     selection_warnings: Sequence[str],
 ) -> PeriodicFactResolution:
     recalculated = {
@@ -551,6 +640,8 @@ def _selected_resolution(
         "same_period_fact_conflict",
         "period_evolution_preserved",
     }
+    if suppress_temporal_ambiguity:
+        recalculated.add("multiple_temporal_alternatives")
     warnings = [value for value in original.warnings if value not in recalculated]
     warnings.extend(selection_warnings)
     unresolved = [
@@ -569,13 +660,23 @@ def _selected_resolution(
         warnings.append("same_period_fact_conflict")
     if any(fact.period_evolution for fact in facts):
         warnings.append("period_evolution_preserved")
+    selected_period_count = len(
+        {
+            signature
+            for fact in facts
+            for signature in (
+                _period_signature(period) for period in fact.reporting_periods
+            )
+            if signature
+        }
+    )
     return replace(
         original,
         facts=facts,
         matching_fact_count=len(facts),
         temporal_ambiguity=(
-            len({_period_signature(period) for fact in facts for period in fact.reporting_periods}) > 1
-            if explicit_period
+            selected_period_count > 1
+            if suppress_temporal_ambiguity
             else original.temporal_ambiguity
         ),
         unresolved_requirements=tuple(dict.fromkeys(unresolved)),
