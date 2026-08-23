@@ -27,6 +27,7 @@
 - `app/reasoning/router.py`
   - section boost 비교 시 괄호/문장부호를 제거한 비교도 함께 수행한다.
   - 예: chunk section `"(첨부)연 결 재 무 제 표"`가 boost key `"첨부연결재무제표"`와 매칭된다.
+  - `자기주식취득신탁계약해지결정`, `상각형조건부자본증권발행결정` 보고서명이 해당 event type의 hard route에 걸리도록 추가했다.
 
 - `app/retrieval/hybrid.py`
   - `자산총계`, `부채총계`, `자본총계` 질문에서는 lexical/vector 상위 결과에 실제 재무상태표 chunk가 빠지는 경우를 보강한다.
@@ -47,6 +48,7 @@
   - `자산총계`, `부채총계`, `자본총계` 검색어에 `자산 총 계`처럼 공시 표에 띄어쓰기된 계정명을 추가해 재무상태표 recall을 높였다.
   - `누적`, `누계`, `3개월` 같은 기간 열 선택 단어를 lexical 검색어에서 제거해 주석의 `누적비지배지분` 같은 무관 chunk recall을 줄였다.
   - `공급계약 금액과 매출액 대비 비율`처럼 이벤트 질문에 재무지표 단어가 포함된 경우에도 기업 이벤트 라우팅을 우선하도록 했다.
+  - `자기주식 취득 신탁계약 해지`, `상각형 조건부자본증권 발행`을 주요사항 이벤트로 인식하도록 추가했다.
 
 - `app/reasoning/answer_composer.py`
   - 답변 렌더링 단계에서 사용할 수 있도록 정기공시 request에 `comparison` 정보를 포함했다.
@@ -68,11 +70,11 @@
 - Tests
   - `tests/test_periodic_metric_view.py`
   - `tests/test_periodic_evidence_selector.py`
-- `tests/test_query_understanding.py`
-- `tests/test_orchestrator.py`
-- `tests/test_hybrid_retrieval.py`
-- `tests/test_answer_generator.py`
-- `tests/test_answer_composer.py`
+  - `tests/test_query_understanding.py`
+  - `tests/test_orchestrator.py`
+  - `tests/test_hybrid_retrieval.py`
+  - `tests/test_answer_generator.py`
+  - `tests/test_answer_composer.py`
 
 ## Verified Questions
 
@@ -93,7 +95,7 @@
 - `NAVER 2025년 1분기 연결 매출액`
   - 손익계산서의 `영업수익 (주5)` 행을 매출액으로 선택
 - `삼성전자 2024년 사업보고서 연결 자산총계`
-  - `(첨부)연결재무제표`의 `자 산 총 계` 행을 선택하도록 보강 중
+  - 불필요한 자본변동표/대체 source 없이 `자산총계 | 514,531,948` 행만 선택
 
 ## Test Results
 
@@ -115,6 +117,7 @@ Local:
 859 passed, 1 skipped
 860 passed, 1 skipped
 860 passed, 1 skipped
+862 passed, 1 skipped
 ```
 
 Additional diagnostic run:

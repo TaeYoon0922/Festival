@@ -481,6 +481,28 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(route.hard_routes["doc_group"], "exchange")
         self.assertEqual(route.hard_routes["event_type"], "supply_contract")
 
+    def test_treasury_share_trust_termination_is_a_major_event(self) -> None:
+        plan = QueryUnderstanding({"하나금융지주": {"하나금융지주"}}).understand(
+            "하나금융지주 자기주식 취득 신탁계약 해지 내용 알려줘"
+        )
+        route = QueryRouter().route(plan)
+
+        self.assertEqual(plan.task_type, "corporate_event")
+        self.assertEqual(plan.event_type, "treasury_share_trust_termination")
+        self.assertEqual(plan.disclosure_route, ("major",))
+        self.assertEqual(route.hard_routes["event_type"], "treasury_share_trust_termination")
+
+    def test_write_down_capital_security_is_a_major_event(self) -> None:
+        plan = QueryUnderstanding().understand(
+            "상각형 조건부자본증권 발행결정 최근 공시 금액은?"
+        )
+        route = QueryRouter().route(plan)
+
+        self.assertEqual(plan.task_type, "corporate_event")
+        self.assertEqual(plan.event_type, "write_down_contingent_capital_security")
+        self.assertEqual(plan.disclosure_route, ("major",))
+        self.assertEqual(route.hard_routes["event_type"], "write_down_contingent_capital_security")
+
     def test_share_holding_questions_are_not_reclassified_as_facility_investment(
         self,
     ) -> None:

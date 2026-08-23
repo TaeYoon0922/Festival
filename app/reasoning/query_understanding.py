@@ -34,6 +34,27 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("capital_increase", ("유상증자",), "major"),
     ("convertible_bond", ("전환사채",), "major"),
     ("treasury_share_disposal", ("자기주식처분", "자사주처분"), "major"),
+    (
+        "treasury_share_trust_termination",
+        (
+            "자기주식취득신탁계약해지",
+            "자기주식 취득 신탁계약 해지",
+            "신탁계약해지",
+            "신탁계약 해지",
+        ),
+        "major",
+    ),
+    (
+        "write_down_contingent_capital_security",
+        (
+            "상각형조건부자본증권",
+            "상각형 조건부자본증권",
+            "조건부자본증권",
+            "자본증권발행",
+            "자본증권 발행",
+        ),
+        "major",
+    ),
     ("spin_off", ("회사분할", "분할신설", "분할비율"), "major"),
     ("merger", ("합병", "흡수합병"), "major"),
     ("supply_contract", ("단일판매", "공급계약", "수주계약"), "exchange"),
