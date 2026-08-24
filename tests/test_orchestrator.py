@@ -340,6 +340,78 @@ class AgentOrchestratorTests(unittest.TestCase):
             ),
         )
 
+    def test_corporate_event_table_rows_are_focused_by_question(self):
+        pair = _candidate(
+            "m1:ch_table",
+            "m1",
+            rank=1,
+            doc_group="major",
+            content=(
+                "[기업명] 케이티\n"
+                "[공시명] 주요사항보고서(자기주식처분결정)\n"
+                "[Section Path] 자기주식 처분 결정\n"
+                "[Table] 자기주식 처분 결정\n"
+                "| 1. 처분예정주식(주) | 보통주식 | 131,690 |\n"
+                "| 2. 처분 대상 주식가격(원) | 보통주식 | 31,350 |\n"
+                "| 5. 처분목적 | 임직원 주식보상 |\n"
+                "| 7. 위탁투자중개업자 | NH투자증권 |\n"
+                "| - 사외이사참석여부 | 참석(명) | 8 |\n"
+            ),
+            section="자기주식 처분 결정",
+        )
+        plan = QueryPlan(
+            query="자기주식 처분 예정 보통주 수와 가격",
+            task_type="corporate_event",
+            disclosure_route=("major",),
+        )
+        execution = _execution(plan, pair)
+
+        result = AgentOrchestrator().run(plan.raw_query, plan, execution)
+
+        row = result.answer_draft.answer_sections[0].content["evidence"][0]
+        self.assertIn("처분예정주식", row["evidence_text"])
+        self.assertIn("131,690", row["evidence_text"])
+        self.assertIn("처분 대상 주식가격", row["evidence_text"])
+        self.assertIn("31,350", row["evidence_text"])
+        self.assertNotIn("위탁투자중개업자", row["evidence_text"])
+        self.assertNotIn("사외이사참석여부", row["evidence_text"])
+        self.assertTrue(row["truncated"])
+
+    def test_corporate_event_focus_ignores_contract_note_rows(self):
+        pair = _candidate(
+            "x1:ch_contract",
+            "x1",
+            rank=1,
+            doc_group="exchange",
+            content=(
+                "[기업명] 한국항공우주\n"
+                "[공시명] 단일판매ㆍ공급계약체결\n"
+                "[Table] 단일판매ㆍ공급계약 체결\n"
+                "| - 체결계약명 | 항공기 공급계약 |\n"
+                "| 2. 계약내역 | 계약금액(원) | 100,000 |\n"
+                "| 2. 계약내역 | 매출액대비(%) | 10.5 |\n"
+                "| 3. 계약상대 | AIRBUS |\n"
+                "| 5. 계약기간 | 시작일 | 2026-01-01 |\n"
+                "| 가. 상기 계약금액은 부가가치세 제외 금액입니다. |  |  |\n"
+                "| 1) 상기 계약기간은 변경될 수 있습니다. |  |  |\n"
+            ),
+            section="단일판매ㆍ공급계약 체결",
+        )
+        plan = QueryPlan(
+            query="최근 공급계약 금액과 계약상대방은?",
+            task_type="corporate_event",
+            disclosure_route=("exchange",),
+        )
+        execution = _execution(plan, pair)
+
+        result = AgentOrchestrator().run(plan.raw_query, plan, execution)
+
+        text = result.answer_draft.answer_sections[0].content["evidence"][0]["evidence_text"]
+        self.assertIn("계약금액", text)
+        self.assertIn("계약상대", text)
+        self.assertNotIn("부가가치세 제외", text)
+        self.assertNotIn("변경될 수 있습니다", text)
+
     def test_holding_route_general_evidence_keeps_nine_items_without_resolver(self):
         items = [
             _candidate(

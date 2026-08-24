@@ -603,12 +603,47 @@ Changed:
 
 - `app/agent/orchestrator.py`
 
+### 8. Focused corporate event table rows
+
+Question:
+
+```text
+KT 자기주식 처분 예정 보통주 수와 가격은?
+한국항공우주 최근 공급계약 금액과 매출액 대비 비율은?
+현대건설 최근 단일판매공급계약 계약상대방은?
+```
+
+Before:
+
+- corporate event general evidence가 표 전체를 보여주면서 질문과 무관한 행까지 길게 출력했다.
+- 예: 자기주식 처분 질문에 `위탁투자중개업자`, `사외이사참석여부` 등이 함께 노출됐다.
+- 공급계약 질문에서도 `기타 투자판단` 주석 행이 `계약금액` 같은 단어를 포함하면 같이 살아남았다.
+
+After:
+
+- corporate event 표는 질문 유형별 핵심 행만 남긴다.
+- 자기주식 처분: 처분예정주식, 처분 대상 주식가격, 필요 시 처분예정금액/목적
+- 공급계약: 체결계약명, 계약상대, 판매공급지역, 질문에 따라 계약금액/매출액대비/계약기간
+- 신규시설투자, 신탁계약해지, 조건부자본증권, 유상증자도 핵심 행 중심으로 축약한다.
+- 주석/설명 행은 실제 필드 라벨이 아니면 제외한다.
+- 대표 길이 변화:
+
+```text
+KT 자기주식 처분: 4801자 -> 2078자
+한국항공우주 공급계약: 4673자 -> 2342자
+현대건설 계약상대방: 4581자 -> 1949자
+```
+
+Changed:
+
+- `app/agent/orchestrator.py`
+
 ## 2026-08-24 verification
 
 Local full test:
 
 ```text
-870 passed, 1 skipped
+872 passed, 1 skipped
 ```
 
 Server 12-question regression:
@@ -644,8 +679,25 @@ gold_source_not_cited: 2
 gold_evidence_terms_missing: 0
 ```
 
+Server 130-question expanded diagnostic:
+
+```text
+total: 130
+errors: 0
+check_needed: 8
+long_gt5000: 0
+max_len: 4205
+```
+
+Additional `확인 필요` cases from the expanded set:
+
+- `F087` 유한양행 2024년 사업보고서 연결 부채총계
+- `F109` 두산로보틱스 최근 신규시설투자 내용
+- `F121` 삼성전자 2030년 사업보고서 연결 매출액
+
 Interpretation:
 
 - The 70-question diagnostic set is stable for the recently fixed financial metric, latest event, and reporter-mismatch cases.
 - Gold60 improved after avoiding unconditional latest-event filtering, allowing the primary general evidence row to carry more source text, and using route-specific evidence counts.
+- The 130-question expanded set found verbose corporate event answers; focused event table rows reduced those answers while preserving Gold60 success.
 - Remaining Gold60 failures are mostly retrieval misses or cited-source mismatches that need event/holding-specific resolver work rather than longer generic evidence output.

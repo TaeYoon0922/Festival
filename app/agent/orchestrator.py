@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
@@ -200,7 +201,12 @@ def _compose_general_evidence(
     max_evidence = _general_evidence_limit(evidence, task_type=task_type)
     selected_items = ordered_items[:max_evidence]
     evidence_rows = [
-        _general_evidence_row(item, is_primary=index == 0)
+        _general_evidence_row(
+            item,
+            question=evidence.question,
+            task_type=task_type,
+            is_primary=index == 0,
+        )
         for index, item in enumerate(selected_items)
     ]
     citations = tuple(_general_citation(item) for item in selected_items)
@@ -246,14 +252,25 @@ def _compose_general_evidence(
     )
 
 
-def _general_evidence_row(item: EvidenceItem, *, is_primary: bool = False) -> dict[str, Any]:
+def _general_evidence_row(
+    item: EvidenceItem,
+    *,
+    question: str = "",
+    task_type: str = "",
+    is_primary: bool = False,
+) -> dict[str, Any]:
     limit = (
         MAX_PRIMARY_GENERAL_EVIDENCE_TEXT_CHARS
         if is_primary
         else MAX_GENERAL_EVIDENCE_TEXT_CHARS
     )
-    evidence_text, truncated = _bounded_general_evidence_text(
+    focused_text, focused = _focused_general_evidence_text(
         item.evidence_text,
+        question=question,
+        task_type=task_type,
+    )
+    evidence_text, truncated = _bounded_general_evidence_text(
+        focused_text,
         limit=limit,
     )
     return {
@@ -261,11 +278,152 @@ def _general_evidence_row(item: EvidenceItem, *, is_primary: bool = False) -> di
         "doc_id": item.doc_id,
         "section_path": list(item.section_path),
         "evidence_text": evidence_text,
-        "truncated": truncated,
+        "truncated": truncated or focused,
         "retrieval_rank": item.retrieval_rank,
         "retrieval_score": item.retrieval_score,
         "source_refs": copy.deepcopy(list(item.source_refs)),
     }
+
+
+def _focused_general_evidence_text(
+    value: str,
+    *,
+    question: str,
+    task_type: str,
+) -> tuple[str, bool]:
+    text = str(value or "")
+    if task_type != "corporate_event":
+        return text, False
+    focus_terms = _event_focus_terms(question)
+    if not focus_terms:
+        return text, False
+
+    prefix: list[str] = []
+    focused_rows: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("|"):
+            if _is_markdown_separator(stripped):
+                continue
+            if _event_focus_row_matches(stripped, focus_terms):
+                focused_rows.append(stripped)
+        elif len(prefix) < 5 and (
+            stripped.startswith("[기업명]")
+            or stripped.startswith("[공시명]")
+            or stripped.startswith("[Section Path]")
+            or stripped.startswith("[Table]")
+            or stripped.startswith("[기간표현]")
+        ):
+            prefix.append(stripped)
+
+    if not focused_rows:
+        return text, False
+    return "\n".join([*prefix, *focused_rows]), True
+
+
+def _event_focus_terms(question: str) -> tuple[str, ...]:
+    compact = _compact_general_text(question)
+    terms: list[str] = []
+    if any(
+        trigger in compact
+        for trigger in ("자기주식처분", "자사주처분", "처분예정", "처분가격", "처분주식")
+    ):
+        terms.append("처분예정주식")
+        if any(term in compact for term in ("가격", "주식가격")):
+            terms.append("처분대상주식가격")
+        if "금액" in compact:
+            terms.append("처분예정금액")
+        if any(term in compact for term in ("목적", "내용")):
+            terms.append("처분목적")
+        return tuple(dict.fromkeys(_compact_general_text(term) for term in terms))
+
+    if any(trigger in compact for trigger in ("공급계약", "단일판매", "수주계약")):
+        terms.append("체결계약명")
+        terms.append("계약상대")
+        terms.append("판매공급지역")
+        if any(term in compact for term in ("금액", "계약내역", "내용")):
+            terms.append("계약금액")
+        if any(term in compact for term in ("매출액대비", "비율", "내용")):
+            terms.extend(("최근매출액", "매출액대비"))
+        if any(term in compact for term in ("기간", "내용")):
+            terms.append("계약기간")
+        if any(term in compact for term in ("일자", "내용")):
+            terms.append("계약수주일자")
+        return tuple(dict.fromkeys(_compact_general_text(term) for term in terms))
+
+    rules = (
+        (
+            ("신규시설투자", "시설투자"),
+            (
+                "투자금액",
+                "자기자본",
+                "투자목적",
+                "투자기간",
+                "자금조달",
+            ),
+        ),
+        (
+            ("신탁계약해지", "자기주식취득신탁계약해지"),
+            ("계약금액", "해지목적", "해지기관", "해지예정일", "해지전", "해지후"),
+        ),
+        (
+            ("조건부자본증권", "상각형조건부자본증권", "사채총액"),
+            ("사채의권면", "전자등록총액", "발행가액", "이자율", "만기일"),
+        ),
+        (
+            ("유상증자",),
+            (
+                "신주의종류와수",
+                "신주발행가액",
+                "자금조달의목적",
+                "시설자금",
+                "운영자금",
+                "채무상환자금",
+                "증자방식",
+            ),
+        ),
+    )
+    terms: list[str] = []
+    for triggers, row_terms in rules:
+        if any(trigger in compact for trigger in triggers):
+            terms.extend(_compact_general_text(term) for term in row_terms)
+    return tuple(dict.fromkeys(term for term in terms if term))
+
+
+def _event_focus_row_matches(row: str, focus_terms: Sequence[str]) -> bool:
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    if not cells:
+        return False
+    leading = cells[0]
+    leading_compact = _compact_general_text(leading)
+    if _event_note_row(leading, leading_compact):
+        return False
+    label = _compact_general_text(" ".join(cells[:2]))
+    return any(term in label for term in focus_terms)
+
+
+def _event_note_row(label: str, compact_label: str) -> bool:
+    if "체결계약명" in compact_label:
+        return False
+    stripped = label.strip()
+    return bool(
+        re.match(r"^[가-힣]\.", stripped)
+        or re.match(r"^\d+\)", stripped)
+        or stripped.startswith("※")
+        or stripped.startswith("-")
+        or stripped.startswith("상기")
+        or stripped.startswith("- 상기")
+    )
+
+
+def _is_markdown_separator(value: str) -> bool:
+    return bool(re.fullmatch(r"\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?", value))
+
+
+def _compact_general_text(value: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
 
 
 def _bounded_general_evidence_text(value: str, *, limit: int = MAX_GENERAL_EVIDENCE_TEXT_CHARS) -> tuple[str, bool]:
