@@ -175,7 +175,14 @@ class QueryPlan:
     def backend_filters(self) -> dict[str, Any]:
         """Translate into the existing ``MetadataBackend`` contract unchanged."""
 
-        period_month = self.period.quarter * 3 if self.period.quarter else None
+        # base_month filters apply only to fiscal/periodic reports. Major and
+        # exchange filings store null base_month; quarter language there means a
+        # receipt-date window instead.
+        period_month = (
+            self.period.quarter * 3
+            if self.period.is_fiscal and self.period.quarter
+            else None
+        )
         return {
             "company": list(self.companies) or None,
             "year": list(self.years) if self.period.is_fiscal and self.years else None,

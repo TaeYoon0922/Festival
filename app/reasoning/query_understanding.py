@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from calendar import monthrange
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import date
 from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
@@ -454,6 +455,12 @@ def _period_from_query(
         if 0 <= end_year - start_year <= 20:
             years = tuple(range(start_year, end_year + 1))
     spans = [span for _, span in years_with_spans]
+    relative_year, relative_span = _relative_calendar_year(query)
+    if relative_year is not None:
+        if relative_span is not None:
+            spans.append(relative_span)
+        if relative_year not in years:
+            years = tuple(sorted({*years, relative_year}))
     quarter_match = re.search(r"(?<!\d)([1-4])\s*분기", query)
     quarter = int(quarter_match.group(1)) if quarter_match else None
     if quarter_match:
@@ -570,6 +577,13 @@ def _period_from_query(
                 [period.from_date, period.to_date],
             ),
         )
+    if task_type == "corporate_event":
+        return _corporate_event_period(
+            year=year,
+            quarter=quarter,
+            years=years,
+            spans=spans,
+        )
     if task_type == "financial_metric" or "periodic" in routes:
         return (
             QueryPeriod(
@@ -608,14 +622,64 @@ def _period_from_query(
             years,
             _date_semantics(None, None, []),
         )
-    if task_type == "corporate_event":
-        return (
-            QueryPeriod(period_type="latest_event"),
-            spans,
-            years,
-            _date_semantics(None, None, []),
-        )
     return QueryPeriod(), spans, years, _date_semantics(None, None, [])
+
+
+def _corporate_event_period(
+    *,
+    year: int | None,
+    quarter: int | None,
+    years: tuple[int, ...],
+    spans: list[tuple[int, int]],
+) -> tuple[QueryPeriod, list[tuple[int, int]], tuple[int, ...], dict[str, Any]]:
+    """Map calendar year/quarter on events to receipt windows, not base_month."""
+
+    if year is not None and quarter is not None:
+        start_month = (quarter - 1) * 3 + 1
+        end_month = start_month + 2
+        from_date = f"{year:04d}-{start_month:02d}-01"
+        to_date = (
+            f"{year:04d}-{end_month:02d}-{monthrange(year, end_month)[1]:02d}"
+        )
+        return (
+            QueryPeriod(
+                year=year,
+                quarter=quarter,
+                from_date=from_date,
+                to_date=to_date,
+                period_type="receipt_date",
+            ),
+            spans,
+            (year,),
+            _date_semantics(
+                "receipt", "corporate_event_quarter", [from_date, to_date]
+            ),
+        )
+    if year is not None:
+        period = _whole_year_period(year, "receipt_date")
+        return (
+            period,
+            spans,
+            (year,),
+            _date_semantics(
+                "receipt", "corporate_event_year", [period.from_date, period.to_date]
+            ),
+        )
+    return (
+        QueryPeriod(period_type="latest_event"),
+        spans,
+        years,
+        _date_semantics(None, None, []),
+    )
+
+
+def _relative_calendar_year(query: str) -> tuple[int | None, tuple[int, int] | None]:
+    match = re.search(r"올해|금년|작년", query)
+    if match is None:
+        return None, None
+    today = date.today()
+    year = today.year - 1 if match.group(0) == "작년" else today.year
+    return year, match.span()
 
 
 def _date_semantic_role(query: str, task_type: str) -> tuple[str | None, str | None]:

@@ -1,5 +1,7 @@
 import inspect
 import unittest
+from datetime import date
+from unittest.mock import patch
 
 from app.agent.task_router import route_task
 from app.reasoning import (
@@ -292,6 +294,29 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.period.period_type, "latest_holding")
         self.assertEqual(decision.task_type, "holding_event")
         self.assertEqual(decision.resolver_type, "holding_event_resolver")
+
+    def test_corporate_event_quarter_uses_receipt_window_not_base_month(self) -> None:
+        aliases = {**self.aliases, "기아": {"기아"}}
+        query = "올해 기아의 1분기 자기주식 처분의 목적이 뭐야?"
+        with patch(
+            "app.reasoning.query_understanding.date"
+        ) as mock_date:
+            mock_date.today.return_value = date(2026, 8, 24)
+            plan = QueryUnderstanding(aliases).understand(query)
+            route = QueryRouter().route(plan)
+
+        self.assertEqual(plan.task_type, "corporate_event")
+        self.assertEqual(plan.event_type, "treasury_share_disposal")
+        self.assertEqual(plan.disclosure_route, ("major",))
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2026-01-01")
+        self.assertEqual(plan.period.to_date, "2026-03-31")
+        self.assertIsNone(plan.backend_filters()["period"])
+        self.assertIsNone(plan.backend_filters()["year"])
+        self.assertEqual(route.hard_filters["rcept_dt"], ("2026-01-01", "2026-03-31"))
+        self.assertNotIn("period", route.hard_filters)
+        self.assertEqual(route.hard_routes["doc_group"], "major")
+        self.assertEqual(route.hard_routes["event_type"], "treasury_share_disposal")
 
     def test_holding_reference_dates_do_not_become_receipt_filters(self) -> None:
         queries = (
