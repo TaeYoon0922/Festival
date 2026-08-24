@@ -399,7 +399,133 @@ class HybridExecutorTests(unittest.TestCase):
         self.assertEqual(execution.results[0].chunk_id, "balance-sheet")
         self.assertEqual(
             execution.results[0].metadata_match["hybrid"]["fallback"],
-            "balance_sheet_metric_rescue",
+            "statement_metric_rescue",
+        )
+
+    def test_income_statement_metric_rescue_prefers_standalone_statement(self) -> None:
+        backend = FakeHybridBackend(vector_mode="empty")
+        backend.chunks.append(
+            CandidateChunk(
+                "business-note",
+                "d1",
+                {
+                    "chunk_id": "business-note",
+                    "doc_group": "periodic",
+                    "section_path": ["사업의 내용", "매출 및 수주상황"],
+                    "statement_scope": "standalone",
+                    "content": "※ 매출액은 외부고객으로부터의 매출액을 의미함.",
+                    "retrieval_text": "※ 매출액은 외부고객으로부터의 매출액을 의미함.",
+                },
+                MetadataMatch(),
+            )
+        )
+        backend.chunks.append(
+            CandidateChunk(
+                "standalone-income",
+                "d1",
+                {
+                    "chunk_id": "standalone-income",
+                    "doc_group": "periodic",
+                    "section_path": ["별도 포괄손익계산서"],
+                    "statement_scope": "standalone",
+                    "content": (
+                        "| 열 1 | 제 58 기 1분기 / 3개월 |\n"
+                        "| --- | --- |\n"
+                        "| 매출액 | 27,187,772 |"
+                    ),
+                    "retrieval_text": (
+                        "| 열 1 | 제 58 기 1분기 / 3개월 |\n"
+                        "| --- | --- |\n"
+                        "| 매출액 | 27,187,772 |"
+                    ),
+                },
+                MetadataMatch(),
+            )
+        )
+        execution = self.executor(backend).execute(
+            QueryPlan(
+                query="매출액",
+                task_type="financial_metric",
+                metric="매출액",
+                disclosure_route=("periodic",),
+                basis="standalone",
+                years=(2025,),
+                section_boosts={"손익계산서": 1.0, "포괄손익계산서": 1.0},
+                top_k=10,
+            )
+        )
+
+        self.assertEqual(execution.results[0].chunk_id, "standalone-income")
+        self.assertEqual(
+            execution.results[0].metadata_match["hybrid"]["fallback"],
+            "statement_metric_rescue",
+        )
+
+    def test_income_statement_metric_rescue_accepts_operating_revenue_alias(self) -> None:
+        backend = FakeHybridBackend(vector_mode="empty")
+        backend.chunks.append(
+            CandidateChunk(
+                "revenue-note",
+                "d1",
+                {
+                    "chunk_id": "revenue-note",
+                    "doc_group": "periodic",
+                    "section_path": ["고객과의 계약에서 생기는 수익"],
+                    "statement_scope": "consolidated",
+                    "content": (
+                        "| 열 1 | 열 2 | 수익(매출액) |\n"
+                        "| --- | --- | --- |\n"
+                        "| 재화나 용역의 이전 시기 | 한 시점에 인식 | 2,107,363,700 |"
+                    ),
+                    "retrieval_text": (
+                        "| 열 1 | 열 2 | 수익(매출액) |\n"
+                        "| --- | --- | --- |\n"
+                        "| 재화나 용역의 이전 시기 | 한 시점에 인식 | 2,107,363,700 |"
+                    ),
+                },
+                MetadataMatch(),
+            )
+        )
+        backend.chunks.append(
+            CandidateChunk(
+                "income-operating-revenue",
+                "d1",
+                {
+                    "chunk_id": "income-operating-revenue",
+                    "doc_group": "periodic",
+                    "section_path": ["연결 포괄손익계산서"],
+                    "statement_scope": "consolidated",
+                    "content": (
+                        "| 열 1 | 제 27 기 1분기 / 3개월 |\n"
+                        "| --- | --- |\n"
+                        "| 영업수익 (주5) | 2,786,783,351,907 |"
+                    ),
+                    "retrieval_text": (
+                        "| 열 1 | 제 27 기 1분기 / 3개월 |\n"
+                        "| --- | --- |\n"
+                        "| 영업수익 (주5) | 2,786,783,351,907 |"
+                    ),
+                },
+                MetadataMatch(),
+            )
+        )
+        execution = self.executor(backend).execute(
+            QueryPlan(
+                query="매출액",
+                task_type="financial_metric",
+                metric="매출액",
+                disclosure_route=("periodic",),
+                basis="consolidated",
+                years=(2025,),
+                section_boosts={"손익계산서": 1.0, "포괄손익계산서": 1.0},
+                top_k=10,
+            )
+        )
+
+        self.assertEqual(execution.results[0].chunk_id, "income-operating-revenue")
+        self.assertEqual(
+            execution.results[0].metadata_match["hybrid"]["fallback"],
+            "statement_metric_rescue",
         )
 
     def test_latest_event_rescue_promotes_newest_routed_document(self) -> None:

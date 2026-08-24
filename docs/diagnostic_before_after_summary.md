@@ -437,3 +437,150 @@ Important interpretation:
 
 - Remaining `확인 필요` cases are either corpus coverage issues, reporter evidence not found, or ranking/comparison resolver gaps.
 - Previously dangerous cases where the system answered with unrelated evidence were changed to either correct routed evidence or explicit `확인 필요`.
+
+## 2026-08-24 follow-up fixes
+
+### 1. Standalone revenue question with a particle
+
+Question:
+
+```text
+현대자동차 2025년 1분기 별도 매출액은?
+```
+
+Before:
+
+- `매출액은`이 lexical query에 그대로 남아 `매출액은 외부고객으로부터의 매출액을 의미함` 같은 사업부문 설명 chunk가 먼저 선택됐다.
+- 결과적으로 별도 손익계산서의 `매출액` 행이 아니라 서술형 사업 설명이 출력됐다.
+
+After:
+
+- 재무지표 뒤 조사 `은/는/이/가/을/를/의`를 제거해 lexical query를 `매출액`으로 정규화한다.
+- 손익계산서 exact row rescue를 재무상태표뿐 아니라 `매출액`, `영업이익`, `당기순이익`에도 적용한다.
+- 서버 확인 결과:
+
+```text
+| 매출액 | 19,227,092 |
+```
+
+Changed:
+
+- `app/reasoning/query_understanding.py`
+- `app/retrieval/hybrid.py`
+
+### 2. Period comparison column projection
+
+Question:
+
+```text
+현대자동차 2025년 1분기 매출액과 2024년 1분기 매출액 비교
+```
+
+Before:
+
+- 비교 질문이면 `3개월`과 `누적` 컬럼을 모두 유지했다.
+- 이후 축소된 표 행이 원문에 그대로 존재하지 않아 citation scope 검증에서 값 행이 제거될 수 있었다.
+
+After:
+
+- 전년동기 비교 질문에서도 분기 질문은 기본적으로 `3개월` 컬럼만 남긴다.
+- 표 행 검증은 축소된 행 전체 문자열이 아니라 각 셀 값이 선택 원문에 있는지 확인한다.
+- 서버 확인 결과:
+
+```text
+| 매출액 | 44,407,761 | 40,658,539 |
+```
+
+Changed:
+
+- `app/reasoning/periodic_metric_view.py`
+- `app/generation/answer_generator.py`
+
+### 3. NAVER operating revenue alias in retrieval rescue
+
+Question:
+
+```text
+NAVER 2025년 1분기 연결 매출액은?
+```
+
+Before:
+
+- answer-time projection은 `영업수익`을 `매출액` alias로 처리했지만, retrieval rescue는 literal `매출액` exact-term 점수만 봤다.
+- 그 결과 손익계산서의 `영업수익` 행 대신 수익 주석 표가 선택될 수 있었다.
+
+After:
+
+- retrieval rescue에서도 `has_exact_metric_row()`를 사용해 `영업수익 (주5)`를 매출액 행으로 인정한다.
+- 서버 확인 결과:
+
+```text
+| 영업수익 (주5) | 2,786,783,351,907 |
+```
+
+Changed:
+
+- `app/retrieval/hybrid.py`
+
+### 4. General evidence coverage
+
+Before:
+
+- general evidence 답변을 상위 3개로 제한하면서 답변 길이는 안정화됐지만, `gold60` 평가에서 정답 chunk가 4~5위에 있는 질문의 citation coverage가 떨어졌다.
+
+After:
+
+- 항목당 600자 제한은 유지하고, general evidence 개수만 5개로 조정했다.
+- 70개 진단 질문 기준 5,000자 초과 답변은 여전히 0개였다.
+
+Changed:
+
+- `app/agent/orchestrator.py`
+
+## 2026-08-24 verification
+
+Local full test:
+
+```text
+868 passed, 1 skipped
+```
+
+Server 12-question regression:
+
+```text
+R01-R12 all passed basic checks
+```
+
+Server 70-question diagnostic:
+
+```text
+total: 70
+errors: 0
+check_needed: 5
+retrieval0_or_none: 3
+long_gt5000: 0
+max_len: 3606
+routes: periodic_fact_resolver 35, general_evidence 28, holding_event_resolver 7
+```
+
+Remaining `확인 필요` questions:
+
+- `X020` 엘앤에프 2024년 사업보고서 연결 부채총계
+- `X037` 2차전지 기업 중 2025년 신규시설투자 금액이 큰 곳
+- `X050` 삼성전자 국민연금 최근 보유비율
+- `X055` 에코프로비엠 국민연금 보유 주식수 변동
+- `X058` 존재하지않는회사 2025년 연결 매출액
+
+Gold60 server run after follow-up:
+
+```text
+success: 45 / 60
+retrieval_miss: 7
+gold_source_not_cited: 7
+gold_evidence_terms_missing: 1
+```
+
+Interpretation:
+
+- The 70-question diagnostic set is stable for the recently fixed financial metric, latest event, and reporter-mismatch cases.
+- Gold60 still exposes broader retrieval/field-extraction issues in general evidence paths, especially periodic business descriptions, event field questions, and holding questions that ask for a specific transaction-date row.

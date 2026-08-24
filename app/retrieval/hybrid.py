@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.router import QueryRouter
+from app.reasoning.periodic_metric_view import has_exact_metric_row
 from app.retrieval.embeddings import EmbeddingConfig, EmbeddingProvider
 from app.retrieval.interfaces import (
     CandidateChunk,
@@ -25,6 +27,8 @@ DIAGNOSTIC_WEIGHT_GRID: tuple[tuple[float, float], ...] = (
     (0.80, 0.20),
 )
 _BALANCE_SHEET_METRICS = frozenset({"자산총계", "부채총계", "자본총계"})
+_INCOME_STATEMENT_METRICS = frozenset({"매출액", "영업이익", "당기순이익"})
+_STATEMENT_METRICS = _BALANCE_SHEET_METRICS | _INCOME_STATEMENT_METRICS
 
 
 @dataclass(frozen=True)
@@ -307,7 +311,7 @@ class HybridQueryExecutor:
             document_metadata,
             top_k=min(plan.top_k, self.config.final_top_k),
         )
-        final_results = self._rescue_balance_sheet_metric_candidates(
+        final_results = self._rescue_statement_metric_candidates(
             final_results,
             chunks,
             route,
@@ -511,7 +515,7 @@ class HybridQueryExecutor:
             )
         return _merge_priority_results(priority, results, top_k=top_k)
 
-    def _rescue_balance_sheet_metric_candidates(
+    def _rescue_statement_metric_candidates(
         self,
         results: Sequence[RetrievalResult],
         chunks: Sequence[CandidateChunk],
@@ -520,17 +524,20 @@ class HybridQueryExecutor:
         *,
         top_k: int,
     ) -> list[RetrievalResult]:
-        """Promote statement rows that lexical/vector retrieval missed.
+        """Promote exact financial statement rows that retrieval missed.
 
         Balance-sheet labels are often spaced out in DART tables, for example
         ``자 산 총 계``.  PostgreSQL FTS can rank broader note tables above the
-        actual statement row, so use the already-filtered candidate universe as
-        a narrow rescue source for these exact metrics only.
+        actual statement row.  The same happens for standalone income-statement
+        rows when business-segment notes contain repeated sales terms.  Use the
+        already-filtered candidate universe as a narrow rescue source, then keep
+        only exact metric rows in the expected statement section.
         """
 
         if route.ranking_context.get("task_type") != "financial_metric":
             return list(results)
-        if route.ranking_context.get("metric") not in _BALANCE_SHEET_METRICS:
+        metric = str(route.ranking_context.get("metric") or "")
+        if metric not in _STATEMENT_METRICS:
             return list(results)
         if not chunks or top_k <= 0:
             return list(results)
@@ -555,15 +562,25 @@ class HybridQueryExecutor:
         rescue: list[RetrievalResult] = []
         for result in ranked:
             components = dict(result.metadata_match.get("score_components") or {})
+            chunk = next(
+                (candidate.chunk for candidate in chunks if candidate.chunk_id == result.chunk_id),
+                {},
+            )
+            has_metric_row = has_exact_metric_row(
+                str(chunk.get("content") or chunk.get("retrieval_text") or ""),
+                metric,
+            )
             if (
-                float(components.get("exact_term", 0.0)) < 0.65
+                not has_metric_row
+                and float(components.get("exact_term", 0.0)) < 0.65
                 or float(components.get("section", 0.0)) < 0.85
+                or not _statement_section_matches_metric(chunk, metric)
             ):
                 continue
             match = dict(result.metadata_match)
             match["hybrid"] = {
                 **dict(match.get("hybrid") or {}),
-                "fallback": "balance_sheet_metric_rescue",
+                "fallback": "statement_metric_rescue",
                 "final_rank": result.rank,
             }
             rescue.append(
@@ -893,6 +910,20 @@ def _merge_priority_results(
 def _compact_date(value: Any) -> str:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
     return digits[:8] if len(digits) >= 8 else ""
+
+
+def _statement_section_matches_metric(chunk: Mapping[str, Any], metric: str) -> bool:
+    section_text = " ".join(str(value) for value in chunk.get("section_path") or ())
+    normalized = re.sub(r"[^0-9a-z가-힣]+", "", section_text.casefold())
+    if metric in _INCOME_STATEMENT_METRICS:
+        return "손익계산서" in normalized or "포괄손익계산서" in normalized
+    if metric in _BALANCE_SHEET_METRICS:
+        return (
+            "재무상태표" in normalized
+            or "첨부연결재무제표" in normalized
+            or "첨부재무제표" in normalized
+        )
+    return False
 
 
 def _require_method(backend: object, method: str) -> Any:

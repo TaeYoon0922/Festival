@@ -137,6 +137,16 @@ class QueryUnderstandingTests(unittest.TestCase):
                 self.assertEqual(plan.section_boosts["주요 제품 및 서비스"], 1.0)
                 self.assertIsNone(plan.backend_filters()["section_path"])
 
+    def test_financial_metric_lexical_query_strips_metric_particle(self) -> None:
+        plan = QueryUnderstanding({"현대자동차": {"현대자동차"}}).understand(
+            "현대자동차 2025년 1분기 별도 매출액은?"
+        )
+
+        self.assertEqual(plan.task_type, "financial_metric")
+        self.assertEqual(plan.metric, "매출액")
+        self.assertEqual(plan.basis, "standalone")
+        self.assertEqual(plan.lexical_query, "매출액")
+
     def test_listing_history_intent_uses_company_overview_soft_boost(self) -> None:
         plan = QueryUnderstanding({"시프트업": {"시프트업"}}).understand(
             "시프트업 유가증권시장 상장일"

@@ -122,6 +122,27 @@ def test_project_preserves_comparison_period_columns() -> None:
     assert "40,658,539" in projected
 
 
+def test_project_comparison_prefers_quarter_duration_columns() -> None:
+    table = """\
+| 열 1 | 제 58 기 1분기 / 3개월 | 제 58 기 1분기 / 누적 | 제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |
+| --- | --- | --- | --- | --- |
+| 매출액 | 44,407,761 | 44,407,761 | 40,658,539 | 40,658,539 |
+"""
+
+    projected = project_periodic_metric_table(
+        table,
+        metric="매출액",
+        period={"year": 2025, "quarter": 1, "period_type": "fiscal_quarter"},
+        comparison={"type": "year_over_year", "years": [2024, 2025]},
+        raw_query="현대자동차 2025년 1분기 매출액과 2024년 1분기 매출액 비교",
+    )
+
+    assert projected is not None
+    assert "제 58 기 1분기 / 3개월" in projected
+    assert "제 57 기 1분기 / 3개월" in projected
+    assert "누적" not in projected
+
+
 def test_project_uses_explicit_year_when_header_has_calendar_years() -> None:
     table = """\
 | 열 1 | 2025년 1분기 | 2024년 1분기 |

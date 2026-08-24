@@ -1102,7 +1102,24 @@ def _claim_in_selected_source(claim: str, source_text: str) -> bool:
     normalized_source = re.sub(
         r"[^0-9a-z가-힣]+", "", str(source_text).casefold()
     )
+    if str(claim or "").strip().startswith("|") and _table_cells_in_source(
+        claim, normalized_source
+    ):
+        return True
     return bool(normalized_claim and normalized_claim in normalized_source)
+
+
+def _table_cells_in_source(claim: str, normalized_source: str) -> bool:
+    cells = [
+        re.sub(r"[^0-9a-z가-힣]+", "", cell.casefold())
+        for cell in str(claim or "").strip().strip("|").split("|")
+    ]
+    material = [
+        cell
+        for cell in cells
+        if cell and cell not in {"", "열1", "구분", "계정과목", "과목"}
+    ]
+    return bool(material) and all(cell in normalized_source for cell in material)
 
 
 def _general_sections(

@@ -856,6 +856,8 @@ def _normalize_lexical_query(
     value = re.sub(r"\s+", " ", value).strip(" .-_~")
     if metric and metric_evidence:
         value = re.sub(re.escape(metric_evidence), metric, value, flags=re.IGNORECASE)
+    if metric:
+        value = _strip_metric_particles(value, metric)
     value = re.sub(r"\s+", " ", value).strip()
     if value:
         return _expand_metric_lexical_query(value, metric)
@@ -875,6 +877,15 @@ def _expand_metric_lexical_query(value: str, metric: str | None) -> str:
         if term.casefold() not in normalized:
             terms.append(term)
     return " ".join(terms)
+
+
+def _strip_metric_particles(value: str, metric: str) -> str:
+    escaped = re.escape(metric)
+    return re.sub(
+        rf"(?<![0-9A-Za-z가-힣]){escaped}(?:은|는|이|가|을|를|의)(?![0-9A-Za-z가-힣])",
+        metric,
+        value,
+    )
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:

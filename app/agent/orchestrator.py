@@ -26,7 +26,7 @@ from app.reasoning.periodic_fact_resolver import (
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 
-MAX_GENERAL_EVIDENCE = 3
+MAX_GENERAL_EVIDENCE = 5
 MAX_GENERAL_EVIDENCE_TEXT_CHARS = 600
 
 

@@ -148,7 +148,7 @@ def _project_period_columns(
     comparison: Mapping[str, Any] | None,
     raw_query: str | None,
 ) -> list[str]:
-    if not rows or _is_comparison(comparison):
+    if not rows or _is_wide_comparison(comparison):
         return list(rows)
     year = _int_value((period or {}).get("year"))
     quarter = _int_value((period or {}).get("quarter"))
@@ -158,18 +158,33 @@ def _project_period_columns(
     if len(header_cells) < 3:
         return list(rows)
     selected = [0]
+    comparison_years = _comparison_years(comparison)
     has_explicit_year = year is not None and any(
         str(year) in cell for cell in header_cells[1:]
     )
     current_term = None if has_explicit_year else _max_fiscal_term(header_cells[1:])
+    comparison_terms = _comparison_terms(
+        current_term=current_term,
+        comparison_years=comparison_years,
+    )
     for index, cell in enumerate(header_cells[1:], start=1):
-        if _column_matches_period(
-            cell,
-            year=year,
-            quarter=quarter,
-            has_explicit_year=has_explicit_year,
-            current_term=current_term,
-        ):
+        if comparison_years:
+            matches = _column_matches_comparison_period(
+                cell,
+                years=comparison_years,
+                terms=comparison_terms,
+                quarter=quarter,
+                has_explicit_year=has_explicit_year,
+            )
+        else:
+            matches = _column_matches_period(
+                cell,
+                year=year,
+                quarter=quarter,
+                has_explicit_year=has_explicit_year,
+                current_term=current_term,
+            )
+        if matches:
             selected.append(index)
     if len(selected) == 1:
         return list(rows)
@@ -217,15 +232,52 @@ def _fiscal_term(value: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _is_comparison(comparison: Mapping[str, Any] | None) -> bool:
+def _is_wide_comparison(comparison: Mapping[str, Any] | None) -> bool:
     comparison_type = str((comparison or {}).get("type") or "")
     return comparison_type in {
-        "period_comparison",
-        "year_over_year",
         "company_comparison",
         "trend",
         "before_after",
     }
+
+
+def _comparison_years(comparison: Mapping[str, Any] | None) -> tuple[int, ...]:
+    comparison_type = str((comparison or {}).get("type") or "")
+    if comparison_type not in {"period_comparison", "year_over_year"}:
+        return ()
+    years = []
+    for value in (comparison or {}).get("years") or ():
+        parsed = _int_value(value)
+        if parsed is not None:
+            years.append(parsed)
+    return tuple(sorted(set(years)))
+
+
+def _comparison_terms(
+    *, current_term: int | None, comparison_years: Sequence[int]
+) -> tuple[int, ...]:
+    if current_term is None or not comparison_years:
+        return ()
+    count = max(len(tuple(comparison_years)), 1)
+    return tuple(current_term - offset for offset in range(count))
+
+
+def _column_matches_comparison_period(
+    cell: str,
+    *,
+    years: Sequence[int],
+    terms: Sequence[int],
+    quarter: int | None,
+    has_explicit_year: bool,
+) -> bool:
+    text = str(cell or "")
+    compact = re.sub(r"\s+", "", text)
+    if quarter is not None and f"{quarter}분기" not in compact:
+        return False
+    if has_explicit_year:
+        return any(str(year) in text for year in years)
+    term = _fiscal_term(text)
+    return bool(term is not None and term in set(terms))
 
 
 def _prefer_quarter_duration(

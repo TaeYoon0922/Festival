@@ -251,6 +251,58 @@ class AnswerGeneratorTests(unittest.TestCase):
         self.assertIsNone(_periodic_claim_payload(header))
         self.assertEqual(_periodic_claim_payload(row), "| 매출액 | 44,407,761 |")
 
+    def test_periodic_projected_table_row_cells_can_validate_against_wide_source(self):
+        draft = _repeated_periodic_draft()
+        generated = generate_answer(draft)
+        projected_section = replace(
+            generated.sections[0],
+            content=(
+                "확인된 사업 또는 공시 내용:\n"
+                "1.\n"
+                "내용: | 열 1 | 제 58 기 1분기 / 3개월 | 제 57 기 1분기 / 3개월 | [1]\n"
+                "| --- | --- | --- |\n"
+                "| 매출액 | 44,407,761 | 40,658,539 | [1]"
+            ),
+        )
+        draft = replace(
+            draft,
+            answer_sections=(
+                replace(
+                    draft.answer_sections[0],
+                    content={
+                        **draft.answer_sections[0].content,
+                        "fact": {
+                            **draft.answer_sections[0].content["fact"],
+                            "sources": [
+                                {
+                                    "chunk_id": "p24:ch_fact",
+                                    "fact_text": (
+                                        "| 열 1 | 제 58 기 1분기 / 3개월 | 제 58 기 1분기 / 누적 | "
+                                        "제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |\n"
+                                        "| --- | --- | --- | --- | --- |\n"
+                                        "| 매출액 | 44,407,761 | 44,407,761 | 40,658,539 | 40,658,539 |"
+                                    ),
+                                }
+                            ],
+                        },
+                    },
+                ),
+            ),
+            evidence_references=("p24:ch_fact",),
+        )
+
+        sections, warnings, valid = validate_periodic_citation_scope(
+            draft,
+            (projected_section,),
+            generated.citations,
+        )
+
+        self.assertTrue(valid)
+        self.assertIn("40,658,539", sections[0].content)
+        self.assertFalse(
+            any(value.startswith("unsupported_periodic_claim_removed") for value in warnings)
+        )
+
     def test_periodic_long_source_text_is_bounded_for_display(self):
         item = _periodic_item(
             "p25:ch_long",

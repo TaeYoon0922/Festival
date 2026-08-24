@@ -284,7 +284,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                 content=("합병 공시 근거 " + str(index) + " ") * 200,
                 section="합병",
             )
-            for index in range(1, 6)
+            for index in range(1, 7)
         ]
         plan = QueryPlan(
             query="합병 공시 내용",
@@ -295,13 +295,13 @@ class AgentOrchestratorTests(unittest.TestCase):
 
         result = AgentOrchestrator().run(plan.raw_query, plan, execution)
 
-        self.assertIn("general_evidence_limited:max=3", result.answer_draft.warnings)
+        self.assertIn("general_evidence_limited:max=5", result.answer_draft.warnings)
         self.assertEqual(
             result.answer_draft.evidence_references,
-            ("m1:ch_1", "m1:ch_2", "m1:ch_3"),
+            ("m1:ch_1", "m1:ch_2", "m1:ch_3", "m1:ch_4", "m1:ch_5"),
         )
         rows = result.answer_draft.answer_sections[0].content["evidence"]
-        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows), 5)
         self.assertTrue(all(row["truncated"] for row in rows))
         self.assertTrue(all(len(row["evidence_text"]) < 700 for row in rows))
 
