@@ -303,7 +303,8 @@ class AgentOrchestratorTests(unittest.TestCase):
         rows = result.answer_draft.answer_sections[0].content["evidence"]
         self.assertEqual(len(rows), 5)
         self.assertTrue(all(row["truncated"] for row in rows))
-        self.assertTrue(all(len(row["evidence_text"]) < 700 for row in rows))
+        self.assertLess(len(rows[0]["evidence_text"]), 1300)
+        self.assertTrue(all(len(row["evidence_text"]) < 700 for row in rows[1:]))
 
     def test_input_plan_candidates_results_and_scores_are_not_mutated(self):
         pair = _candidate(

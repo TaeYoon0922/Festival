@@ -648,13 +648,37 @@ def _period_from_query(
             _date_semantics(None, None, []),
         )
     if task_type == "corporate_event":
+        if _latest_event_requested(query):
+            return (
+                QueryPeriod(period_type="latest_event"),
+                spans,
+                years,
+                _date_semantics(None, None, []),
+            )
         return (
-            QueryPeriod(period_type="latest_event"),
+            QueryPeriod(),
             spans,
             years,
             _date_semantics(None, None, []),
         )
     return QueryPeriod(), spans, years, _date_semantics(None, None, [])
+
+
+def _latest_event_requested(query: str) -> bool:
+    compact = re.sub(r"\s+", "", query)
+    return any(
+        term in compact
+        for term in (
+            "최근",
+            "최신",
+            "가장최근",
+            "최근공시",
+            "최근접수",
+            "공시한",
+            "공시된",
+            "접수된",
+        )
+    )
 
 
 def _date_semantic_role(query: str, task_type: str) -> tuple[str | None, str | None]:

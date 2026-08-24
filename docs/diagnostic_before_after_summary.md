@@ -537,6 +537,46 @@ Changed:
 
 - `app/agent/orchestrator.py`
 
+### 5. Corporate event period default
+
+Question:
+
+```text
+KT 자기주식 처분 예정 보통주 수와 가격
+```
+
+Before:
+
+- 주요사항/거래소 공시 질문에 명시 날짜가 없으면 무조건 `latest_event`로 해석했다.
+- 질문에 `최근`, `최신`, `공시한` 같은 표현이 없어도 최신 공시 위주로 검색되어, 평가 기준 문서보다 더 나중 공시가 먼저 선택될 수 있었다.
+
+After:
+
+- 주요사항/거래소 공시는 질문에 최신 의도가 명시된 경우에만 `latest_event`를 적용한다.
+- 단순 이벤트 질문은 기간 필터를 비워 두어 기업, 이벤트 유형, 지표 키워드 기반 후보가 먼저 경쟁하게 한다.
+- `삼성전자 최근 유상증자`처럼 최신 표현이 있는 질문은 기존처럼 최신 공시 우선 정책을 유지한다.
+
+Changed:
+
+- `app/reasoning/query_understanding.py`
+
+### 6. First general evidence text coverage
+
+Before:
+
+- general evidence 항목을 600자로 제한하면서 답변 길이는 안정화됐지만, 정답 chunk가 1위에 있어도 필요한 표 필드가 600자 뒤에 있으면 `gold_evidence_terms_missing`이 발생했다.
+- evidence 개수를 10개로 늘리는 실험은 `gold60` 점수는 일부 개선했지만, 70개 진단에서 6,000~7,000자대 답변이 다시 생겨 폐기했다.
+
+After:
+
+- evidence 개수는 5개로 유지한다.
+- 첫 번째 evidence만 1,200자까지 허용하고, 나머지는 기존처럼 600자로 제한한다.
+- 정답 chunk가 상위 1위에 있는 이벤트/사업설명 질문에서 필요한 필드 노출이 개선됐고, 긴 답변 위험은 다시 낮게 유지됐다.
+
+Changed:
+
+- `app/agent/orchestrator.py`
+
 ## 2026-08-24 verification
 
 Local full test:
@@ -559,7 +599,7 @@ errors: 0
 check_needed: 5
 retrieval0_or_none: 3
 long_gt5000: 0
-max_len: 3606
+max_len: 4108
 routes: periodic_fact_resolver 35, general_evidence 28, holding_event_resolver 7
 ```
 
@@ -574,13 +614,14 @@ Remaining `확인 필요` questions:
 Gold60 server run after follow-up:
 
 ```text
-success: 45 / 60
-retrieval_miss: 7
-gold_source_not_cited: 7
-gold_evidence_terms_missing: 1
+success: 50 / 60
+retrieval_miss: 6
+gold_source_not_cited: 4
+gold_evidence_terms_missing: 0
 ```
 
 Interpretation:
 
 - The 70-question diagnostic set is stable for the recently fixed financial metric, latest event, and reporter-mismatch cases.
-- Gold60 still exposes broader retrieval/field-extraction issues in general evidence paths, especially periodic business descriptions, event field questions, and holding questions that ask for a specific transaction-date row.
+- Gold60 improved after avoiding unconditional latest-event filtering and allowing the primary general evidence row to carry more source text.
+- Remaining Gold60 failures are mostly retrieval misses or cited-source mismatches that need event/holding-specific resolver work rather than longer generic evidence output.

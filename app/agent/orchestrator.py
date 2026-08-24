@@ -28,6 +28,7 @@ from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 MAX_GENERAL_EVIDENCE = 5
 MAX_GENERAL_EVIDENCE_TEXT_CHARS = 600
+MAX_PRIMARY_GENERAL_EVIDENCE_TEXT_CHARS = 1200
 
 
 @dataclass(frozen=True)
@@ -195,7 +196,10 @@ def _compose_general_evidence(
         if chunk_id in item_by_id
     ]
     selected_items = ordered_items[:MAX_GENERAL_EVIDENCE]
-    evidence_rows = [_general_evidence_row(item) for item in selected_items]
+    evidence_rows = [
+        _general_evidence_row(item, is_primary=index == 0)
+        for index, item in enumerate(selected_items)
+    ]
     citations = tuple(_general_citation(item) for item in selected_items)
     evidence_ids = tuple(item.chunk_id for item in selected_items)
     unknown = task_type == "unknown"
@@ -239,8 +243,16 @@ def _compose_general_evidence(
     )
 
 
-def _general_evidence_row(item: EvidenceItem) -> dict[str, Any]:
-    evidence_text, truncated = _bounded_general_evidence_text(item.evidence_text)
+def _general_evidence_row(item: EvidenceItem, *, is_primary: bool = False) -> dict[str, Any]:
+    limit = (
+        MAX_PRIMARY_GENERAL_EVIDENCE_TEXT_CHARS
+        if is_primary
+        else MAX_GENERAL_EVIDENCE_TEXT_CHARS
+    )
+    evidence_text, truncated = _bounded_general_evidence_text(
+        item.evidence_text,
+        limit=limit,
+    )
     return {
         "chunk_id": item.chunk_id,
         "doc_id": item.doc_id,
@@ -253,12 +265,12 @@ def _general_evidence_row(item: EvidenceItem) -> dict[str, Any]:
     }
 
 
-def _bounded_general_evidence_text(value: str) -> tuple[str, bool]:
+def _bounded_general_evidence_text(value: str, *, limit: int = MAX_GENERAL_EVIDENCE_TEXT_CHARS) -> tuple[str, bool]:
     text = str(value or "")
-    if len(text) <= MAX_GENERAL_EVIDENCE_TEXT_CHARS:
+    if len(text) <= limit:
         return text, False
     return (
-        text[:MAX_GENERAL_EVIDENCE_TEXT_CHARS].rstrip() + "\n[truncated]",
+        text[:limit].rstrip() + "\n[truncated]",
         True,
     )
 

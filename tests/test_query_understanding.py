@@ -437,9 +437,11 @@ class QueryUnderstandingTests(unittest.TestCase):
         financial = QueryUnderstanding(self.aliases).understand("삼성전자 매출액")
         holding = QueryUnderstanding(self.aliases).understand("삼성전자 보유비율")
         event = QueryUnderstanding(self.aliases).understand("삼성전자 유상증자")
+        latest_event = QueryUnderstanding(self.aliases).understand("삼성전자 최근 유상증자")
         self.assertEqual(financial.period.period_type, "latest_valid_periodic")
         self.assertEqual(holding.period.period_type, "latest_holding")
-        self.assertEqual(event.period.period_type, "latest_event")
+        self.assertIsNone(event.period.period_type)
+        self.assertEqual(latest_event.period.period_type, "latest_event")
         self.assertIsNone(financial.backend_filters()["year"])
 
     def test_facility_investment_with_cash_on_hand_stays_an_exchange_event(self) -> None:
