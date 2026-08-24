@@ -328,13 +328,30 @@ def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
 
 
 def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
-    compact = re.sub(r"\s+", "", query)
+    compact = re.sub(r"[ㆍ·・‧\s]+", "", query)
     if any(term in compact for term in ("보유비율", "지분율", "보유주식비율")):
         return "holding_ratio", "보유비율/지분율"
     if any(term in compact for term in ("보유주식", "주식수", "보유수량")):
         return "holding_shares", "보유주식/주식수/보유수량"
     if "지분" in compact and any(term in compact for term in ("변동", "증감", "보유")):
         return "holding_ratio", "지분+변동/증감/보유"
+    report_terms = (
+        "소유상황보고서",
+        "대량보유상황보고서",
+        "대량보유상황",
+        "임원주요주주",
+        "특정증권등소유",
+        "주식등의대량보유",
+    )
+    matched_report = next((term for term in report_terms if term in compact), None)
+    if matched_report:
+        # Report-title questions still need the holding pipeline / latest_holding.
+        return "holding_shares", matched_report
+    if "특수관계자" in compact and any(
+        term in compact
+        for term in ("보고서", "주주", "임원", "소유상황", "대량보유")
+    ):
+        return "holding_shares", "특수관계자"
     return None, None
 
 

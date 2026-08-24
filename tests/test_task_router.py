@@ -17,6 +17,23 @@ class TaskRouterTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             decision.task_type = "unknown"
 
+    def test_ownership_situation_report_routes_to_holding_resolver(self):
+        plan = QueryPlan(
+            query="임원주요주주특정증권등소유상황보고서 특수관계자",
+            raw_query=(
+                "기아의 가장 최근 임원ㆍ주요주주특정증권등소유상황보고서에서 "
+                "특수관계자가 한 명 더 늘어난 이유는?"
+            ),
+            task_type="holding_change",
+            metric="holding_shares",
+            disclosure_route=("holding",),
+        )
+        decision = route_task(plan.raw_query, plan)
+
+        self.assertEqual(decision.task_type, "holding_event")
+        self.assertEqual(decision.resolver_type, "holding_event_resolver")
+        self.assertIn("plan:task_type=holding_change", decision.matched_signals)
+
     def test_periodic_question_routes_to_periodic_resolver(self):
         decision = TaskRouter().route("주요 제품과 연구개발 사업 내용")
 

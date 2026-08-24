@@ -82,6 +82,16 @@ class MetadataFilterExtractionTests(unittest.TestCase):
         )
         self.assertEqual(result["doc_group"], "holding")
 
+    def test_executive_ownership_report_title_is_holding(self) -> None:
+        result = extract_metadata_filters(
+            "기아의 가장 최근 임원ㆍ주요주주특정증권등소유상황보고서에서 "
+            "특수관계자가 한 명 더 늘어난 이유는?",
+            {**self.companies, "기아": {"기아"}},
+        )
+        self.assertEqual(result["companies"], ["기아"])
+        self.assertEqual(result["doc_group"], "holding")
+        self.assertEqual(result["doc_group_evidence"], "소유상황보고서")
+
     def test_clear_major_transaction_language_is_extracted(self) -> None:
         result = extract_metadata_filters(
             "삼성전자 합병 목적과 분할 대상", self.companies
