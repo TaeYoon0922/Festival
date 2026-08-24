@@ -27,6 +27,8 @@ from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 
 MAX_GENERAL_EVIDENCE = 5
+MAX_CORPORATE_EVENT_EVIDENCE = 6
+MAX_HOLDING_GENERAL_EVIDENCE = 9
 MAX_GENERAL_EVIDENCE_TEXT_CHARS = 600
 MAX_PRIMARY_GENERAL_EVIDENCE_TEXT_CHARS = 1200
 
@@ -195,7 +197,8 @@ def _compose_general_evidence(
         for chunk_id in evidence.retrieval_order
         if chunk_id in item_by_id
     ]
-    selected_items = ordered_items[:MAX_GENERAL_EVIDENCE]
+    max_evidence = _general_evidence_limit(evidence, task_type=task_type)
+    selected_items = ordered_items[:max_evidence]
     evidence_rows = [
         _general_evidence_row(item, is_primary=index == 0)
         for index, item in enumerate(selected_items)
@@ -207,7 +210,7 @@ def _compose_general_evidence(
     warnings = list(evidence.warnings)
     warnings.append("resolver_not_required" if not unknown else "unknown_task")
     if len(ordered_items) > len(selected_items):
-        warnings.append(f"general_evidence_limited:max={MAX_GENERAL_EVIDENCE}")
+        warnings.append(f"general_evidence_limited:max={max_evidence}")
     if not answerable:
         warnings.append("answer_not_supported")
     sections = (
@@ -272,6 +275,27 @@ def _bounded_general_evidence_text(value: str, *, limit: int = MAX_GENERAL_EVIDE
     return (
         text[:limit].rstrip() + "\n[truncated]",
         True,
+    )
+
+
+def _general_evidence_limit(evidence: EvidenceSet, *, task_type: str) -> int:
+    if task_type == "corporate_event":
+        return MAX_CORPORATE_EVENT_EVIDENCE
+    if task_type == "general_evidence" and _holding_route_general_evidence(evidence):
+        return MAX_HOLDING_GENERAL_EVIDENCE
+    return MAX_GENERAL_EVIDENCE
+
+
+def _holding_route_general_evidence(evidence: EvidenceSet) -> bool:
+    routes = evidence.query_plan.get("disclosure_route") or ()
+    if isinstance(routes, str):
+        routes = (routes,)
+    if "holding" not in {str(route) for route in routes}:
+        return False
+    return any(
+        item.doc_group == "holding"
+        for group in evidence.evidence_groups
+        for item in group.items
     )
 
 

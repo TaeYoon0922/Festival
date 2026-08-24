@@ -577,12 +577,38 @@ Changed:
 
 - `app/agent/orchestrator.py`
 
+### 7. Route-specific general evidence count
+
+Question:
+
+```text
+KT 자기주식 처분 예정 보통주 수와 가격
+파마리서치 국민연금기금 변동일 변동전 변동후
+```
+
+Before:
+
+- 모든 general evidence 답변이 동일하게 상위 5개 근거만 사용했다.
+- `KT 자기주식 처분 예정 보통주 수와 가격`은 정답 근거가 검색 6위에 있었지만 답변 인용에서 제외되어 실패했다.
+- 보유공시 일부 질문은 holding resolver로 강제하면 오히려 구조화된 holding event group을 만들지 못해 `answer_not_supported`가 증가했다.
+
+After:
+
+- `corporate_event` general evidence만 상위 6개까지 허용한다.
+- holding route이지만 resolver로 보내지 않는 general evidence 질문은 상위 9개까지 허용한다.
+- 보유공시를 무리하게 resolver로 강제하지 않아 기존 answerable 상태를 유지하면서, top10 안의 보유공시 근거를 더 잘 포함한다.
+- 70개 진단 기준 5,000자 초과 답변은 계속 0개였다.
+
+Changed:
+
+- `app/agent/orchestrator.py`
+
 ## 2026-08-24 verification
 
 Local full test:
 
 ```text
-868 passed, 1 skipped
+870 passed, 1 skipped
 ```
 
 Server 12-question regression:
@@ -597,10 +623,8 @@ Server 70-question diagnostic:
 total: 70
 errors: 0
 check_needed: 5
-retrieval0_or_none: 3
 long_gt5000: 0
-max_len: 4108
-routes: periodic_fact_resolver 35, general_evidence 28, holding_event_resolver 7
+max_len: 4673
 ```
 
 Remaining `확인 필요` questions:
@@ -614,14 +638,14 @@ Remaining `확인 필요` questions:
 Gold60 server run after follow-up:
 
 ```text
-success: 50 / 60
+success: 52 / 60
 retrieval_miss: 6
-gold_source_not_cited: 4
+gold_source_not_cited: 2
 gold_evidence_terms_missing: 0
 ```
 
 Interpretation:
 
 - The 70-question diagnostic set is stable for the recently fixed financial metric, latest event, and reporter-mismatch cases.
-- Gold60 improved after avoiding unconditional latest-event filtering and allowing the primary general evidence row to carry more source text.
+- Gold60 improved after avoiding unconditional latest-event filtering, allowing the primary general evidence row to carry more source text, and using route-specific evidence counts.
 - Remaining Gold60 failures are mostly retrieval misses or cited-source mismatches that need event/holding-specific resolver work rather than longer generic evidence output.

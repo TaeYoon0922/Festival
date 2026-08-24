@@ -288,7 +288,7 @@ class AgentOrchestratorTests(unittest.TestCase):
         ]
         plan = QueryPlan(
             query="합병 공시 내용",
-            task_type="corporate_event",
+            task_type="general_evidence",
             disclosure_route=("major",),
         )
         execution = _execution(plan, *items)
@@ -305,6 +305,69 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertTrue(all(row["truncated"] for row in rows))
         self.assertLess(len(rows[0]["evidence_text"]), 1300)
         self.assertTrue(all(len(row["evidence_text"]) < 700 for row in rows[1:]))
+
+    def test_corporate_event_keeps_six_general_evidence_items(self):
+        items = [
+            _candidate(
+                f"m1:ch_{index}",
+                "m1",
+                rank=index,
+                doc_group="major",
+                content=f"자기주식 처분 근거 {index}",
+                section="자기주식 처분 결정",
+            )
+            for index in range(1, 8)
+        ]
+        plan = QueryPlan(
+            query="자기주식 처분 예정 보통주 수와 가격",
+            task_type="corporate_event",
+            disclosure_route=("major",),
+        )
+        execution = _execution(plan, *items)
+
+        result = AgentOrchestrator().run(plan.raw_query, plan, execution)
+
+        self.assertIn("general_evidence_limited:max=6", result.answer_draft.warnings)
+        self.assertEqual(
+            result.answer_draft.evidence_references,
+            (
+                "m1:ch_1",
+                "m1:ch_2",
+                "m1:ch_3",
+                "m1:ch_4",
+                "m1:ch_5",
+                "m1:ch_6",
+            ),
+        )
+
+    def test_holding_route_general_evidence_keeps_nine_items_without_resolver(self):
+        items = [
+            _candidate(
+                f"h1:ch_{index}",
+                "h1",
+                rank=index,
+                doc_group="holding",
+                content=f"국민연금기금 변동 세부 근거 {index}",
+                section="제3부 직전보고일 이후 대량변동 내역",
+            )
+            for index in range(1, 11)
+        ]
+        plan = QueryPlan(
+            query="국민연금기금 변동일 변동전 변동후",
+            task_type="disclosure_lookup",
+            disclosure_route=("holding",),
+        )
+        execution = _execution(plan, *items)
+
+        result = AgentOrchestrator().run(plan.raw_query, plan, execution)
+
+        self.assertIsNone(result.resolution)
+        self.assertEqual(result.task_decision.task_type, "general_evidence")
+        self.assertIn("general_evidence_limited:max=9", result.answer_draft.warnings)
+        self.assertEqual(
+            result.answer_draft.evidence_references,
+            tuple(f"h1:ch_{index}" for index in range(1, 10)),
+        )
 
     def test_input_plan_candidates_results_and_scores_are_not_mutated(self):
         pair = _candidate(
