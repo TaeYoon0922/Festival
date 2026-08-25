@@ -32,6 +32,21 @@ class RetrievedContextItem(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+class CorrectionTrace(BaseModel):
+    """Which correction chain supplied evidence beyond what retrieval ranked.
+
+    Identifiers and the intent that selected them, nothing more: this says which
+    documents were added and where they came from, not why the answer says what
+    it says.
+    """
+
+    correction_intent: str | None = None
+    correction_group_id: str | None = None
+    correction_root_doc_id: str | None = None
+    correction_latest_doc_id: str | None = None
+    correction_added_doc_ids: list[str] = Field(default_factory=list)
+
+
 class ThinkTrace(BaseModel):
     """Execution summary: which components ran and what they concluded.
 
@@ -47,6 +62,9 @@ class ThinkTrace(BaseModel):
     answerable: bool
     warnings: list[str] = Field(default_factory=list)
     hcx_status: str
+    #: Present only when the correction graph contributed documents; null
+    #: otherwise, like every other optional field in this summary.
+    correction: CorrectionTrace | None = None
 
 
 class AnswerResponse(BaseModel):
