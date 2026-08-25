@@ -221,6 +221,7 @@ class QueryExecution:
     chunks: Sequence[CandidateChunk]
     results: Sequence[RetrievalResult]
     routing: Mapping[str, Any] = field(default_factory=dict)
+    correction_expansion: Mapping[str, Any] = field(default_factory=dict)
 
 
 class QueryExecutor:
@@ -233,6 +234,7 @@ class QueryExecutor:
         retriever: Retriever | None = None,
         *,
         router: Any | None = None,
+        correction_expander: Any | None = None,
     ) -> None:
         from app.reasoning.router import QueryRouter
 
@@ -248,6 +250,7 @@ class QueryExecutor:
             else _require_method(metadata_backend, "retrieve")
         )
         self._router = router or QueryRouter()
+        self._correction_expander = correction_expander
 
     def execute(self, plan: QueryPlan) -> QueryExecution:
         route = self._router.route(plan)
@@ -267,12 +270,28 @@ class QueryExecutor:
             document_metadata={document.doc_id: document.metadata for document in documents},
             top_k=plan.top_k,
         )
+        # Documents the question's own metadata window excluded but the
+        # correction graph links to what was retrieved.
+        from app.retrieval.correction_expansion import (
+            CorrectionExpansion,
+            apply_expansion,
+        )
+
+        expansion = (
+            self._correction_expander.expand(
+                plan, documents=documents, chunks=chunks, results=results
+            )
+            if self._correction_expander is not None
+            else CorrectionExpansion()
+        )
+        chunks, results = apply_expansion(expansion, chunks, results)
         return QueryExecution(
             plan=plan,
             documents=documents,
             chunks=chunks,
             results=results,
             routing=_routing(self._router, route, documents),
+            correction_expansion=expansion.to_dict(),
         )
 
 

@@ -261,6 +261,9 @@ class QueryUnderstanding:
         parsed_correction, correction_confidence, correction_evidence = (
             _correction_from_query(raw_query)
         )
+        correction_intent, correction_intent_evidence = _correction_intent_from_query(
+            raw_query
+        )
         if correction_policy is not None:
             parsed_correction = correction_policy
             correction_confidence = 1.0
@@ -346,6 +349,8 @@ class QueryUnderstanding:
                 "event_type": event_evidence,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
+                "correction_intent": correction_intent,
+                "correction_intent_evidence": correction_intent_evidence,
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
             },
         )
@@ -774,12 +779,56 @@ def _basis_from_query(query: str) -> tuple[str, str | None, tuple[int, int] | No
     return "unspecified", None, None
 
 
+#: Asking for the whole correction history of one report. Checked first because
+#: these phrasings also contain the original and latest markers.
+_CORRECTION_HISTORY_TERMS = (
+    "정정이력", "정정내역", "정정경위", "정정경과", "변경이력", "변경내역",
+    "어떻게정정", "어떤정정", "최초공시부터", "최초부터최종", "정정된내역",
+    "정정사항을시간순", "정정이어떻게",
+)
+#: Asking for the final valid version of one report.
+_CORRECTION_LATEST_TERMS = (
+    "최종정정", "최종기준", "최종공시", "최종본", "정정후기준",
+    "현재정정기준", "최종정정기준", "가장최근정정", "최신정정",
+)
+#: Asking for the report as it was first filed.
+_CORRECTION_ORIGINAL_TERMS = (
+    "최초공시", "원공시", "정정전", "최초제출", "최초로공시", "원본공시",
+)
+
+
+def _correction_intent_from_query(query: str) -> tuple[str | None, str | None]:
+    """Which document of a correction chain the question is about.
+
+    This is separate from ``correction_policy``: the policy says how to filter
+    and rank the documents already retrieved, while the intent says whether the
+    rest of the chain has to be fetched at all.  History is tested first because
+    a history question mentions both the first and the final filing.
+    """
+
+    compact = re.sub(r"\s+", "", query)
+    for intent, terms in (
+        ("history", _CORRECTION_HISTORY_TERMS),
+        ("latest", _CORRECTION_LATEST_TERMS),
+        ("original", _CORRECTION_ORIGINAL_TERMS),
+    ):
+        for term in terms:
+            if term in compact:
+                return intent, term
+    return None, None
+
+
 def _correction_from_query(query: str) -> tuple[str, float, str | None]:
     compact = re.sub(r"\s+", "", query)
     if any(term in compact for term in ("정정제외", "원공시만", "최초공시만")):
         return "original_only", 0.99, "정정 제외/원공시만"
     if any(term in compact for term in ("정정공시만", "정정본만", "정정만")):
         return "corrected_only", 0.99, "정정 공시만"
+    intent, evidence = _correction_intent_from_query(query)
+    if intent == "original":
+        # "최초 공시한 ...": the question names the original, so corrections of
+        # it must not stand in for it.
+        return "original_only", 0.99, evidence
     if "정정" in compact:
         return "latest_preferred", 0.85, "정정"
     return "latest_preferred", 0.0, None

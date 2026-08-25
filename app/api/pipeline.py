@@ -29,6 +29,7 @@ from app.generation.hcx_verbalizer import (
 )
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.router import QueryRouter
+from app.retrieval.correction_expansion import build_default_expander
 from app.retrieval.correction_repository import PostgresCorrectionRepository
 from app.retrieval.embeddings import (
     EmbeddingConfig,
@@ -115,6 +116,7 @@ class AnswerPipeline:
                 "connect_timeout": settings.db_connect_timeout_seconds
             }
         )
+        correction_repository = PostgresCorrectionRepository(backend)
         return cls(
             settings=settings,
             understanding=QueryUnderstanding(
@@ -127,8 +129,12 @@ class AnswerPipeline:
                 # Correction policy reads the persisted graph instead of the
                 # is_correction flag alone.  A database without the correction
                 # tables degrades to the previous behaviour rather than failing.
-                router=QueryRouter(
-                    correction_graph=PostgresCorrectionRepository(backend)
+                router=QueryRouter(correction_graph=correction_repository),
+                # A question about the final version or the history of a report
+                # needs documents the question's own date window excludes, so
+                # the resolved chain is added back after retrieval.
+                correction_expander=build_default_expander(
+                    correction_repository, backend, backend, backend
                 ),
                 config=settings.retrieval_config(),
             ),
@@ -151,7 +157,9 @@ class AnswerPipeline:
         return {
             "question_id": question_id,
             "question": question,
-            "retrieved_context": retrieved_context(execution, self.settings.top_k),
+            "retrieved_context": retrieved_context(
+                execution, self.settings.top_k + _expanded_count(execution)
+            ),
             "think_trace": think_trace(result, generated, outcome, execution),
             "answer": _non_empty(outcome.text, generated.answer_text),
         }
@@ -162,6 +170,23 @@ class AnswerPipeline:
             return plan, self.executor.execute(plan)
         except Exception as error:  # noqa: BLE001 - surfaced as a sanitized reason
             raise AnswerPipelineError(_classify(error)) from error
+
+
+def _expanded_count(execution: Any) -> int:
+    """How many rows the correction graph contributed to this execution.
+
+    The served Top-K stays the retrieved Top-K; relation-derived rows are added
+    on top of it so a correction the graph supplied is never truncated away by
+    the very limit it was appended after.
+    """
+
+    trace = getattr(execution, "correction_expansion", None)
+    if not isinstance(trace, Mapping):
+        return 0
+    try:
+        return max(int(trace.get("correction_added_result_count") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
@@ -212,7 +237,7 @@ def think_trace(
     stages = [*result.execution_trace, "answer_generator"]
     if outcome.status not in _HCX_NOT_CALLED:
         stages.append("hcx_verbalizer")
-    return {
+    trace = {
         "task_type": result.task_decision.task_type,
         "route": _route(result),
         "stages": stages,
@@ -222,6 +247,23 @@ def think_trace(
         "warnings": list(generated.warnings),
         "hcx_status": outcome.status,
     }
+    correction = getattr(execution, "correction_expansion", None)
+    if isinstance(correction, Mapping) and correction.get("correction_expanded"):
+        # Which documents the graph added and which chain they came from. This
+        # is an execution summary, not reasoning.
+        # Expansion runs inside retrieval, before the orchestrator's stages.
+        stages.insert(0, "correction_expansion")
+        trace["correction"] = {
+            key: correction.get(key)
+            for key in (
+                "correction_intent",
+                "correction_group_id",
+                "correction_root_doc_id",
+                "correction_latest_doc_id",
+                "correction_added_doc_ids",
+            )
+        }
+    return trace
 
 
 def _route(result: Any) -> str:

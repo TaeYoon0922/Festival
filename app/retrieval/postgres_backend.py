@@ -336,6 +336,38 @@ class PostgresBackend:
             )
         return candidates
 
+    def fetch_documents(self, doc_ids: Sequence[str]) -> list[CandidateDocument]:
+        """Fetch disclosures by identity, ignoring every query-level filter.
+
+        Correction expansion needs the other documents of a chain even though
+        they fall outside the question's own metadata window: a question anchored
+        on the original's receipt date must still reach a correction filed years
+        later.  Selection stays deterministic because the identifiers come from
+        the correction graph, not from the query.
+        """
+
+        unique = sorted({str(doc_id) for doc_id in doc_ids if str(doc_id)})
+        if not unique:
+            return []
+        rows = self._fetch_all(
+            f"""
+            SELECT {self._DISCLOSURE_COLUMNS}
+            FROM disclosures d
+            JOIN companies co ON co.corp_code = d.corp_code
+            WHERE d.doc_id = ANY(%s)
+            ORDER BY d.doc_id
+            """,
+            [unique],
+        )
+        return [
+            CandidateDocument(
+                doc_id=str(row["doc_id"]),
+                metadata=self._disclosure_metadata(row),
+                metadata_match=MetadataMatch(),
+            )
+            for row in rows
+        ]
+
     def get_candidate_documents(
         self,
         company: str | Sequence[str] | None = None,
