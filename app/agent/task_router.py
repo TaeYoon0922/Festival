@@ -11,6 +11,11 @@ from typing import Any, Mapping
 _HOLDING_SIGNALS = (
     "국민연금",
     "대량보유",
+    "대량보유상황",
+    "소유상황",
+    "임원주요주주",
+    "특정증권",
+    "특수관계자",
     "변동일",
     "보유주식수",
     "변동전",
@@ -110,6 +115,9 @@ def route_task(question: str, query_plan: Any | None = None) -> TaskDecision:
         plan_decision = "periodic_fact"
         value = periodic_intent or plan_task
         plan_signals.append(f"plan:periodic={value}")
+    elif plan_task == "disclosure_lookup" and "holding" in routes:
+        plan_decision = "holding_event"
+        plan_signals.append("plan:route=holding")
     elif plan_task == "disclosure_lookup" and "periodic" in routes:
         plan_decision = "periodic_fact"
         plan_signals.append("plan:route=periodic")
@@ -203,7 +211,8 @@ def _plan_mapping(plan: Any | None) -> dict[str, Any]:
 
 
 def _compact(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "").casefold())
+    text = re.sub(r"\s+", "", str(value or "")).casefold()
+    return re.sub(r"[ㆍ·・‧]", "", text)
 
 
 def _text(value: Any) -> str | None:
