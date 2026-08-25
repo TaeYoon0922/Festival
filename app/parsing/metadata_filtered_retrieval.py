@@ -22,7 +22,9 @@ from app.parsing.sampling import load_manifest
 
 
 def _normalized(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "")).casefold()
+    text = re.sub(r"\s+", "", str(value or "")).casefold()
+    # DART titles often use middle dots (임원ㆍ주요주주…).
+    return re.sub(r"[ㆍ·・‧]", "", text)
 
 
 def _companies_from_query(
@@ -71,6 +73,12 @@ def _doc_group_from_query(query: str) -> tuple[str | None, str | None]:
         (
             "holding",
             (
+                "소유상황보고서",
+                "대량보유상황보고서",
+                "대량보유상황",
+                "임원주요주주",
+                "특정증권등소유",
+                "주식등의대량보유",
                 "보유주식",
                 "보유수량",
                 "보유수와비율",
@@ -110,6 +118,13 @@ def _doc_group_from_query(query: str) -> tuple[str | None, str | None]:
         term in compact for term in ("주식", "수량", "비율", "증감", "증가", "감소")
     ):
         return "holding", "보유+주식/수량/비율/증감"
+    # Related-party language is common in holding ownership reports; keep it
+    # gated so periodic related-party notes are not stolen alone.
+    if "특수관계자" in compact and any(
+        term in compact
+        for term in ("보고서", "주주", "임원", "소유상황", "대량보유", "보유")
+    ):
+        return "holding", "특수관계자"
     return None, None
 
 

@@ -298,6 +298,22 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertEqual(plan.comparison, {"type": "before_after"})
         self.assertEqual(plan.period.from_date, "2024-01-01")
 
+    def test_executive_ownership_report_routes_to_holding_not_periodic(self) -> None:
+        aliases = {**self.aliases, "기아": {"기아"}}
+        query = (
+            "기아의 가장 최근 임원ㆍ주요주주특정증권등소유상황보고서에서 "
+            "특수관계자가 한 명 더 늘어난 이유는?"
+        )
+        plan = QueryUnderstanding(aliases).understand(query)
+        decision = route_task(query, plan)
+
+        self.assertEqual(plan.company, "기아")
+        self.assertEqual(plan.task_type, "holding_change")
+        self.assertEqual(plan.disclosure_route, ("holding",))
+        self.assertEqual(plan.period.period_type, "latest_holding")
+        self.assertEqual(decision.task_type, "holding_event")
+        self.assertEqual(decision.resolver_type, "holding_event_resolver")
+
     def test_holding_reference_dates_do_not_become_receipt_filters(self) -> None:
         queries = (
             "파마리서치 국민연금 2022년 12월 5일 현재 보유 비율",
