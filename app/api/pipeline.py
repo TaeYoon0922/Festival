@@ -28,6 +28,8 @@ from app.generation.hcx_verbalizer import (
     VerbalizationOutcome,
 )
 from app.reasoning.query_understanding import QueryUnderstanding
+from app.reasoning.router import QueryRouter
+from app.retrieval.correction_repository import PostgresCorrectionRepository
 from app.retrieval.embeddings import (
     EmbeddingConfig,
     EmbeddingHttpError,
@@ -122,6 +124,12 @@ class AnswerPipeline:
                 backend,
                 embedder,
                 embedding_config,
+                # Correction policy reads the persisted graph instead of the
+                # is_correction flag alone.  A database without the correction
+                # tables degrades to the previous behaviour rather than failing.
+                router=QueryRouter(
+                    correction_graph=PostgresCorrectionRepository(backend)
+                ),
                 config=settings.retrieval_config(),
             ),
         )

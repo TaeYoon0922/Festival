@@ -272,8 +272,26 @@ class QueryExecutor:
             documents=documents,
             chunks=chunks,
             results=results,
-            routing=route.to_dict(),
+            routing=_routing(self._router, route, documents),
         )
+
+
+def _routing(
+    router: Any,
+    route: Any,
+    documents: Sequence[CandidateDocument],
+) -> dict[str, Any]:
+    """Record the route plus the correction chains its candidates belong to.
+
+    The correction block is omitted when no graph is wired, so an execution
+    trace keeps its previous shape.
+    """
+
+    correction = router.correction_summary(documents, route)
+    return {
+        **route.to_dict(),
+        **({"correction": correction} if correction else {}),
+    }
 
 
 def _coerce_period(

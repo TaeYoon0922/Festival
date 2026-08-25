@@ -6,6 +6,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from app.reasoning.correction_policy import (
+    POLICY_CORRECTED_ONLY,
+    POLICY_LATEST_PREFERRED,
+    POLICY_ORIGINAL_ONLY,
+    CorrectionGraphView,
+    correction_summary,
+    document_allowed,
+    document_states,
+    prefers_document,
+)
 from app.retrieval.interfaces import (
     CandidateChunk,
     CandidateDocument,
@@ -66,6 +76,7 @@ class RetrievalRoute:
     date_range: tuple[str, str] | None
     ranking_context: Mapping[str, Any]
     retrieval_limit: int
+    correction_policy: str = "any"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +93,7 @@ class RetrievalRoute:
                 key: decision.to_dict() for key, decision in self.decisions.items()
             },
             "retrieval_limit": self.retrieval_limit,
+            "correction_policy": self.correction_policy,
         }
 
 
@@ -99,10 +111,18 @@ class QueryRouter:
         "date_relevance": 0.04,
     }
 
-    def __init__(self, *, hard_threshold: float = 0.95) -> None:
+    def __init__(
+        self,
+        *,
+        hard_threshold: float = 0.95,
+        correction_graph: CorrectionGraphView | None = None,
+    ) -> None:
         if not 0.0 <= hard_threshold <= 1.0:
             raise ValueError("hard_threshold must be between 0 and 1")
         self.hard_threshold = hard_threshold
+        # Optional: without it every correction decision keeps reading
+        # ``is_correction`` exactly as it did before the graph existed.
+        self.correction_graph = correction_graph
 
     def route(self, plan: Any) -> RetrievalRoute:
         backend_filters = plan.backend_filters()
@@ -203,6 +223,7 @@ class QueryRouter:
             section_boosts=plan.section_boosts,
             lexical_query=plan.lexical_query,
             date_range=date_range,
+            correction_policy=str(getattr(plan, "correction_policy", "any")),
             ranking_context={
                 "task_type": plan.task_type,
                 "metric": plan.metric,
@@ -221,6 +242,17 @@ class QueryRouter:
         route: RetrievalRoute,
     ) -> list[CandidateDocument]:
         hard = route.hard_routes
+        graph_policy = "is_correction" in hard and route.correction_policy in {
+            POLICY_ORIGINAL_ONLY,
+            POLICY_CORRECTED_ONLY,
+        }
+        states = (
+            document_states(
+                self.correction_graph, [document.doc_id for document in documents]
+            )
+            if graph_policy
+            else {}
+        )
         selected: list[CandidateDocument] = []
         for document in documents:
             metadata = document.metadata
@@ -230,10 +262,19 @@ class QueryRouter:
                 metadata.get("doc_subtype"), hard["doc_subtype"]
             ):
                 continue
-            if "is_correction" in hard and bool(metadata.get("is_correction")) is not bool(
-                hard["is_correction"]
-            ):
-                continue
+            if "is_correction" in hard:
+                is_correction = bool(metadata.get("is_correction"))
+                if graph_policy:
+                    # A resolved group answers "which document is the original"
+                    # exactly; is_correction alone only approximates it.
+                    if not document_allowed(
+                        route.correction_policy,
+                        is_correction=is_correction,
+                        state=states.get(document.doc_id),
+                    ):
+                        continue
+                elif is_correction is not bool(hard["is_correction"]):
+                    continue
             if "event_type" in hard and not _document_event_matches(
                 metadata, hard["event_type"]
             ):
@@ -245,11 +286,36 @@ class QueryRouter:
             selected.append(document)
         return selected
 
+    def correction_summary(
+        self,
+        documents: Sequence[CandidateDocument],
+        route: RetrievalRoute,
+    ) -> dict[str, Any]:
+        """Report the correction chains the routed candidates belong to.
+
+        Empty without a correction graph, so an execution trace keeps its old
+        shape until the graph is wired.
+        """
+
+        return correction_summary(
+            self.correction_graph,
+            [document.doc_id for document in documents],
+            policy=route.correction_policy,
+        )
+
     def prepare_chunks(
         self,
         chunks: Sequence[CandidateChunk],
         route: RetrievalRoute,
     ) -> list[CandidateChunk]:
+        states = (
+            document_states(
+                self.correction_graph, [candidate.doc_id for candidate in chunks]
+            )
+            if route.correction_policy == POLICY_LATEST_PREFERRED
+            and "is_correction" in route.decisions
+            else {}
+        )
         selected: list[CandidateChunk] = []
         for candidate in chunks:
             soft = dict(candidate.metadata_match.soft_boosts)
@@ -261,7 +327,17 @@ class QueryRouter:
                 soft_inputs[key] = group_name
             if "is_correction" in route.decisions:
                 value = bool(route.decisions["is_correction"].value)
-                soft["is_correction"] = bool(candidate.chunk.get("is_correction")) is value
+                is_correction = bool(candidate.chunk.get("is_correction"))
+                if route.correction_policy == POLICY_LATEST_PREFERRED:
+                    # Prefer the final valid document of a resolved group rather
+                    # than every document that happens to be a correction.
+                    soft["is_correction"] = prefers_document(
+                        POLICY_LATEST_PREFERRED,
+                        is_correction=is_correction,
+                        state=states.get(candidate.doc_id),
+                    )
+                else:
+                    soft["is_correction"] = is_correction is value
                 soft_inputs["is_correction"] = value
             if "basis" in route.decisions:
                 value = route.decisions["basis"].value

@@ -318,8 +318,10 @@ class HybridQueryExecutor:
             document_metadata,
             top_k=min(plan.top_k, self.config.final_top_k),
         )
+        correction = self.router.correction_summary(documents, route)
         routing = {
             **route.to_dict(),
+            **({"correction": correction} if correction else {}),
             "hybrid": {
                 "config": self.config.to_dict(),
                 "embedding": {
