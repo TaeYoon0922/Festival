@@ -657,6 +657,10 @@ class CorporateEventState:
     member_count: int
     correction_group_id: str | None = None
     correction_resolution_status: EventResolutionStatus | str | None = None
+    #: Optional, additive: populated by enumeration, absent from per-document
+    #: lookups that never needed them.  Neither participates in matching.
+    opened_at: str | None = None
+    resolution_source: str | None = None
 
     @property
     def is_resolved(self) -> bool:
@@ -665,6 +669,20 @@ class CorporateEventState:
     @property
     def is_terminated(self) -> bool:
         return self.lifecycle_status == LIFECYCLE_TERMINATED
+
+    @property
+    def has_dangling_reference(self) -> bool:
+        """Whether this lifecycle points at a filing outside the corpus.
+
+        ``resolution_status`` alone does not answer this.  A contract filed once
+        and never followed up is stored as ``unresolved`` because there was
+        nothing to link it to -- that is complete evidence, not a gap.  A
+        lifecycle whose own reference names a document the corpus does not hold
+        is a real gap, and only ``resolution_source`` distinguishes the two.
+        """
+
+        source = getattr(self.resolution_source, "value", self.resolution_source)
+        return bool(source) and str(source).endswith("_not_in_corpus")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -679,8 +697,11 @@ class CorporateEventState:
             "member_count": self.member_count,
             "correction_group_id": self.correction_group_id,
             "correction_resolution_status": self.correction_resolution_status,
+            "opened_at": self.opened_at,
+            "resolution_source": self.resolution_source,
             "is_resolved": self.is_resolved,
             "is_terminated": self.is_terminated,
+            "has_dangling_reference": self.has_dangling_reference,
         }
 
 

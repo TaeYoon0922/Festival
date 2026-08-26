@@ -49,6 +49,14 @@ from app.reasoning.corporate_event_graph import (
 #: filing; the default keeps a wide margin over the deepest one observed.
 DEFAULT_TABLE_LIMIT = 16
 
+#: Date fields enumeration may anchor on, mapped to the column each one means.
+#: A whitelist rather than a format string: the column name reaches SQL by
+#: lookup, so a caller can never steer it.
+_ENUMERATION_DATE_FIELDS = {
+    "opened_at": "e.opened_at",
+    "event_date": "m.event_date",
+}
+
 _EVENT_COLUMNS = (
     "event_id",
     "corp_code",
@@ -380,6 +388,111 @@ class PostgresCorporateEventRepository:
             )
             for row in rows
         }
+
+    def enumerate_events(
+        self,
+        *,
+        corp_code: str,
+        event_family: str,
+        member_role: str = "contract",
+        date_field: str = "opened_at",
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[CorporateEventState, ...]:
+        """List one company's logical lifecycles inside a half-open date range.
+
+        This is the Tier 1 enumeration primitive: it answers "which contracts
+        exist", not "which chunks look relevant".  The event timeline is already
+        one row per lifecycle with P0-A corrections collapsed into it, so the
+        count returned here is the *logical* count.  Counting raw filings
+        instead would roughly double it -- half of the supply-contract filings in
+        this corpus are ``[기재정정]`` corrections of an earlier one.
+
+        ``member_role`` selects the opening filing by default, which is what
+        keeps a termination from being counted as a contract: a terminated
+        lifecycle still contributes exactly one ``contract`` member, and its
+        termination is reported through ``lifecycle_status`` rather than as a
+        second list entry.
+
+        ``date_from``/``date_to`` are half-open (``>= from``, ``< to``) so that
+        adjacent years partition the corpus without overlapping on 12-31.  The
+        default ``date_field`` is the event's own ``opened_at`` -- the date the
+        filing puts on the contract -- because "2025년에 체결한 계약" asks when the
+        contract was signed, not when the disclosure was received.  The two
+        disagree for a large minority of this corpus.
+
+        One statement, no per-seed round trip.
+        """
+
+        if not str(corp_code).strip():
+            raise ValueError("corp_code is required for enumeration")
+        if not str(event_family).strip():
+            raise ValueError("event_family is required for enumeration")
+        if date_field not in _ENUMERATION_DATE_FIELDS:
+            raise ValueError(
+                "date_field must be one of "
+                + ", ".join(sorted(_ENUMERATION_DATE_FIELDS))
+            )
+        if date_from and date_to and str(date_from) > str(date_to):
+            raise ValueError("date_from must not be after date_to")
+
+        # Whitelisted above, never interpolated from caller input directly.
+        date_column = _ENUMERATION_DATE_FIELDS[date_field]
+        conditions = ["e.corp_code = %s", "e.event_family = %s", "m.member_role = %s"]
+        params: list[Any] = [str(corp_code), str(event_family), str(member_role)]
+        if date_from:
+            conditions.append(f"{date_column} >= %s::date")
+            params.append(str(date_from))
+        if date_to:
+            conditions.append(f"{date_column} < %s::date")
+            params.append(str(date_to))
+
+        rows = self._fetch(
+            f"""
+            SELECT
+                m.doc_id, m.event_id, m.member_role, m.canonical_doc_id,
+                m.correction_group_id, m.correction_resolution_status,
+                e.corp_code, e.event_family, e.lifecycle_status,
+                e.resolution_status, e.resolution_source, e.opened_at,
+                e.member_count
+            FROM corporate_events e
+            JOIN corporate_event_members m ON m.event_id = e.event_id
+            WHERE {" AND ".join(conditions)}
+            ORDER BY e.opened_at NULLS LAST, e.event_id, m.member_order, m.doc_id
+            """,
+            params,
+            operation="enumerate_events",
+        )
+        return tuple(
+            CorporateEventState(
+                doc_id=str(row["doc_id"]),
+                event_id=str(row["event_id"]),
+                corp_code=str(row["corp_code"]),
+                event_family=str(row["event_family"]),
+                member_role=str(row["member_role"]),
+                lifecycle_status=str(row["lifecycle_status"]),
+                resolution_status=str(row["resolution_status"]),
+                canonical_doc_id=str(row["canonical_doc_id"]),
+                member_count=int(row["member_count"]),
+                correction_group_id=(
+                    str(row["correction_group_id"])
+                    if row.get("correction_group_id")
+                    else None
+                ),
+                correction_resolution_status=(
+                    str(row["correction_resolution_status"])
+                    if row.get("correction_resolution_status")
+                    else None
+                ),
+                opened_at=_date(row.get("opened_at")),
+                resolution_source=(
+                    str(row["resolution_source"])
+                    if row.get("resolution_source")
+                    else None
+                ),
+            )
+            for row in rows
+        )
 
     def load_graph(self) -> CorporateEventGraph:
         """Materialize the persisted graph for in-process reuse."""

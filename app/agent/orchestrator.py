@@ -86,6 +86,7 @@ class AgentOrchestrator:
         retrieval_execution: Any,
         *,
         candidate_chunks: Sequence[Any] | None = None,
+        multi_document: Any = None,
     ) -> AgentResult:
         execution = _execution_view(
             query_plan,
@@ -133,6 +134,7 @@ class AgentOrchestrator:
             draft = _compose_general_evidence(
                 evidence,
                 task_type=decision.task_type,
+                multi_document=multi_document,
             )
 
         _enforce_read_only_invariants(
@@ -186,7 +188,7 @@ def orchestrate(
 
 
 def _compose_general_evidence(
-    evidence: EvidenceSet, *, task_type: str
+    evidence: EvidenceSet, *, task_type: str, multi_document: Any = None
 ) -> AnswerDraft:
     item_by_id = {
         item.chunk_id: item
@@ -230,6 +232,19 @@ def _compose_general_evidence(
         if evidence_rows
         else ()
     )
+    facts = getattr(multi_document, "facts", None)
+    if facts is not None:
+        # Deterministic counts the model must state rather than derive. Placed
+        # first so the set-level claim leads, and absent entirely when P0-C did
+        # not engage -- which keeps every existing draft byte-identical.
+        sections = (
+            AnswerSection(
+                title="Multi-document completeness",
+                content=facts.to_dict(),
+                supporting_evidence_ids=evidence_ids,
+            ),
+            *sections,
+        )
     return AnswerDraft(
         question=evidence.question,
         task_type=task_type,

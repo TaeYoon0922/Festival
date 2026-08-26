@@ -361,6 +361,7 @@ class QueryUnderstanding:
             comparison=comparison,
             doc_subtype=subtype,
             section_path=section_path,
+            date_basis=_date_basis_from_query(raw_query),
             section_boosts=_section_boosts(metric, periodic_intent, event_type),
             route_confidence=route_confidence,
             route_evidence=route_evidence,
@@ -728,6 +729,63 @@ def _latest_event_requested(query: str) -> bool:
         )
     )
 
+
+
+#: Markers that say *which* date a period expression refers to.  Matched only in
+#: a short window immediately after the period expression, because Korean
+#: attaches this modifier right there ("2025년에 체결한 ...").  A marker further
+#: away is describing something else -- in "2025년에 체결한 계약 중 공시 이후
+#: 해지된 것", the 공시 belongs to the termination clause, not to the year.
+_DATE_BASIS_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "contract_date",
+        ("체결한", "체결된", "체결하", "체결일", "계약체결", "계약일", "수주한", "수주일", "맺은"),
+    ),
+    (
+        "receipt_date",
+        ("공시된", "공시한", "공시일", "공시", "접수된", "접수한", "접수일", "접수",
+         "제출된", "제출한", "제출일", "제출"),
+    ),
+    ("period_start", ("시작한", "시작된", "시작일", "시작", "개시한", "개시된", "개시")),
+)
+
+#: How far after a period expression a basis marker may sit. Deliberately tight.
+_DATE_BASIS_WINDOW = 10
+
+_PERIOD_EXPRESSION = re.compile(r"(?<!\d)(?:19|20)\d{2}\s*년(?:\s*\d{1,2}\s*월)?")
+
+
+def _date_basis_from_query(query: str) -> str:
+    """Which real-world date the question's period expression refers to.
+
+    Returns one of ``contract_date``/``receipt_date``/``period_start`` when
+    exactly one basis modifies the period expressions, ``mixed`` when two
+    different bases each modify one, and ``unspecified`` when none does.
+
+    This never guesses.  "2025년 계약" stays ``unspecified`` rather than being
+    promoted to ``contract_date``, because the two select different documents and
+    the question did not say which was meant.
+    """
+
+    text = query or ""
+    found: list[str] = []
+    for match in _PERIOD_EXPRESSION.finditer(text):
+        window = text[match.end() : match.end() + _DATE_BASIS_WINDOW]
+        # Earliest marker wins: the nearest modifier is the one that binds.
+        best: tuple[int, str] | None = None
+        for basis, markers in _DATE_BASIS_MARKERS:
+            for marker in markers:
+                index = window.find(marker)
+                if index >= 0 and (best is None or index < best[0]):
+                    best = (index, basis)
+        if best is not None:
+            found.append(best[1])
+    distinct = set(found)
+    if len(distinct) > 1:
+        return "mixed"
+    if len(distinct) == 1:
+        return found[0]
+    return "unspecified"
 
 def _date_semantic_role(query: str, task_type: str) -> tuple[str | None, str | None]:
     receipt = re.search(
