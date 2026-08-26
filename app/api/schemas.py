@@ -32,6 +32,53 @@ class RetrievedContextItem(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+class CorrectionTrace(BaseModel):
+    """Which correction chain supplied evidence beyond what retrieval ranked.
+
+    Identifiers and the intent that selected them, nothing more: this says which
+    documents were added and where they came from, not why the answer says what
+    it says.
+    """
+
+    correction_intent: str | None = None
+    correction_group_id: str | None = None
+    correction_root_doc_id: str | None = None
+    correction_latest_doc_id: str | None = None
+    correction_added_doc_ids: list[str] = Field(default_factory=list)
+
+
+class MultiDocumentTrace(BaseModel):
+    """Safe public P0-C summary; internal slots and identifiers are excluded."""
+
+    applied: bool
+    plan_type: str
+    family_resolution: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    passes: int
+    complete: bool
+    stop_reason: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    logical_count: int
+    unresolved_count: int
+    lifecycle_answer: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    terminated_count: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    open_count: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    evidence_count: int
+
+
 class ThinkTrace(BaseModel):
     """Execution summary: which components ran and what they concluded.
 
@@ -47,6 +94,16 @@ class ThinkTrace(BaseModel):
     answerable: bool
     warnings: list[str] = Field(default_factory=list)
     hcx_status: str
+    #: Present only when the correction graph contributed documents; null
+    #: otherwise, like every other optional field in this summary.
+    correction: CorrectionTrace | None = None
+    #: Present only when P0-C engaged.  ``exclude_if`` is intentionally scoped
+    #: to this field so ordinary and Gold60 responses retain their exact prior
+    #: key set, including the existing ``correction: null`` contract.
+    multi_document_planner: MultiDocumentTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class AnswerResponse(BaseModel):

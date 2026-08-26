@@ -58,6 +58,7 @@ Then run:
 ```text
 psql -X -v ON_ERROR_STOP=1 -f db/002_indexes.sql
 psql -X -v ON_ERROR_STOP=1 -f db/003_validation.sql
+psql -X -v ON_ERROR_STOP=1 -f db/006_correction_graph.sql
 ```
 
 For the optional vector layer, back up the database and apply the separate migration:
@@ -84,3 +85,53 @@ Alternatively, `scripts/load_postgres.py` uses staging-table COPY plus
 `ON CONFLICT DO NOTHING`, records completed tables, and supports `--dry-run` and restart.
 Connection credentials are read from `DATABASE_URL` or standard `PG*` environment
 variables and are never stored in code.
+
+## Correction graph
+
+`db/006_correction_graph.sql` is additive and applies unchanged to a fresh
+install and to an existing database. It creates `correction_relations` (one
+edge per correcting disclosure) and `correction_group_members` (one row per
+disclosure that takes part in a correction), and alters no existing table, so
+it never requires re-chunking or re-embedding:
+
+```text
+psql -X -v ON_ERROR_STOP=1 -f db/006_correction_graph.sql
+```
+
+Both tables are derived. `PostgresCorrectionRepository.build_or_backfill_graph()`
+rebuilds them from `disclosures` plus the correction notice each correcting
+filing already carries in `disclosure_tables`. Relations are keyed by a
+deterministic `relation_id` and members by `doc_id`, so a repeated backfill
+converges on the same rows instead of duplicating them.
+
+Three constraints carry the invariants the graph promises, so a bad row cannot
+be stored even if the builder were wrong:
+
+- `uq_correction_group_members_latest` -- one final document per group.
+- `correction_group_members_chain_parent` -- order 0 is the original and has no
+  parent, and every later document in a chain names the one it supersedes.
+- `correction_relations_resolution_check` -- only a resolved relation names a
+  target, so an ambiguous or unresolved one cannot smuggle a link in.
+
+The migration ends with a read-only invariant query; every count it prints
+should be zero.
+
+`is_latest` is set on a lone ambiguous or unresolved correction too, because
+nothing is known to supersede it. Read `resolution_status = 'resolved'`
+alongside it before treating a row as a verified final version.
+
+Review the graph before anything is written, straight from the frozen corpus:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_correction_graph.py --sample 5
+```
+
+`--from-database` computes the same read-only diagnostics from PostgreSQL,
+`--edges <path>` writes every edge with both documents' metadata for auditing
+one rule's output, and `--write` persists the result.
+
+`--write` refuses to run when the build does not cover every disclosure in the
+database, because rewriting the whole graph from part of the corpus would delete
+correct relations the build never looked at. Point it at the full corpus, use
+`--from-database`, or pass `--allow-partial-write` to update only the
+disclosures the build actually covered.

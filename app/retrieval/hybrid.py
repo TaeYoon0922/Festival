@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.router import QueryRouter
+from app.retrieval.correction_expansion import (
+    CorrectionExpansion,
+    apply_expansion,
+)
+from app.retrieval.event_expansion import EventExpansion
 from app.reasoning.periodic_metric_view import has_exact_metric_row
 from app.retrieval.embeddings import EmbeddingConfig, EmbeddingProvider
 from app.retrieval.interfaces import (
@@ -138,6 +143,8 @@ class HybridQueryExecution:
     rerank_diagnostics: Sequence[Mapping[str, Any]] = ()
     diagnostic_lexical_results: Sequence[RetrievalResult] = ()
     diagnostic_vector_results: Sequence[VectorRetrievalResult] = ()
+    correction_expansion: Mapping[str, Any] = field(default_factory=dict)
+    event_expansion: Mapping[str, Any] = field(default_factory=dict)
 
 
 def reciprocal_rank_fusion(
@@ -196,6 +203,8 @@ class HybridQueryExecutor:
         vector_retriever: VectorRetriever | None = None,
         router: QueryRouter | None = None,
         config: HybridRetrievalConfig | None = None,
+        correction_expander: Any | None = None,
+        event_expander: Any | None = None,
     ) -> None:
         self._metadata_backend = metadata_backend
         self._chunk_backend = (
@@ -219,6 +228,8 @@ class HybridQueryExecutor:
             raise ValueError("embedder config must match the vector index config")
         self.router = router or QueryRouter()
         self.config = config or HybridRetrievalConfig()
+        self._correction_expander = correction_expander
+        self._event_expander = event_expander
 
     def execute(self, plan: Any) -> HybridQueryExecution:
         route = self.router.route(plan)
@@ -318,8 +329,35 @@ class HybridQueryExecutor:
             document_metadata,
             top_k=min(plan.top_k, self.config.final_top_k),
         )
+        # The correction graph knows documents this question's own metadata
+        # window excluded. Add them after ranking so the retrieved order is
+        # untouched and the added evidence stays identifiable.
+        expansion = (
+            self._correction_expander.expand(
+                plan, documents=documents, chunks=chunks, results=final_results
+            )
+            if self._correction_expander is not None
+            else CorrectionExpansion()
+        )
+        chunks, final_results = apply_expansion(expansion, chunks, final_results)
+        # The event graph knows the rest of a contract's lifecycle: the
+        # termination of a contract that was found, or the contract behind a
+        # termination that was found. Added after ranking for the same reason.
+        event_expansion = (
+            self._event_expander.expand(
+                plan, documents=documents, chunks=chunks, results=final_results
+            )
+            if self._event_expander is not None
+            else EventExpansion()
+        )
+        chunks, final_results = apply_expansion(
+            event_expansion, chunks, final_results
+        )
+
+        correction = self.router.correction_summary(documents, route)
         routing = {
             **route.to_dict(),
+            **({"correction": correction} if correction else {}),
             "hybrid": {
                 "config": self.config.to_dict(),
                 "embedding": {
@@ -347,6 +385,8 @@ class HybridQueryExecutor:
             vector_error=vector_error,
             vector_coverage=vector_coverage,
             embedded_candidate_ids=embedded_candidate_ids,
+            correction_expansion=expansion.to_dict(),
+            event_expansion=event_expansion.to_dict(),
             rerank_diagnostics=rerank_diagnostics,
             diagnostic_lexical_results=diagnostic_lexical_results,
             diagnostic_vector_results=diagnostic_vector_results,

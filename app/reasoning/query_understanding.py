@@ -45,6 +45,18 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "major",
     ),
     (
+        "treasury_share_trust_contract",
+        (
+            "자기주식취득신탁계약체결",
+            "자기주식 취득 신탁계약 체결",
+            "신탁계약체결",
+            "신탁계약 체결",
+            "자기주식취득신탁계약",
+            "자기주식 취득 신탁계약",
+        ),
+        "major",
+    ),
+    (
         "write_down_contingent_capital_security",
         (
             "상각형조건부자본증권",
@@ -57,8 +69,22 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ),
     ("spin_off", ("회사분할", "분할신설", "분할비율"), "major"),
     ("merger", ("합병", "흡수합병"), "major"),
-    ("supply_contract", ("단일판매", "공급계약", "수주계약"), "exchange"),
-    ("contract_termination", ("계약해지", "공급계약해지"), "exchange"),
+    (
+        "supply_contract",
+        (
+            "단일판매", "공급계약", "수주계약",
+            # Ways a question names a supply contract or its life. Bare field
+            # names such as "계약금액" are deliberately absent: they also appear
+            # in periodic and correction questions, which must not route here.
+            "계약체결", "계약상대", "계약의최초", "계약이후",
+        ),
+        "exchange",
+    ),
+    (
+        "contract_termination",
+        ("계약해지", "공급계약해지", "해지된계약", "해지계약", "계약이해지"),
+        "exchange",
+    ),
     ("facility_investment", ("시설투자", "신규시설투자"), "exchange"),
 )
 _EVENT_DOC_SUBTYPES = {
@@ -261,6 +287,9 @@ class QueryUnderstanding:
         parsed_correction, correction_confidence, correction_evidence = (
             _correction_from_query(raw_query)
         )
+        correction_intent, correction_intent_evidence = _correction_intent_from_query(
+            raw_query
+        )
         if correction_policy is not None:
             parsed_correction = correction_policy
             correction_confidence = 1.0
@@ -332,6 +361,7 @@ class QueryUnderstanding:
             comparison=comparison,
             doc_subtype=subtype,
             section_path=section_path,
+            date_basis=_date_basis_from_query(raw_query),
             section_boosts=_section_boosts(metric, periodic_intent, event_type),
             route_confidence=route_confidence,
             route_evidence=route_evidence,
@@ -346,6 +376,8 @@ class QueryUnderstanding:
                 "event_type": event_evidence,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
+                "correction_intent": correction_intent,
+                "correction_intent_evidence": correction_intent_evidence,
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
             },
         )
@@ -698,6 +730,63 @@ def _latest_event_requested(query: str) -> bool:
     )
 
 
+
+#: Markers that say *which* date a period expression refers to.  Matched only in
+#: a short window immediately after the period expression, because Korean
+#: attaches this modifier right there ("2025년에 체결한 ...").  A marker further
+#: away is describing something else -- in "2025년에 체결한 계약 중 공시 이후
+#: 해지된 것", the 공시 belongs to the termination clause, not to the year.
+_DATE_BASIS_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "contract_date",
+        ("체결한", "체결된", "체결하", "체결일", "계약체결", "계약일", "수주한", "수주일", "맺은"),
+    ),
+    (
+        "receipt_date",
+        ("공시된", "공시한", "공시일", "공시", "접수된", "접수한", "접수일", "접수",
+         "제출된", "제출한", "제출일", "제출"),
+    ),
+    ("period_start", ("시작한", "시작된", "시작일", "시작", "개시한", "개시된", "개시")),
+)
+
+#: How far after a period expression a basis marker may sit. Deliberately tight.
+_DATE_BASIS_WINDOW = 10
+
+_PERIOD_EXPRESSION = re.compile(r"(?<!\d)(?:19|20)\d{2}\s*년(?:\s*\d{1,2}\s*월)?")
+
+
+def _date_basis_from_query(query: str) -> str:
+    """Which real-world date the question's period expression refers to.
+
+    Returns one of ``contract_date``/``receipt_date``/``period_start`` when
+    exactly one basis modifies the period expressions, ``mixed`` when two
+    different bases each modify one, and ``unspecified`` when none does.
+
+    This never guesses.  "2025년 계약" stays ``unspecified`` rather than being
+    promoted to ``contract_date``, because the two select different documents and
+    the question did not say which was meant.
+    """
+
+    text = query or ""
+    found: list[str] = []
+    for match in _PERIOD_EXPRESSION.finditer(text):
+        window = text[match.end() : match.end() + _DATE_BASIS_WINDOW]
+        # Earliest marker wins: the nearest modifier is the one that binds.
+        best: tuple[int, str] | None = None
+        for basis, markers in _DATE_BASIS_MARKERS:
+            for marker in markers:
+                index = window.find(marker)
+                if index >= 0 and (best is None or index < best[0]):
+                    best = (index, basis)
+        if best is not None:
+            found.append(best[1])
+    distinct = set(found)
+    if len(distinct) > 1:
+        return "mixed"
+    if len(distinct) == 1:
+        return found[0]
+    return "unspecified"
+
 def _date_semantic_role(query: str, task_type: str) -> tuple[str | None, str | None]:
     receipt = re.search(
         r"(?:공시(?:한|된|일|시점)?|접수(?:한|된|일)?|제출(?:한|된|일)?)",
@@ -774,12 +863,56 @@ def _basis_from_query(query: str) -> tuple[str, str | None, tuple[int, int] | No
     return "unspecified", None, None
 
 
+#: Asking for the whole correction history of one report. Checked first because
+#: these phrasings also contain the original and latest markers.
+_CORRECTION_HISTORY_TERMS = (
+    "정정이력", "정정내역", "정정경위", "정정경과", "변경이력", "변경내역",
+    "어떻게정정", "어떤정정", "최초공시부터", "최초부터최종", "정정된내역",
+    "정정사항을시간순", "정정이어떻게",
+)
+#: Asking for the final valid version of one report.
+_CORRECTION_LATEST_TERMS = (
+    "최종정정", "최종기준", "최종공시", "최종본", "정정후기준",
+    "현재정정기준", "최종정정기준", "가장최근정정", "최신정정",
+)
+#: Asking for the report as it was first filed.
+_CORRECTION_ORIGINAL_TERMS = (
+    "최초공시", "원공시", "정정전", "최초제출", "최초로공시", "원본공시",
+)
+
+
+def _correction_intent_from_query(query: str) -> tuple[str | None, str | None]:
+    """Which document of a correction chain the question is about.
+
+    This is separate from ``correction_policy``: the policy says how to filter
+    and rank the documents already retrieved, while the intent says whether the
+    rest of the chain has to be fetched at all.  History is tested first because
+    a history question mentions both the first and the final filing.
+    """
+
+    compact = re.sub(r"\s+", "", query)
+    for intent, terms in (
+        ("history", _CORRECTION_HISTORY_TERMS),
+        ("latest", _CORRECTION_LATEST_TERMS),
+        ("original", _CORRECTION_ORIGINAL_TERMS),
+    ):
+        for term in terms:
+            if term in compact:
+                return intent, term
+    return None, None
+
+
 def _correction_from_query(query: str) -> tuple[str, float, str | None]:
     compact = re.sub(r"\s+", "", query)
     if any(term in compact for term in ("정정제외", "원공시만", "최초공시만")):
         return "original_only", 0.99, "정정 제외/원공시만"
     if any(term in compact for term in ("정정공시만", "정정본만", "정정만")):
         return "corrected_only", 0.99, "정정 공시만"
+    intent, evidence = _correction_intent_from_query(query)
+    if intent == "original":
+        # "최초 공시한 ...": the question names the original, so corrections of
+        # it must not stand in for it.
+        return "original_only", 0.99, evidence
     if "정정" in compact:
         return "latest_preferred", 0.85, "정정"
     return "latest_preferred", 0.0, None

@@ -1,0 +1,56 @@
+P0-C OFFICIAL-STYLE EVALUATION (read-only real corpus)
+================================================================================================================
+case  grp plan                        n term  unr  chk cmpl  lifecycle    sem  failures
+----------------------------------------------------------------------------------------------------------------
+A01   A   enumeration                14    0    0   14 True  -            -    -
+C01   C   enumeration_plus_event     14    0    0   14 True  none         OK   -
+I01   I   enumeration                14    0    0   14 True  -            -    -
+A02   A   enumeration                 8    0    0    8 True  -            -    -
+C02   C   enumeration_plus_event      8    0    0    8 True  none         OK   -
+I02   I   enumeration                 8    0    0    8 True  -            -    -
+A03   A   enumeration                17    0    0   17 True  -            -    -
+C03   C   enumeration_plus_event     17    0    0   17 True  none         OK   -
+I03   I   enumeration                17    0    0   17 True  -            -    -
+B01   B   enumeration_plus_event      9    2    0    9 True  exists       OK   -
+B02   B   enumeration_plus_event      8    2    0    8 True  exists       OK   -
+B03   B   enumeration_plus_event     15    1    0   15 True  exists       OK   -
+B04   B   enumeration_plus_event     12    1    0   12 True  exists       OK   -
+E01   E   enumeration_plus_event      0    0    0    0 True  no_members   OK   -
+F01   F   enumeration                18    0    1   18 False -            -    -
+F02   F   enumeration                27    0   10   27 False -            -    -
+G01   G   enumeration                14    0    0   14 True  -            -    -
+G02   G   enumeration                17    0    0   17 True  -            -    -
+H01   H   enumeration_plus_event      3    2    0    3 True  exists       OK   -
+H02   H   enumeration_plus_event      5    5    0    5 True  exists       OK   -
+D01   D   enumeration_plus_event     18    0    1   18 False undetermined OK   -
+J01   J   enumeration                 8    0    0    8 True  -            -    -
+J02   J   enumeration                27    0   10   27 False -            -    -
+N01   N   not_applicable              -    -    -    - -     -            -    -
+N02   N   not_applicable              -    -    -    - -     -            -    -
+N03   N   not_applicable              -    -    -    - -     -            -    -
+
+================================================================================================================
+plan accuracy                  : 26/26
+lifecycle semantic accuracy   : 11/11
+real supply-positive cases    : 4
+retrieval members checked     : 298/298
+termination claims cited      : 13/13
+opening identity claims cited : 13/13
+unresolved provenance cited   : 22/22
+failures                       : 0
+HCX                           : unavailable/not invoked; deterministic fallback validated
+
+Real supply-positive cases:
+- B01 두산퓨얼셀이 2022년에 체결한 주요 계약 이후 해지된 계약이 존재하는가? (logical=9, terminated=2, termination citations=2/2, opening citations=2/2)
+- B02 LG에너지솔루션이 2024년에 체결한 주요 계약 이후 해지된 계약이 존재하는가? (logical=8, terminated=2, termination citations=2/2, opening citations=2/2)
+- B03 대우건설이 2023년에 체결한 주요 계약 이후 해지된 계약이 존재하는가? (logical=15, terminated=1, termination citations=1/1, opening citations=1/1)
+- B04 삼성중공업이 2023년에 체결한 주요 계약 이후 해지된 계약이 존재하는가? (logical=12, terminated=1, termination citations=1/1, opening citations=1/1)
+
+Real unresolved release gate:
+- D01 삼성중공업이 2025년에 공시한 공급계약 중 해지된 것이 있는가? (logical=18, checked=18, unresolved=1, complete=False, semantic=OK, tier2=true, unresolved citations=1/1)
+
+Rendered semantic core:
+exists       조건에 해당하는 계약 9건을 확인했으며, 이 중 이후 해지된 계약은 2건입니다.
+none         조건에 해당하는 계약 14건을 모두 확인했으며, 이후 해지된 계약은 확인되지 않았습니다.
+undetermined 조건에 해당하는 계약 18건 중 1건은 후속 공시와의 연결 근거를 확정하지 못해, 해지 여부를 단정할 수 없습니다.
+no_members   해당 기간에 조건에 맞는 계약이 확인되지 않았습니다.

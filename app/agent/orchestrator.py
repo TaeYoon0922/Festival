@@ -86,6 +86,7 @@ class AgentOrchestrator:
         retrieval_execution: Any,
         *,
         candidate_chunks: Sequence[Any] | None = None,
+        multi_document: Any = None,
     ) -> AgentResult:
         execution = _execution_view(
             query_plan,
@@ -133,6 +134,7 @@ class AgentOrchestrator:
             draft = _compose_general_evidence(
                 evidence,
                 task_type=decision.task_type,
+                multi_document=multi_document,
             )
 
         _enforce_read_only_invariants(
@@ -186,7 +188,7 @@ def orchestrate(
 
 
 def _compose_general_evidence(
-    evidence: EvidenceSet, *, task_type: str
+    evidence: EvidenceSet, *, task_type: str, multi_document: Any = None
 ) -> AnswerDraft:
     item_by_id = {
         item.chunk_id: item
@@ -200,6 +202,14 @@ def _compose_general_evidence(
     ]
     max_evidence = _general_evidence_limit(evidence, task_type=task_type)
     selected_items = ordered_items[:max_evidence]
+    facts = getattr(multi_document, "facts", None)
+    multi_document_items = _multi_document_items(multi_document, item_by_id)
+    citation_items = tuple(
+        {
+            item.chunk_id: item
+            for item in (*selected_items, *multi_document_items)
+        }.values()
+    )
     evidence_rows = [
         _general_evidence_row(
             item,
@@ -209,10 +219,14 @@ def _compose_general_evidence(
         )
         for index, item in enumerate(selected_items)
     ]
-    citations = tuple(_general_citation(item) for item in selected_items)
+    citations = tuple(_general_citation(item) for item in citation_items)
     evidence_ids = tuple(item.chunk_id for item in selected_items)
     unknown = task_type == "unknown"
-    answerable = bool(selected_items and citations) and not unknown
+    # An applied P0-C plan contributes deterministic answer material even when
+    # the logical set is empty (and therefore has no filing to hydrate).  Treat
+    # that set-level result as supported; otherwise ``no_members`` would be
+    # followed by the generic retrieval-failure fallback.
+    answerable = (bool(selected_items and citations) and not unknown) or facts is not None
     warnings = list(evidence.warnings)
     warnings.append("resolver_not_required" if not unknown else "unknown_task")
     if len(ordered_items) > len(selected_items):
@@ -230,6 +244,20 @@ def _compose_general_evidence(
         if evidence_rows
         else ()
     )
+    if facts is not None:
+        # Deterministic counts the model must state rather than derive. Placed
+        # first so the set-level claim leads, and absent entirely when P0-C did
+        # not engage -- which keeps every existing draft byte-identical.
+        sections = (
+            AnswerSection(
+                title="계약 확인 결과",
+                content={"summary": facts.statement(), **facts.to_dict()},
+                supporting_evidence_ids=tuple(
+                    item.chunk_id for item in multi_document_items
+                ),
+            ),
+            *sections,
+        )
     return AnswerDraft(
         question=evidence.question,
         task_type=task_type,
@@ -249,6 +277,27 @@ def _compose_general_evidence(
             "basis": "evidence_presence_and_provenance",
         },
         answerable=answerable,
+    )
+
+
+def _multi_document_items(
+    multi_document: Any, item_by_id: Mapping[str, EvidenceItem]
+) -> tuple[EvidenceItem, ...]:
+    """P0-C hydrated rows in their answer-critical evidence order.
+
+    These rows may sit after the frozen ranked Top-K and therefore outside the
+    general evidence display limit.  They still have to enter the citation
+    registry: otherwise a termination summary could be rendered while its
+    opening and termination filings were present in ``retrieved_context`` but
+    absent from the actual answer citations.
+    """
+
+    if multi_document is None:
+        return ()
+    return tuple(
+        item_by_id[result.chunk_id]
+        for result in (getattr(multi_document, "added_results", ()) or ())
+        if result.chunk_id in item_by_id
     )
 
 

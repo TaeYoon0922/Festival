@@ -336,6 +336,123 @@ class PostgresBackend:
             )
         return candidates
 
+    def fetch_documents(self, doc_ids: Sequence[str]) -> list[CandidateDocument]:
+        """Fetch disclosures by identity, ignoring every query-level filter.
+
+        Correction expansion needs the other documents of a chain even though
+        they fall outside the question's own metadata window: a question anchored
+        on the original's receipt date must still reach a correction filed years
+        later.  Selection stays deterministic because the identifiers come from
+        the correction graph, not from the query.
+        """
+
+        unique = sorted({str(doc_id) for doc_id in doc_ids if str(doc_id)})
+        if not unique:
+            return []
+        rows = self._fetch_all(
+            f"""
+            SELECT {self._DISCLOSURE_COLUMNS}
+            FROM disclosures d
+            JOIN companies co ON co.corp_code = d.corp_code
+            WHERE d.doc_id = ANY(%s)
+            ORDER BY d.doc_id
+            """,
+            [unique],
+        )
+        return [
+            CandidateDocument(
+                doc_id=str(row["doc_id"]),
+                metadata=self._disclosure_metadata(row),
+                metadata_match=MetadataMatch(),
+            )
+            for row in rows
+        ]
+
+    def enumerate_disclosures(
+        self,
+        *,
+        corp_code: str | Sequence[str],
+        doc_group: str | None = None,
+        doc_subtype: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[CandidateDocument, ...]:
+        """List every disclosure matching an exact metadata definition.
+
+        This is the Tier 2 enumeration primitive, for the document families the
+        P0-B event timeline does not model.  It differs from
+        :meth:`filter_disclosures` in the one way that matters for counting:
+        ``doc_group``, ``doc_subtype``, and the receipt-date range are applied as
+        SQL ``WHERE`` predicates, so the result *is* the set.  In
+        ``filter_disclosures`` those three are soft boosts that only influence
+        ranking, and ``year`` there means ``base_year`` -- a column that is NULL
+        for every exchange, major, and holding filing in this corpus, so a year
+        filter cannot select them at all.
+
+        That method keeps its behaviour untouched: the frozen Gold60 ranking
+        depends on those soft-boost semantics, and this is an additive sibling
+        rather than a change to it.
+
+        ``date_from``/``date_to`` are half-open (``>= from``, ``< to``) and apply
+        to ``rcept_dt``, which is the only date this table carries.  A caller
+        asking when a *contract* was signed wants
+        :meth:`PostgresCorporateEventRepository.enumerate_events` instead; the
+        two dates disagree often enough that substituting one for the other
+        changes the answer.
+
+        One statement, ordered by ``doc_id`` so repeated calls agree.
+        """
+
+        # ``_values`` normalizes but keeps blanks; an empty identifier must not
+        # become a predicate that matches the empty string.
+        corp_codes = {value for value in _values(corp_code) if value}
+        if not corp_codes:
+            raise ValueError("corp_code is required for enumeration")
+        if date_from and date_to and str(date_from) > str(date_to):
+            raise ValueError("date_from must not be after date_to")
+
+        # ``_values`` already normalized the input, and every stored corp_code is
+        # verifiably in that same form (0 of 4,204 disclosures and 0 of 70
+        # companies differ).  Comparing the column directly rather than wrapping
+        # it in ``regexp_replace`` keeps ``idx_disclosures_company_date``
+        # (corp_code, rcept_dt) usable as an index condition instead of
+        # degrading it to a post-scan filter.
+        conditions = ["d.corp_code = ANY(%s)"]
+        params: list[Any] = [sorted(corp_codes)]
+        if doc_group is not None:
+            conditions.append("d.doc_group = %s")
+            params.append(str(doc_group))
+        if doc_subtype is not None:
+            conditions.append("d.doc_subtype = %s")
+            params.append(str(doc_subtype))
+        if date_from:
+            conditions.append("d.rcept_dt >= %s::date")
+            params.append(str(date_from))
+        if date_to:
+            conditions.append("d.rcept_dt < %s::date")
+            params.append(str(date_to))
+
+        rows = self._fetch_all(
+            f"""
+            SELECT {self._DISCLOSURE_COLUMNS}
+            FROM disclosures d
+            JOIN companies co ON co.corp_code = d.corp_code
+            WHERE {" AND ".join(conditions)}
+            ORDER BY d.doc_id
+            """,
+            params,
+        )
+        # Every predicate above was a hard filter, so there is no soft score to
+        # report: an enumerated document matched exactly or is absent.
+        return tuple(
+            CandidateDocument(
+                doc_id=str(row["doc_id"]),
+                metadata=self._disclosure_metadata(row),
+                metadata_match=MetadataMatch(),
+            )
+            for row in rows
+        )
+
     def get_candidate_documents(
         self,
         company: str | Sequence[str] | None = None,

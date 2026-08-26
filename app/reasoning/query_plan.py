@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from app.retrieval.interfaces import (
@@ -18,6 +19,34 @@ from app.retrieval.interfaces import (
 
 _CORRECTION_POLICIES = {"any", "corrected_only", "original_only", "latest_preferred"}
 _BASIS_VALUES = {"consolidated", "standalone", "unspecified"}
+
+
+class DateBasis(str, Enum):
+    """Which real-world date a question's period expression refers to.
+
+    ``QueryPeriod`` already records *which* period was asked about; this records
+    *what the period is a period of*.  The two are independent, and conflating
+    them changes answers: 43.9% of this corpus's supply contracts were disclosed
+    in a different year than they were signed, so "2025년에 체결한 계약" and
+    "2025년에 공시한 계약" select materially different sets.
+
+    This is additive metadata consumed only by the P0-C multi-document planner.
+    Retrieval routing, backend filters, and ranking do not read it, so a plan
+    carrying a basis retrieves exactly as it did before.
+    """
+
+    #: 계약(수주)일자 -- when the contract was actually signed.
+    CONTRACT_DATE = "contract_date"
+    #: rcept_dt -- when the filing was received.
+    RECEIPT_DATE = "receipt_date"
+    #: 계약기간 시작일 -- when the contract or trust period began.
+    PERIOD_START = "period_start"
+    #: The question names a period but not which date it means.  Never promoted
+    #: to a concrete basis by guessing.
+    UNSPECIFIED = "unspecified"
+    #: Two different bases modify two different periods in one question.
+    #: Recorded rather than silently resolved by precedence.
+    MIXED = "mixed"
 
 
 @dataclass(frozen=True)
@@ -87,6 +116,9 @@ class QueryPlan:
     comparison: Mapping[str, Any] | str | None = None
     doc_subtype: str | None = None
     section_path: str | None = None
+    #: Additive P0-C metadata.  Nothing in routing, filtering, or ranking reads
+    #: it; only the multi-document planner does.
+    date_basis: DateBasis | str = DateBasis.UNSPECIFIED
     section_boosts: Mapping[str, float] = field(default_factory=dict)
     route_confidence: Mapping[str, float] = field(default_factory=dict)
     route_evidence: Mapping[str, Any] = field(default_factory=dict)
@@ -143,6 +175,7 @@ class QueryPlan:
         object.__setattr__(self, "disclosure_route", routes)
         object.__setattr__(self, "basis", basis)
         object.__setattr__(self, "comparison", _copy_comparison(self.comparison))
+        object.__setattr__(self, "date_basis", DateBasis(self.date_basis))
         object.__setattr__(self, "section_boosts", section_boosts)
         object.__setattr__(self, "route_confidence", confidence)
         object.__setattr__(self, "route_evidence", dict(self.route_evidence))
@@ -206,6 +239,7 @@ class QueryPlan:
             "lexical_query": self.lexical_query,
             "doc_subtype": self.doc_subtype,
             "section_path": self.section_path,
+            "date_basis": self.date_basis.value,
             "section_boosts": dict(self.section_boosts),
             "route_confidence": dict(self.route_confidence),
             "route_evidence": dict(self.route_evidence),
@@ -221,6 +255,8 @@ class QueryExecution:
     chunks: Sequence[CandidateChunk]
     results: Sequence[RetrievalResult]
     routing: Mapping[str, Any] = field(default_factory=dict)
+    correction_expansion: Mapping[str, Any] = field(default_factory=dict)
+    event_expansion: Mapping[str, Any] = field(default_factory=dict)
 
 
 class QueryExecutor:
@@ -233,6 +269,8 @@ class QueryExecutor:
         retriever: Retriever | None = None,
         *,
         router: Any | None = None,
+        correction_expander: Any | None = None,
+        event_expander: Any | None = None,
     ) -> None:
         from app.reasoning.router import QueryRouter
 
@@ -248,6 +286,8 @@ class QueryExecutor:
             else _require_method(metadata_backend, "retrieve")
         )
         self._router = router or QueryRouter()
+        self._correction_expander = correction_expander
+        self._event_expander = event_expander
 
     def execute(self, plan: QueryPlan) -> QueryExecution:
         route = self._router.route(plan)
@@ -267,13 +307,61 @@ class QueryExecutor:
             document_metadata={document.doc_id: document.metadata for document in documents},
             top_k=plan.top_k,
         )
+        # Documents the question's own metadata window excluded but the
+        # correction graph links to what was retrieved.
+        from app.retrieval.correction_expansion import (
+            CorrectionExpansion,
+            apply_expansion,
+        )
+
+        expansion = (
+            self._correction_expander.expand(
+                plan, documents=documents, chunks=chunks, results=results
+            )
+            if self._correction_expander is not None
+            else CorrectionExpansion()
+        )
+        chunks, results = apply_expansion(expansion, chunks, results)
+        # Filings the question's own metadata window excluded but the event graph
+        # links to what was retrieved: the termination of a contract that was
+        # found, or the contract behind a termination that was found.
+        from app.retrieval.event_expansion import EventExpansion
+
+        event_expansion = (
+            self._event_expander.expand(
+                plan, documents=documents, chunks=chunks, results=results
+            )
+            if self._event_expander is not None
+            else EventExpansion()
+        )
+        chunks, results = apply_expansion(event_expansion, chunks, results)
         return QueryExecution(
             plan=plan,
             documents=documents,
             chunks=chunks,
             results=results,
-            routing=route.to_dict(),
+            routing=_routing(self._router, route, documents),
+            correction_expansion=expansion.to_dict(),
+            event_expansion=event_expansion.to_dict(),
         )
+
+
+def _routing(
+    router: Any,
+    route: Any,
+    documents: Sequence[CandidateDocument],
+) -> dict[str, Any]:
+    """Record the route plus the correction chains its candidates belong to.
+
+    The correction block is omitted when no graph is wired, so an execution
+    trace keeps its previous shape.
+    """
+
+    correction = router.correction_summary(documents, route)
+    return {
+        **route.to_dict(),
+        **({"correction": correction} if correction else {}),
+    }
 
 
 def _coerce_period(

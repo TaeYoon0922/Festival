@@ -35,6 +35,12 @@ from tests.test_agent_end_to_end_smoke import (
     _execution,
 )
 from tests.test_evidence_builder import _holding_pair
+from tests.test_multi_document_serving import (
+    LIFECYCLE_Q as P0C_LIFECYCLE_Q,
+    _EventRepo as _P0CEventRepo,
+    _pipeline as _p0c_pipeline,
+    _state as _p0c_state,
+)
 
 
 QUESTION = "효성중공업 국민연금기금 변동일 변동후 주식수"
@@ -51,7 +57,33 @@ THINK_TRACE_KEYS = {
     "answerable",
     "warnings",
     "hcx_status",
+    "correction",
 }
+
+#: The identifiers the correction graph reports when it supplied evidence.
+CORRECTION_TRACE_KEYS = {
+    "correction_intent",
+    "correction_group_id",
+    "correction_root_doc_id",
+    "correction_latest_doc_id",
+    "correction_added_doc_ids",
+}
+
+
+def _p0c_unresolved_pipeline() -> AnswerPipeline:
+    contracts = [_p0c_state(f"event-secret-{index:02d}") for index in range(3)]
+    contracts.append(
+        _p0c_state(
+            "event-secret-03",
+            source="related_reference_not_in_corpus",
+            doc_id="document-secret-03",
+        )
+    )
+    return _p0c_pipeline(_P0CEventRepo(contracts))
+
+
+def _p0c_bare_contract_pipeline() -> AnswerPipeline:
+    return _p0c_pipeline(_P0CEventRepo([_p0c_state("event-secret-bare")]))
 
 
 def _plan_and_execution():
@@ -80,6 +112,32 @@ def _plan_and_execution():
         evidence={"requested_holding_fields": ["reference_date", "after_shares"]},
     )
     return plan, _execution(plan, first, second)
+
+
+#: What ``CorrectionExpander`` records on an execution after it adds documents.
+CORRECTION_EXPANSION = {
+    "correction_intent": "latest",
+    "correction_expanded": True,
+    "correction_status": "expanded",
+    "correction_group_id": "exchange_20230626800002",
+    "correction_root_doc_id": "exchange_20230626800002",
+    "correction_latest_doc_id": "exchange_20260120800597",
+    "correction_group_count": 1,
+    "correction_added_doc_ids": ["exchange_20260120800597"],
+    "correction_added_result_count": 1,
+}
+
+
+def _correction_pipeline() -> AnswerPipeline:
+    """The pipeline as it behaves after correction expansion has fired."""
+
+    plan, execution = _plan_and_execution()
+    execution.correction_expansion = dict(CORRECTION_EXPANSION)
+    return AnswerPipeline(
+        understanding=_StaticUnderstanding(QUESTION, plan),
+        executor=_StaticExecutor(plan, execution),
+        verbalizer=HcxVerbalizer(HcxSettings(enabled=False)),
+    )
 
 
 class _FailingExecutor:
@@ -245,6 +303,182 @@ class ThinkTraceTests(unittest.TestCase):
         for stage in self.trace["stages"]:
             self.assertRegex(stage, r"^[a-z0-9_]+$")
         self.assertIn("answer_generator", self.trace["stages"])
+
+
+class CorrectionTraceTests(unittest.TestCase):
+    """The correction block must survive response serialization.
+
+    ``think_trace`` is validated through ``AnswerResponse``, so a key the model
+    does not declare is dropped on the way out no matter what the pipeline put
+    there.  These tests hold that contract open.
+    """
+
+    def setUp(self) -> None:
+        self.payload = _ask(_client(_correction_pipeline)).json()
+        self.trace = self.payload["think_trace"]
+
+    def test_the_correction_block_reaches_the_response(self) -> None:
+        self.assertIsNotNone(self.trace["correction"])
+        self.assertEqual(set(self.trace["correction"]), CORRECTION_TRACE_KEYS)
+
+    def test_the_reported_identifiers_are_the_ones_the_graph_supplied(self) -> None:
+        correction = self.trace["correction"]
+
+        self.assertEqual(correction["correction_intent"], "latest")
+        self.assertEqual(
+            correction["correction_group_id"], "exchange_20230626800002"
+        )
+        self.assertEqual(
+            correction["correction_root_doc_id"], "exchange_20230626800002"
+        )
+        self.assertEqual(
+            correction["correction_latest_doc_id"], "exchange_20260120800597"
+        )
+        self.assertEqual(
+            correction["correction_added_doc_ids"], ["exchange_20260120800597"]
+        )
+
+    def test_expansion_is_named_among_the_stages(self) -> None:
+        self.assertIn("correction_expansion", self.trace["stages"])
+        for stage in self.trace["stages"]:
+            self.assertRegex(stage, r"^[a-z0-9_]+$")
+
+    def test_the_block_carries_identifiers_only(self) -> None:
+        """No deliberation, no free text, no chunk contents."""
+
+        correction = self.trace["correction"]
+        self.assertIsInstance(correction["correction_added_doc_ids"], list)
+        for value in correction.values():
+            for item in value if isinstance(value, list) else [value]:
+                self.assertIsInstance(item, str)
+                self.assertRegex(item, r"^[A-Za-z0-9_.:-]+$")
+
+    def test_the_response_still_has_exactly_the_five_top_level_fields(self) -> None:
+        self.assertEqual(
+            set(self.payload),
+            {"question_id", "question", "retrieved_context", "think_trace", "answer"},
+        )
+
+    def test_think_trace_gains_no_key_beyond_the_declared_summary(self) -> None:
+        self.assertEqual(set(self.trace), THINK_TRACE_KEYS)
+
+    def test_an_ordinary_response_reports_no_correction(self) -> None:
+        ordinary = _ask(_client()).json()
+
+        self.assertIsNone(ordinary["think_trace"]["correction"])
+        self.assertNotIn("correction_expansion", ordinary["think_trace"]["stages"])
+        self.assertEqual(
+            set(ordinary),
+            {"question_id", "question", "retrieved_context", "think_trace", "answer"},
+        )
+        self.assertEqual(set(ordinary["think_trace"]), THINK_TRACE_KEYS)
+
+
+class MultiDocumentHttpTraceTests(unittest.TestCase):
+    """P0-C trace must survive the actual FastAPI response-model boundary."""
+
+    def test_engaged_unresolved_trace_survives_http_serialization(self) -> None:
+        response = _ask(
+            _client(_p0c_unresolved_pipeline),
+            question_id="P0C-HTTP-U",
+            question=P0C_LIFECYCLE_Q,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {"question_id", "question", "retrieved_context", "think_trace", "answer"},
+        )
+        trace = payload["think_trace"]["multi_document_planner"]
+        self.assertIsInstance(trace, dict)
+        self.assertEqual(
+            set(trace),
+            {
+                "applied",
+                "plan_type",
+                "family_resolution",
+                "passes",
+                "complete",
+                "stop_reason",
+                "logical_count",
+                "unresolved_count",
+                "lifecycle_answer",
+                "terminated_count",
+                "open_count",
+                "evidence_count",
+            },
+        )
+        self.assertIs(trace["applied"], True)
+        self.assertEqual(trace["plan_type"], "enumeration_plus_event")
+        self.assertIs(trace["complete"], False)
+        self.assertEqual(trace["logical_count"], 4)
+        self.assertEqual(trace["unresolved_count"], 2)
+        self.assertEqual(trace["lifecycle_answer"], "undetermined")
+        self.assertEqual(trace["terminated_count"], 0)
+        self.assertEqual(trace["open_count"], 4)
+        self.assertGreater(trace["evidence_count"], 0)
+
+    def test_p0c_trace_contains_no_document_or_event_identifiers(self) -> None:
+        payload = _ask(
+            _client(_p0c_unresolved_pipeline),
+            question_id="P0C-HTTP-ID",
+            question=P0C_LIFECYCLE_Q,
+        ).json()
+        serialized = json.dumps(
+            payload["think_trace"]["multi_document_planner"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        for forbidden_key in (
+            "event_id",
+            "doc_id",
+            "chunk_id",
+            "corp_code",
+            "slot_id",
+        ):
+            self.assertNotIn(f'"{forbidden_key}"', serialized, forbidden_key)
+        for forbidden_value in (
+            "event-secret",
+            "document-secret",
+        ):
+            self.assertNotIn(forbidden_value, serialized, forbidden_value)
+        self.assertNotIn("slots", payload["think_trace"]["multi_document_planner"])
+        self.assertNotIn("lifecycle", payload["think_trace"]["multi_document_planner"])
+
+    def test_family_resolution_survives_but_never_reaches_answer(self) -> None:
+        question = "삼성중공업이 2025년에 체결한 주요 계약은 모두 몇 건인가?"
+        payload = _ask(
+            _client(_p0c_bare_contract_pipeline),
+            question_id="P0C-HTTP-FAMILY",
+            question=question,
+        ).json()
+
+        trace = payload["think_trace"]["multi_document_planner"]
+        self.assertEqual(trace["family_resolution"], "bare_contract_fallback")
+        for lifecycle_only in (
+            "slots",
+            "lifecycle",
+            "lifecycle_answer",
+            "terminated_count",
+            "open_count",
+        ):
+            self.assertNotIn(lifecycle_only, trace, lifecycle_only)
+        for internal in (
+            "family_resolution",
+            "bare_contract_fallback",
+            "slot_id",
+            "corp_code",
+        ):
+            self.assertNotIn(internal, payload["answer"], internal)
+
+    def test_non_engagement_omits_the_optional_block(self) -> None:
+        payload = _ask(_client()).json()
+
+        self.assertNotIn("multi_document_planner", payload["think_trace"])
+        self.assertEqual(set(payload["think_trace"]), THINK_TRACE_KEYS)
+        self.assertIsNone(payload["think_trace"]["correction"])
 
 
 class HcxIntegrationTests(unittest.TestCase):

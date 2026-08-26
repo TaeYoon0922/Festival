@@ -1128,8 +1128,25 @@ def _general_sections(
     output = []
     warnings = []
     evidence_seen = 0
+    summary_seen = False
     supported = True
     for section_index, answer_section in enumerate(draft.answer_sections, start=1):
+        summary = _text(answer_section.content.get("summary"))
+        if summary:
+            # A deterministic set-level statement. Its numbers come from a
+            # metadata enumeration, so it is rendered verbatim rather than
+            # re-derived from the evidence rows that happened to fit.
+            output.append(
+                GeneratedSection(
+                    title=answer_section.title,
+                    content=summary,
+                    citations=registry.ids_for(
+                        _string_list(answer_section.supporting_evidence_ids)
+                    ),
+                )
+            )
+            summary_seen = True
+            continue
         rows = _mapping_list(answer_section.content.get("evidence"))
         if not rows:
             continue
@@ -1162,7 +1179,7 @@ def _general_sections(
                 citations=_unique(used_ids),
             )
         )
-    return output, warnings, bool(evidence_seen) and supported
+    return output, warnings, (summary_seen or bool(evidence_seen)) and supported
 
 
 def _answer_kind(draft: AnswerDraft) -> str:
