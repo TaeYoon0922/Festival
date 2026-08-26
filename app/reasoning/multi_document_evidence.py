@@ -41,6 +41,22 @@ LIFECYCLE_NONE = "none"
 LIFECYCLE_UNDETERMINED = "undetermined"
 LIFECYCLE_NO_MEMBERS = "no_members"
 
+#: The complete public P0-C observability contract.  Execution objects retain
+#: their slots and identifiers for planning, hydration, and evaluation, but a
+#: trace copies only these deterministic aggregate fields across the boundary.
+_PUBLIC_TRACE_FIELDS = (
+    "plan_type",
+    "family_resolution",
+    "passes",
+    "complete",
+    "stop_reason",
+    "logical_count",
+    "unresolved_count",
+    "lifecycle_answer",
+    "terminated_count",
+    "open_count",
+)
+
 
 @dataclass(frozen=True)
 class MultiDocumentFacts:
@@ -132,18 +148,23 @@ class MultiDocumentEvidence:
     added_chunks: tuple[CandidateChunk, ...] = ()
     added_results: tuple[RetrievalResult, ...] = ()
     added_doc_ids: tuple[str, ...] = ()
-    #: The executed plan, so the trace reuses ``execution.to_dict()`` rather
-    #: than re-deriving per-slot counts.
+    #: The executed plan remains available for hydration and deterministic
+    #: facts.  The public trace reads only the aggregate whitelist above.
     execution: Any = None
 
     def trace(self) -> dict[str, Any]:
-        """Counts and statuses only; identifiers never leave this object."""
+        """Return the whitelisted public summary, never internal structures."""
 
         payload: dict[str, Any] = {"applied": True}
+        summaries = []
         if self.execution is not None:
-            payload.update(self.execution.to_dict())
+            summaries.append(self.execution.to_dict())
         if self.facts is not None:
-            payload.update(self.facts.to_dict())
+            summaries.append(self.facts.to_dict())
+        for summary in summaries:
+            for key in _PUBLIC_TRACE_FIELDS:
+                if key in summary and summary[key] is not None:
+                    payload[key] = summary[key]
         payload["evidence_count"] = len(self.added_results)
         return payload
 

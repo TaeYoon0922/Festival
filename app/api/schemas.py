@@ -47,51 +47,18 @@ class CorrectionTrace(BaseModel):
     correction_added_doc_ids: list[str] = Field(default_factory=list)
 
 
-class MultiDocumentSlotTrace(BaseModel):
-    """One deterministic completeness slot, with counts but no member ids."""
-
-    slot_id: str
-    slot_type: str
-    corp_code: str | None = None
-    event_family: str | None = None
-    doc_group: str | None = None
-    doc_subtype: str | None = None
-    member_role: str | None = None
-    date_field: str | None = None
-    date_from: str | None = None
-    date_to: str | None = None
-    depends_on: list[str] = Field(default_factory=list)
-    expected_count: int
-    found_count: int
-    missing_count: int
-    unresolved_count: int
-    status: str
-    completeness_reason: str | None = None
-
-
-class MultiDocumentLifecycleTrace(BaseModel):
-    """Lifecycle outcome counts; raw event identifiers never enter the API."""
-
-    slot_id: str
-    open_count: int
-    terminated_count: int
-
-
 class MultiDocumentTrace(BaseModel):
-    """P0-C execution summary in the existing ``MultiDocumentEvidence`` shape."""
+    """Safe public P0-C summary; internal slots and identifiers are excluded."""
 
     applied: bool
     plan_type: str
-    family_resolution: str | None = None
-    passes: int
-    slots: list[MultiDocumentSlotTrace] = Field(default_factory=list)
-    complete: bool
-    stop_reason: str | None = None
-    lifecycle: list[MultiDocumentLifecycleTrace] | None = Field(
+    family_resolution: str | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
-    unavailable_reason: str | None = Field(
+    passes: int
+    complete: bool
+    stop_reason: str | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

@@ -30,7 +30,9 @@ from app.reasoning.multi_document_evidence import (
     LIFECYCLE_UNDETERMINED,
     MAX_MULTI_DOC_EVIDENCE,
     PROVENANCE_KEY,
+    MultiDocumentEvidence,
     MultiDocumentEvidenceBuilder,
+    MultiDocumentFacts,
     lifecycle_answer,
 )
 from app.reasoning.multi_document_executor import MultiDocumentExecutor
@@ -328,14 +330,18 @@ class AppliedServingTests(unittest.TestCase):
             disclosure_backend=store, correction_repository=_Corr()
         )
         pipeline = _pipeline(None, store=store, executor=executor)
+        query_plan, _ = pipeline._retrieve(RECEIPT_Q)
+        internal_plan = pipeline.multi_document_planner.plan(RECEIPT_Q, query_plan)
+        slot = internal_plan.slots[0]
+        self.assertEqual(slot.date_field, "rcept_dt")
+        self.assertNotEqual(slot.date_field, "opened_at")
+
         trace = _trace(pipeline.answer("I6", RECEIPT_Q))
         self.assertEqual(trace["logical_count"], 5)
         self.assertEqual(store.kwargs["doc_subtype"], "단일판매공급계약체결")
         self.assertEqual(store.kwargs["date_from"], "2025-01-01")
         self.assertEqual(store.kwargs["date_to"], "2026-01-01")
-        slot = trace["slots"][0]
-        self.assertEqual(slot["date_field"], "rcept_dt")
-        self.assertNotEqual(slot["date_field"], "opened_at")
+        self.assertNotIn("slots", trace)
 
     def test_i7_bare_fallback_is_visible_in_the_trace(self) -> None:
         repo = _EventRepo([_state("e1")])
@@ -354,6 +360,70 @@ class AppliedServingTests(unittest.TestCase):
 
 
 class EvidenceAndTraceTests(unittest.TestCase):
+    def test_trace_whitelists_only_public_aggregate_fields(self) -> None:
+        class _InternalExecution:
+            def to_dict(self) -> dict[str, object]:
+                return {
+                    "plan_type": "enumeration_plus_event",
+                    "family_resolution": "explicit_event_family",
+                    "passes": 2,
+                    "complete": False,
+                    "stop_reason": "no_deterministic_action",
+                    "slots": [{"slot_id": "secret-slot", "corp_code": CORP}],
+                    "lifecycle": [{"slot_id": "secret-slot", "open_count": 4}],
+                    "event_id": "secret-event",
+                    "doc_id": "secret-document",
+                    "chunk_id": "secret-chunk",
+                    "correction_group_id": "secret-correction-group",
+                    "database_id": "secret-database-row",
+                }
+
+        trace = MultiDocumentEvidence(
+            facts=MultiDocumentFacts(
+                plan_type="enumeration_plus_event",
+                family_resolution="explicit_event_family",
+                complete=False,
+                stop_reason="no_deterministic_action",
+                logical_count=4,
+                unresolved_count=1,
+                lifecycle_answer=LIFECYCLE_UNDETERMINED,
+                terminated_count=0,
+                open_count=4,
+            ),
+            execution=_InternalExecution(),
+        ).trace()
+
+        self.assertEqual(
+            set(trace),
+            {
+                "applied",
+                "plan_type",
+                "family_resolution",
+                "passes",
+                "complete",
+                "stop_reason",
+                "logical_count",
+                "unresolved_count",
+                "lifecycle_answer",
+                "terminated_count",
+                "open_count",
+                "evidence_count",
+            },
+        )
+        serialized = json.dumps(trace, ensure_ascii=False, sort_keys=True)
+        for private_key in (
+            "slots",
+            "lifecycle",
+            "slot_id",
+            "corp_code",
+            "event_id",
+            "doc_id",
+            "chunk_id",
+            "correction_group_id",
+            "database_id",
+        ):
+            self.assertNotIn(f'"{private_key}"', serialized, private_key)
+
     def test_trace_never_carries_identifiers(self) -> None:
         contracts = [_state(f"e{i:02d}") for i in range(4)] + [
             _state("e04", terminated=True)

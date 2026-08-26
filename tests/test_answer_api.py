@@ -391,12 +391,29 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
             {"question_id", "question", "retrieved_context", "think_trace", "answer"},
         )
         trace = payload["think_trace"]["multi_document_planner"]
-        self.assertIsNotNone(trace)
+        self.assertIsInstance(trace, dict)
+        self.assertEqual(
+            set(trace),
+            {
+                "applied",
+                "plan_type",
+                "family_resolution",
+                "passes",
+                "complete",
+                "stop_reason",
+                "logical_count",
+                "unresolved_count",
+                "lifecycle_answer",
+                "terminated_count",
+                "open_count",
+                "evidence_count",
+            },
+        )
         self.assertIs(trace["applied"], True)
         self.assertEqual(trace["plan_type"], "enumeration_plus_event")
         self.assertIs(trace["complete"], False)
         self.assertEqual(trace["logical_count"], 4)
-        self.assertGreater(trace["unresolved_count"], 0)
+        self.assertEqual(trace["unresolved_count"], 2)
         self.assertEqual(trace["lifecycle_answer"], "undetermined")
         self.assertEqual(trace["terminated_count"], 0)
         self.assertEqual(trace["open_count"], 4)
@@ -414,14 +431,21 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
             sort_keys=True,
         )
 
-        for forbidden in (
+        for forbidden_key in (
             "event_id",
             "doc_id",
             "chunk_id",
+            "corp_code",
+            "slot_id",
+        ):
+            self.assertNotIn(f'"{forbidden_key}"', serialized, forbidden_key)
+        for forbidden_value in (
             "event-secret",
             "document-secret",
         ):
-            self.assertNotIn(forbidden, serialized, forbidden)
+            self.assertNotIn(forbidden_value, serialized, forbidden_value)
+        self.assertNotIn("slots", payload["think_trace"]["multi_document_planner"])
+        self.assertNotIn("lifecycle", payload["think_trace"]["multi_document_planner"])
 
     def test_family_resolution_survives_but_never_reaches_answer(self) -> None:
         question = "삼성중공업이 2025년에 체결한 주요 계약은 모두 몇 건인가?"
@@ -434,13 +458,19 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
         trace = payload["think_trace"]["multi_document_planner"]
         self.assertEqual(trace["family_resolution"], "bare_contract_fallback")
         for lifecycle_only in (
+            "slots",
             "lifecycle",
             "lifecycle_answer",
             "terminated_count",
             "open_count",
         ):
             self.assertNotIn(lifecycle_only, trace, lifecycle_only)
-        for internal in ("family_resolution", "bare_contract_fallback", "slot"):
+        for internal in (
+            "family_resolution",
+            "bare_contract_fallback",
+            "slot_id",
+            "corp_code",
+        ):
             self.assertNotIn(internal, payload["answer"], internal)
 
     def test_non_engagement_omits_the_optional_block(self) -> None:
