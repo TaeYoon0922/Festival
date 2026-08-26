@@ -47,6 +47,71 @@ class CorrectionTrace(BaseModel):
     correction_added_doc_ids: list[str] = Field(default_factory=list)
 
 
+class MultiDocumentSlotTrace(BaseModel):
+    """One deterministic completeness slot, with counts but no member ids."""
+
+    slot_id: str
+    slot_type: str
+    corp_code: str | None = None
+    event_family: str | None = None
+    doc_group: str | None = None
+    doc_subtype: str | None = None
+    member_role: str | None = None
+    date_field: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    expected_count: int
+    found_count: int
+    missing_count: int
+    unresolved_count: int
+    status: str
+    completeness_reason: str | None = None
+
+
+class MultiDocumentLifecycleTrace(BaseModel):
+    """Lifecycle outcome counts; raw event identifiers never enter the API."""
+
+    slot_id: str
+    open_count: int
+    terminated_count: int
+
+
+class MultiDocumentTrace(BaseModel):
+    """P0-C execution summary in the existing ``MultiDocumentEvidence`` shape."""
+
+    applied: bool
+    plan_type: str
+    family_resolution: str | None = None
+    passes: int
+    slots: list[MultiDocumentSlotTrace] = Field(default_factory=list)
+    complete: bool
+    stop_reason: str | None = None
+    lifecycle: list[MultiDocumentLifecycleTrace] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    unavailable_reason: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    logical_count: int
+    unresolved_count: int
+    lifecycle_answer: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    terminated_count: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    open_count: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    evidence_count: int
+
+
 class ThinkTrace(BaseModel):
     """Execution summary: which components ran and what they concluded.
 
@@ -65,6 +130,13 @@ class ThinkTrace(BaseModel):
     #: Present only when the correction graph contributed documents; null
     #: otherwise, like every other optional field in this summary.
     correction: CorrectionTrace | None = None
+    #: Present only when P0-C engaged.  ``exclude_if`` is intentionally scoped
+    #: to this field so ordinary and Gold60 responses retain their exact prior
+    #: key set, including the existing ``correction: null`` contract.
+    multi_document_planner: MultiDocumentTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class AnswerResponse(BaseModel):

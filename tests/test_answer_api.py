@@ -35,6 +35,12 @@ from tests.test_agent_end_to_end_smoke import (
     _execution,
 )
 from tests.test_evidence_builder import _holding_pair
+from tests.test_multi_document_serving import (
+    LIFECYCLE_Q as P0C_LIFECYCLE_Q,
+    _EventRepo as _P0CEventRepo,
+    _pipeline as _p0c_pipeline,
+    _state as _p0c_state,
+)
 
 
 QUESTION = "효성중공업 국민연금기금 변동일 변동후 주식수"
@@ -62,6 +68,22 @@ CORRECTION_TRACE_KEYS = {
     "correction_latest_doc_id",
     "correction_added_doc_ids",
 }
+
+
+def _p0c_unresolved_pipeline() -> AnswerPipeline:
+    contracts = [_p0c_state(f"event-secret-{index:02d}") for index in range(3)]
+    contracts.append(
+        _p0c_state(
+            "event-secret-03",
+            source="related_reference_not_in_corpus",
+            doc_id="document-secret-03",
+        )
+    )
+    return _p0c_pipeline(_P0CEventRepo(contracts))
+
+
+def _p0c_bare_contract_pipeline() -> AnswerPipeline:
+    return _p0c_pipeline(_P0CEventRepo([_p0c_state("event-secret-bare")]))
 
 
 def _plan_and_execution():
@@ -350,6 +372,83 @@ class CorrectionTraceTests(unittest.TestCase):
             {"question_id", "question", "retrieved_context", "think_trace", "answer"},
         )
         self.assertEqual(set(ordinary["think_trace"]), THINK_TRACE_KEYS)
+
+
+class MultiDocumentHttpTraceTests(unittest.TestCase):
+    """P0-C trace must survive the actual FastAPI response-model boundary."""
+
+    def test_engaged_unresolved_trace_survives_http_serialization(self) -> None:
+        response = _ask(
+            _client(_p0c_unresolved_pipeline),
+            question_id="P0C-HTTP-U",
+            question=P0C_LIFECYCLE_Q,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {"question_id", "question", "retrieved_context", "think_trace", "answer"},
+        )
+        trace = payload["think_trace"]["multi_document_planner"]
+        self.assertIsNotNone(trace)
+        self.assertIs(trace["applied"], True)
+        self.assertEqual(trace["plan_type"], "enumeration_plus_event")
+        self.assertIs(trace["complete"], False)
+        self.assertEqual(trace["logical_count"], 4)
+        self.assertGreater(trace["unresolved_count"], 0)
+        self.assertEqual(trace["lifecycle_answer"], "undetermined")
+        self.assertEqual(trace["terminated_count"], 0)
+        self.assertEqual(trace["open_count"], 4)
+        self.assertGreater(trace["evidence_count"], 0)
+
+    def test_p0c_trace_contains_no_document_or_event_identifiers(self) -> None:
+        payload = _ask(
+            _client(_p0c_unresolved_pipeline),
+            question_id="P0C-HTTP-ID",
+            question=P0C_LIFECYCLE_Q,
+        ).json()
+        serialized = json.dumps(
+            payload["think_trace"]["multi_document_planner"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        for forbidden in (
+            "event_id",
+            "doc_id",
+            "chunk_id",
+            "event-secret",
+            "document-secret",
+        ):
+            self.assertNotIn(forbidden, serialized, forbidden)
+
+    def test_family_resolution_survives_but_never_reaches_answer(self) -> None:
+        question = "삼성중공업이 2025년에 체결한 주요 계약은 모두 몇 건인가?"
+        payload = _ask(
+            _client(_p0c_bare_contract_pipeline),
+            question_id="P0C-HTTP-FAMILY",
+            question=question,
+        ).json()
+
+        trace = payload["think_trace"]["multi_document_planner"]
+        self.assertEqual(trace["family_resolution"], "bare_contract_fallback")
+        for lifecycle_only in (
+            "lifecycle",
+            "lifecycle_answer",
+            "terminated_count",
+            "open_count",
+        ):
+            self.assertNotIn(lifecycle_only, trace, lifecycle_only)
+        for internal in ("family_resolution", "bare_contract_fallback", "slot"):
+            self.assertNotIn(internal, payload["answer"], internal)
+
+    def test_non_engagement_omits_the_optional_block(self) -> None:
+        payload = _ask(_client()).json()
+
+        self.assertNotIn("multi_document_planner", payload["think_trace"])
+        self.assertEqual(set(payload["think_trace"]), THINK_TRACE_KEYS)
+        self.assertIsNone(payload["think_trace"]["correction"])
 
 
 class HcxIntegrationTests(unittest.TestCase):
