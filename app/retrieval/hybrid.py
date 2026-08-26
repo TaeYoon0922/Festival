@@ -11,6 +11,7 @@ from app.retrieval.correction_expansion import (
     CorrectionExpansion,
     apply_expansion,
 )
+from app.retrieval.event_expansion import EventExpansion
 from app.reasoning.periodic_metric_view import has_exact_metric_row
 from app.retrieval.embeddings import EmbeddingConfig, EmbeddingProvider
 from app.retrieval.interfaces import (
@@ -143,6 +144,7 @@ class HybridQueryExecution:
     diagnostic_lexical_results: Sequence[RetrievalResult] = ()
     diagnostic_vector_results: Sequence[VectorRetrievalResult] = ()
     correction_expansion: Mapping[str, Any] = field(default_factory=dict)
+    event_expansion: Mapping[str, Any] = field(default_factory=dict)
 
 
 def reciprocal_rank_fusion(
@@ -202,6 +204,7 @@ class HybridQueryExecutor:
         router: QueryRouter | None = None,
         config: HybridRetrievalConfig | None = None,
         correction_expander: Any | None = None,
+        event_expander: Any | None = None,
     ) -> None:
         self._metadata_backend = metadata_backend
         self._chunk_backend = (
@@ -226,6 +229,7 @@ class HybridQueryExecutor:
         self.router = router or QueryRouter()
         self.config = config or HybridRetrievalConfig()
         self._correction_expander = correction_expander
+        self._event_expander = event_expander
 
     def execute(self, plan: Any) -> HybridQueryExecution:
         route = self.router.route(plan)
@@ -336,6 +340,19 @@ class HybridQueryExecutor:
             else CorrectionExpansion()
         )
         chunks, final_results = apply_expansion(expansion, chunks, final_results)
+        # The event graph knows the rest of a contract's lifecycle: the
+        # termination of a contract that was found, or the contract behind a
+        # termination that was found. Added after ranking for the same reason.
+        event_expansion = (
+            self._event_expander.expand(
+                plan, documents=documents, chunks=chunks, results=final_results
+            )
+            if self._event_expander is not None
+            else EventExpansion()
+        )
+        chunks, final_results = apply_expansion(
+            event_expansion, chunks, final_results
+        )
 
         correction = self.router.correction_summary(documents, route)
         routing = {
@@ -369,6 +386,7 @@ class HybridQueryExecutor:
             vector_coverage=vector_coverage,
             embedded_candidate_ids=embedded_candidate_ids,
             correction_expansion=expansion.to_dict(),
+            event_expansion=event_expansion.to_dict(),
             rerank_diagnostics=rerank_diagnostics,
             diagnostic_lexical_results=diagnostic_lexical_results,
             diagnostic_vector_results=diagnostic_vector_results,

@@ -30,6 +30,10 @@ from app.generation.hcx_verbalizer import (
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.router import QueryRouter
 from app.retrieval.correction_expansion import build_default_expander
+from app.retrieval.event_expansion import build_default_event_expander
+from app.retrieval.corporate_event_repository import (
+    PostgresCorporateEventRepository,
+)
 from app.retrieval.correction_repository import PostgresCorrectionRepository
 from app.retrieval.embeddings import (
     EmbeddingConfig,
@@ -117,6 +121,7 @@ class AnswerPipeline:
             }
         )
         correction_repository = PostgresCorrectionRepository(backend)
+        event_repository = PostgresCorporateEventRepository(backend)
         return cls(
             settings=settings,
             understanding=QueryUnderstanding(
@@ -135,6 +140,15 @@ class AnswerPipeline:
                 # the resolved chain is added back after retrieval.
                 correction_expander=build_default_expander(
                     correction_repository, backend, backend, backend
+                ),
+                # A contract question needs the rest of that contract's
+                # lifecycle: the termination of a contract that was retrieved, or
+                # the contract behind a termination that was. This executor is
+                # the single owner of event expansion on the serving path; the
+                # graph is followed once, never searched again. A database
+                # without db/007 degrades to the previous behaviour.
+                event_expander=build_default_event_expander(
+                    event_repository, backend, backend, backend
                 ),
                 config=settings.retrieval_config(),
             ),
@@ -180,13 +194,19 @@ def _expanded_count(execution: Any) -> int:
     the very limit it was appended after.
     """
 
-    trace = getattr(execution, "correction_expansion", None)
-    if not isinstance(trace, Mapping):
-        return 0
-    try:
-        return max(int(trace.get("correction_added_result_count") or 0), 0)
-    except (TypeError, ValueError):
-        return 0
+    total = 0
+    for attribute, key in (
+        ("correction_expansion", "correction_added_result_count"),
+        ("event_expansion", "event_added_result_count"),
+    ):
+        trace = getattr(execution, attribute, None)
+        if not isinstance(trace, Mapping):
+            continue
+        try:
+            total += max(int(trace.get(key) or 0), 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
@@ -263,6 +283,12 @@ def think_trace(
                 "correction_added_doc_ids",
             )
         }
+    event = getattr(execution, "event_expansion", None)
+    if isinstance(event, Mapping) and event.get("event_expanded"):
+        # Which lifecycle contributed which filings. An execution summary, not
+        # reasoning. Expansion runs inside retrieval, after correction expansion.
+        stages.insert(0, "corporate_event_expansion")
+        trace["corporate_event"] = event.get("corporate_event_expansion")
     return trace
 
 

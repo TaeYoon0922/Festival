@@ -45,6 +45,18 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "major",
     ),
     (
+        "treasury_share_trust_contract",
+        (
+            "자기주식취득신탁계약체결",
+            "자기주식 취득 신탁계약 체결",
+            "신탁계약체결",
+            "신탁계약 체결",
+            "자기주식취득신탁계약",
+            "자기주식 취득 신탁계약",
+        ),
+        "major",
+    ),
+    (
         "write_down_contingent_capital_security",
         (
             "상각형조건부자본증권",
@@ -57,8 +69,22 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ),
     ("spin_off", ("회사분할", "분할신설", "분할비율"), "major"),
     ("merger", ("합병", "흡수합병"), "major"),
-    ("supply_contract", ("단일판매", "공급계약", "수주계약"), "exchange"),
-    ("contract_termination", ("계약해지", "공급계약해지"), "exchange"),
+    (
+        "supply_contract",
+        (
+            "단일판매", "공급계약", "수주계약",
+            # Ways a question names a supply contract or its life. Bare field
+            # names such as "계약금액" are deliberately absent: they also appear
+            # in periodic and correction questions, which must not route here.
+            "계약체결", "계약상대", "계약의최초", "계약이후",
+        ),
+        "exchange",
+    ),
+    (
+        "contract_termination",
+        ("계약해지", "공급계약해지", "해지된계약", "해지계약", "계약이해지"),
+        "exchange",
+    ),
     ("facility_investment", ("시설투자", "신규시설투자"), "exchange"),
 )
 _EVENT_DOC_SUBTYPES = {

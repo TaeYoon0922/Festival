@@ -222,6 +222,7 @@ class QueryExecution:
     results: Sequence[RetrievalResult]
     routing: Mapping[str, Any] = field(default_factory=dict)
     correction_expansion: Mapping[str, Any] = field(default_factory=dict)
+    event_expansion: Mapping[str, Any] = field(default_factory=dict)
 
 
 class QueryExecutor:
@@ -235,6 +236,7 @@ class QueryExecutor:
         *,
         router: Any | None = None,
         correction_expander: Any | None = None,
+        event_expander: Any | None = None,
     ) -> None:
         from app.reasoning.router import QueryRouter
 
@@ -251,6 +253,7 @@ class QueryExecutor:
         )
         self._router = router or QueryRouter()
         self._correction_expander = correction_expander
+        self._event_expander = event_expander
 
     def execute(self, plan: QueryPlan) -> QueryExecution:
         route = self._router.route(plan)
@@ -285,6 +288,19 @@ class QueryExecutor:
             else CorrectionExpansion()
         )
         chunks, results = apply_expansion(expansion, chunks, results)
+        # Filings the question's own metadata window excluded but the event graph
+        # links to what was retrieved: the termination of a contract that was
+        # found, or the contract behind a termination that was found.
+        from app.retrieval.event_expansion import EventExpansion
+
+        event_expansion = (
+            self._event_expander.expand(
+                plan, documents=documents, chunks=chunks, results=results
+            )
+            if self._event_expander is not None
+            else EventExpansion()
+        )
+        chunks, results = apply_expansion(event_expansion, chunks, results)
         return QueryExecution(
             plan=plan,
             documents=documents,
@@ -292,6 +308,7 @@ class QueryExecutor:
             results=results,
             routing=_routing(self._router, route, documents),
             correction_expansion=expansion.to_dict(),
+            event_expansion=event_expansion.to_dict(),
         )
 
 
