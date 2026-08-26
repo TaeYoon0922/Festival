@@ -60,6 +60,48 @@ class MultiDocumentFacts:
     family_resolution: str | None = None
     stop_reason: str | None = None
 
+    def statement(self) -> str:
+        """The deterministic sentence the answer states, in Korean.
+
+        Every number is read from this object, never computed by a model.  The
+        four lifecycle states are worded so they cannot collapse into each
+        other: "checked and found none" and "could not finish checking" are
+        different claims, and only the first may be phrased as a negative.
+        """
+
+        count = self.logical_count
+        unresolved = self.unresolved_count
+        if self.lifecycle_answer == LIFECYCLE_EXISTS:
+            return (
+                f"조건에 해당하는 계약 {count}건을 확인했으며, "
+                f"이 중 이후 해지된 계약은 {self.terminated_count}건입니다."
+            )
+        if self.lifecycle_answer == LIFECYCLE_NONE:
+            return (
+                f"조건에 해당하는 계약 {count}건을 모두 확인했으며, "
+                "이후 해지된 계약은 확인되지 않았습니다."
+            )
+        if self.lifecycle_answer == LIFECYCLE_UNDETERMINED:
+            # Never a negative: the set was not fully verified, so "없다" would
+            # assert something the evidence does not support.
+            return (
+                f"조건에 해당하는 계약 {count}건 중 {unresolved}건은 "
+                "후속 공시와의 연결 근거를 확정하지 못해, "
+                "해지 여부를 단정할 수 없습니다."
+            )
+        if self.lifecycle_answer == LIFECYCLE_NO_MEMBERS:
+            return "해당 기간에 조건에 맞는 계약이 확인되지 않았습니다."
+        # Cardinality only.  An incomplete set still reports its count, but
+        # never as if the whole set had been verified.
+        if unresolved or not self.complete:
+            return (
+                f"조건에 해당하는 계약은 {count}건으로 확인되며, "
+                f"이 중 {unresolved}건은 관련 공시 연결을 확정하지 못했습니다."
+            )
+        if count == 0:
+            return "해당 기간에 조건에 맞는 계약이 확인되지 않았습니다."
+        return f"조건에 해당하는 계약은 모두 {count}건입니다."
+
     def to_dict(self) -> dict[str, Any]:
         payload = {
             "plan_type": self.plan_type,
@@ -260,26 +302,40 @@ class MultiDocumentEvidenceBuilder:
         openings = self._opening_documents(execution)
         for event_id in terminated_events:
             add(openings.get(event_id))
-        # 3. the remaining enumerated members
+        # 3. openings whose lifecycle evidence is unresolved.  This is the
+        # provenance behind an ``undetermined`` answer, so it must not lose its
+        # place merely because representative open contracts filled the budget.
+        unresolved_events = {
+            str(event_id)
+            for slot in plan.slots
+            for event_id in slot.unresolved_ids
+        }
+        document_members = {
+            str(doc_id)
+            for doc_ids in execution.document_ids.values()
+            for doc_id in doc_ids
+        }
+        for event_id in sorted(unresolved_events):
+            # Tier 1 carries event ids and resolves them through ``openings``;
+            # Tier 2 carries disclosure ids directly after P0-A collapse.
+            add(openings.get(event_id) or (
+                event_id if event_id in document_members else None
+            ))
+        # 4. the remaining enumerated members
         for slot in plan.slots:
             for doc_id in execution.document_ids.get(slot.slot_id, ()):  # type: ignore[union-attr]
                 add(doc_id)
         return ordered[: self.max_evidence]
 
     def _opening_documents(self, execution: Any) -> dict[str, str]:
-        """event_id -> opening filing, taken from the enumeration output."""
+        """event_id -> opening filing, read from the explicit mapping.
 
-        mapping: dict[str, str] = {}
-        for slot in execution.plan.slots:
-            if slot.slot_type is not SlotType.ENUMERATE_EVENTS:
-                continue
-            ids = list(slot.expected_ids)
-            documents = list(execution.document_ids.get(slot.slot_id, ()))
-            # enumerate_events returns one contract member per event, so the two
-            # sequences correspond positionally once both are sorted.
-            for event_id, doc_id in zip(ids, documents):
-                mapping[event_id] = doc_id
-        return mapping
+        Never derived by pairing two sorted sequences: that would attach the
+        wrong contract to a lifecycle the moment either order changed, and the
+        error would be silent.
+        """
+
+        return dict(getattr(execution, "opening_documents", {}) or {})
 
     def _termination_documents(
         self, plan: Any, terminated_events: Sequence[str]
@@ -330,17 +386,33 @@ class MultiDocumentEvidenceBuilder:
         rank = start_rank
         query = str(getattr(plan, "lexical_query", "") or "")
         slot_by_doc = self._slot_by_document(execution)
+        ranked_by_document: list[tuple[CandidateDocument, list[CandidateChunk]]] = []
         for document in documents:
-            if len(added_results) >= self.max_evidence:
-                break
             candidates = list(self._chunk_backend.get_candidate_chunks([document]))
             if not candidates:
                 continue
-            room = min(
-                self.chunks_per_document, self.max_evidence - len(added_results)
+            ranked_by_document.append(
+                (
+                    document,
+                    self._rank_within_document(query, candidates)[
+                        : self.chunks_per_document
+                    ],
+                )
             )
-            slot = slot_by_doc.get(document.doc_id)
-            for candidate in self._rank_within_document(query, candidates)[:room]:
+
+        # Give every answer-critical document one citation before spending a
+        # second chunk on any document.  Sequential per-document filling made a
+        # five-termination trust case consume all 12 rows on termination
+        # filings plus one opening, leaving four opening identity claims
+        # uncited even though all ten documents fit the document budget.
+        for chunk_index in range(self.chunks_per_document):
+            for document, candidates in ranked_by_document:
+                if len(added_results) >= self.max_evidence:
+                    break
+                if chunk_index >= len(candidates):
+                    continue
+                candidate = candidates[chunk_index]
+                slot = slot_by_doc.get(document.doc_id)
                 match = dict(candidate.metadata_match.to_dict())
                 match[PROVENANCE_KEY] = {
                     "doc_id": document.doc_id,
@@ -370,6 +442,8 @@ class MultiDocumentEvidenceBuilder:
                     )
                 )
                 rank += 1
+            if len(added_results) >= self.max_evidence:
+                break
         return added_chunks, added_results
 
     @staticmethod

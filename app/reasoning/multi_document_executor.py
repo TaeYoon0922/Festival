@@ -96,6 +96,10 @@ class MultiDocumentExecution:
     #: Tier 1 logical ids are ``event_id``s, which are not disclosures, so this
     #: is what evidence hydration reads instead of re-querying. Never traced.
     document_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: event_id -> the opening filing that represents it. An explicit mapping,
+    #: never an ordering coincidence: hydration must attach the right contract
+    #: to the right lifecycle even if either sequence is reordered.
+    opening_documents: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def applied(self) -> bool:
@@ -206,6 +210,11 @@ class MultiDocumentExecutor:
                 for slot_id, value in states.items()
                 if value.get("documents")
             },
+            opening_documents={
+                event_id: doc_id
+                for value in states.values()
+                for event_id, doc_id in (value.get("openings") or {}).items()
+            },
         )
 
     # --------------------------------------------------------------- dispatch
@@ -267,6 +276,11 @@ class MultiDocumentExecutor:
                     if state.canonical_doc_id
                 )
             ),
+            "openings": {
+                str(state.event_id): str(state.canonical_doc_id)
+                for state in found
+                if state.canonical_doc_id
+            },
         }
         return slot.resolve_status_with(
             expected_ids=event_ids, found_ids=event_ids, unresolved_ids=dangling

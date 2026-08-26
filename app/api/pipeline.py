@@ -33,6 +33,7 @@ from app.reasoning.multi_document_evidence import (
 )
 from app.reasoning.multi_document_executor import MultiDocumentExecutor
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
+from app.reasoning.multi_document_semantics import check_answer
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.router import QueryRouter
 from app.retrieval.correction_expansion import (
@@ -209,6 +210,7 @@ class AnswerPipeline:
             resolution=result.resolution,
             task_type=result.task_decision.task_type,
         )
+        outcome = _preserve_multi_document_semantics(outcome, generated, multi)
         return {
             "question_id": question_id,
             "question": question,
@@ -274,6 +276,35 @@ def _multi_document_count(multi: Any) -> int:
     if multi is None:
         return 0
     return len(getattr(multi, "added_results", ()) or ())
+
+
+def _preserve_multi_document_semantics(
+    outcome: VerbalizationOutcome,
+    generated: GeneratedAnswer,
+    multi_document: Any,
+) -> VerbalizationOutcome:
+    """Reject a final rewrite that changes the deterministic lifecycle state."""
+
+    facts = getattr(multi_document, "facts", None)
+    state = getattr(facts, "lifecycle_answer", None)
+    if state is None:
+        return outcome
+    verdict = check_answer(state, outcome.text)
+    if verdict.ok:
+        return outcome
+
+    # The generator renders ``facts.statement()`` verbatim.  Check it too so
+    # the release gate remains fail-closed even if a later generator edit
+    # accidentally changes that contract.
+    deterministic = generated.answer_text
+    fallback = check_answer(state, deterministic)
+    if not fallback.ok:
+        deterministic = facts.statement()
+    return VerbalizationOutcome(
+        deterministic,
+        "fallback_semantic_guard",
+        verdict.reason,
+    )
 
 
 def _expanded_count(execution: Any) -> int:
