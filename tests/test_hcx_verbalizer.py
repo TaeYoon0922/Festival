@@ -17,6 +17,7 @@ from app.generation.hcx_verbalizer import (
     PLACEHOLDER_INTEGRITY_FAILED,
     SKIPPED_MULTI_EVENT_CLAIM,
     SKIPPED_NO_COMPACT_CLAIM,
+    SKIPPED_SEMANTIC_CONTROL_NOTICE,
     HcxSettings,
     HcxVerbalizer,
 )
@@ -27,7 +28,7 @@ from app.generation.lossless_verbalization import (
 )
 from app.reasoning.answer_composer import compose_periodic_answer
 from app.reasoning.periodic_fact_resolver import resolve_periodic_facts
-from app.reasoning.query_plan import QueryPlan
+from app.reasoning.query_plan import QueryPeriod, QueryPlan
 from app.retrieval.embeddings import EmbeddingHttpError
 from tests.test_agent_end_to_end_smoke import _execution
 from tests.test_evidence_builder import _candidate, _holding_pair
@@ -52,12 +53,32 @@ def _holding_context(events: int = 1):
         )
         for index in range(events)
     ]
+    # A one-event context names its date, so the question identifies the event
+    # and P1-A5-A adds no caveat -- these tests are about the HCX round trip
+    # and need a question the verbalizer is allowed to restate.  A multi-event
+    # context deliberately names no date: it is testing the multi-event gate,
+    # which sits ahead of the semantic-control one.
+    dated = events == 1
     plan = QueryPlan(
-        query="효성중공업 국민연금기금 변동일 변동후 주식수",
+        query=(
+            "효성중공업 국민연금기금 2023년 6월 30일 변동후 주식수"
+            if dated
+            else "효성중공업 국민연금기금 변동일 변동후 주식수"
+        ),
         task_type="holding_change",
         metric="holding_shares",
         reporter="국민연금기금",
         disclosure_route=("holding",),
+        period=(
+            QueryPeriod(
+                year=2023,
+                from_date="2023-06-30",
+                to_date="2023-06-30",
+                period_type="holding_reference_date",
+            )
+            if dated
+            else None
+        ),
         evidence={"requested_holding_fields": ["reference_date", "after_shares"]},
     )
     result = AgentOrchestrator().run(plan.raw_query, plan, _execution(plan, *pairs))
@@ -348,12 +369,20 @@ class StructuredTextLeakageTests(unittest.TestCase):
             "h23:ch", "h23", rank=1, date="2023-06-30",
             projection_type="holding_report", table_id="t23",
         )
+        # An exact reference date: HCX may only restate answers whose question
+        # named one event (P1-A5-A).
         plan = QueryPlan(
-            query="효성중공업 국민연금기금 변동일 변동방향",
+            query="효성중공업 국민연금기금 2023년 6월 30일 변동방향",
             task_type="holding_change",
             metric="holding_shares",
             reporter="국민연금기금",
             disclosure_route=("holding",),
+            period=QueryPeriod(
+                year=2023,
+                from_date="2023-06-30",
+                to_date="2023-06-30",
+                period_type="holding_reference_date",
+            ),
             evidence={"requested_holding_fields": ["reference_date"]},
         )
         self.result = AgentOrchestrator().run(
@@ -632,3 +661,130 @@ class HcxSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# P1-A5-A.1: a caveat the model was never shown cannot survive being restated.
+#
+# A compact claim carries verified facts only, so an answer's statement about
+# what the question left open is absent from what HCX is given and absent from
+# what it returns.  Restating the facts therefore deletes it silently, and the
+# lossless validator cannot object because it compares against the claim.  So
+# such an answer is never sent.
+# --------------------------------------------------------------------------
+
+
+class _AmbiguityDraft:
+    """The draft fields the verbalizer reads, with settable flags."""
+
+    def __init__(self, base, **flags) -> None:
+        self._base = base
+        self.ambiguity = {**dict(getattr(base, "ambiguity", {}) or {}), **flags}
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+class SemanticControlNoticeTests(unittest.TestCase):
+    """The new gate, and everything around it that must not move."""
+
+    def _verbalize(self, **flags):
+        transport = _Transport(_reply(MASKED))
+        verbalizer = HcxVerbalizer(_settings(), transport=transport)
+        kwargs = _kwargs()
+        kwargs["draft"] = _AmbiguityDraft(RESULT.answer_draft, **flags)
+        outcome = verbalizer.verbalize(GENERATED, **kwargs)
+        return outcome, transport
+
+    def test_an_under_specified_answer_is_never_sent(self) -> None:
+        outcome, transport = self._verbalize(under_specified=True)
+
+        self.assertEqual(outcome.status, SKIPPED_SEMANTIC_CONTROL_NOTICE)
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+        self.assertEqual(transport.calls, [])
+
+    def test_an_exact_multi_match_answer_is_never_sent(self) -> None:
+        outcome, transport = self._verbalize(exact_multi_match=True)
+
+        self.assertEqual(outcome.status, SKIPPED_SEMANTIC_CONTROL_NOTICE)
+        self.assertEqual(outcome.text, DETERMINISTIC_TEXT)
+        self.assertEqual(transport.calls, [])
+
+    def test_either_flag_alone_is_enough(self) -> None:
+        for flags in ({"under_specified": True}, {"exact_multi_match": True},
+                      {"under_specified": True, "exact_multi_match": True}):
+            with self.subTest(flags=tuple(sorted(flags))):
+                outcome, transport = self._verbalize(**flags)
+                self.assertEqual(outcome.status, SKIPPED_SEMANTIC_CONTROL_NOTICE)
+                self.assertEqual(transport.calls, [])
+
+    def test_without_the_flags_the_model_is_still_used(self) -> None:
+        outcome, _transport = self._verbalize(
+            under_specified=False, exact_multi_match=False)
+
+        self.assertNotEqual(outcome.status, SKIPPED_SEMANTIC_CONTROL_NOTICE)
+
+    def test_a_draft_without_the_mapping_behaves_as_before(self) -> None:
+        """Backward compatible: an older caller supplies no ambiguity."""
+
+        class _Bare:
+            answerable = True
+
+        verbalizer = HcxVerbalizer(_settings(), transport=_Transport(_reply(MASKED)))
+        outcome = verbalizer.verbalize(
+            GENERATED, draft=_Bare(), resolution=RESULT.resolution,
+            task_type=RESULT.task_decision.task_type, claim=CLAIM)
+
+        self.assertNotEqual(outcome.status, SKIPPED_SEMANTIC_CONTROL_NOTICE)
+
+    def test_no_draft_at_all_behaves_as_before(self) -> None:
+        verbalizer = HcxVerbalizer(_settings(), transport=_Transport(_reply(MASKED)))
+        outcome = verbalizer.verbalize(GENERATED, claim=CLAIM)
+
+        self.assertNotEqual(outcome.status, SKIPPED_SEMANTIC_CONTROL_NOTICE)
+
+    def test_the_deterministic_answer_is_returned_untouched(self) -> None:
+        """Citations and every rendered section survive exactly."""
+
+        outcome, _transport = self._verbalize(under_specified=True)
+
+        self.assertEqual(outcome.text, GENERATED.answer_text)
+        for citation in GENERATED.citations:
+            self.assertIn(citation.chunk_id, outcome.text)
+        self.assertIn("인용", outcome.text)
+
+    def test_established_skip_statuses_keep_precedence(self) -> None:
+        """The gate sits last, so nothing that skipped before changes."""
+
+        transport = _Transport(_reply(MASKED))
+        verbalizer = HcxVerbalizer(_settings(), transport=transport)
+        multi_result, multi_generated = _holding_context(events=2)
+        outcome = verbalizer.verbalize(
+            multi_generated,
+            draft=_AmbiguityDraft(multi_result.answer_draft, under_specified=True),
+            resolution=multi_result.resolution,
+            task_type=multi_result.task_decision.task_type,
+        )
+
+        self.assertEqual(outcome.status, SKIPPED_MULTI_EVENT_CLAIM)
+        self.assertEqual(transport.calls, [])
+
+    def test_a_disabled_verbalizer_still_reports_disabled(self) -> None:
+        verbalizer = HcxVerbalizer(_settings(enabled=False))
+        kwargs = _kwargs()
+        kwargs["draft"] = _AmbiguityDraft(RESULT.answer_draft, under_specified=True)
+
+        self.assertEqual(verbalizer.verbalize(GENERATED, **kwargs).status,
+                         "disabled")
+
+    def test_the_verbalizer_names_no_notice_text(self) -> None:
+        """The wording belongs to the generator; only flags are read here."""
+
+        from pathlib import Path
+
+        source = Path("app/generation/hcx_verbalizer.py").read_text(encoding="utf-8")
+        for literal in ("질문에 특정", "주의", "확인된 변동", "동일한 변동",
+                        "HX", "국민연금", "효성중공업", "2023-", "2024-"):
+            self.assertNotIn(literal, source, f"must not name {literal!r}")
+        self.assertIn("under_specified", source)
+        self.assertIn("exact_multi_match", source)

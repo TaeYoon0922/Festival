@@ -27,7 +27,7 @@ from app.generation.lossless_verbalization import (
     expected_attached_answer,
 )
 from app.generation.protected_literals import PLACEHOLDER_PATTERN
-from app.reasoning.query_plan import QueryPlan
+from app.reasoning.query_plan import QueryPeriod, QueryPlan
 from app.retrieval.embeddings import EmbeddingHttpError
 from tests.test_agent_end_to_end_smoke import (
     _StaticExecutor,
@@ -183,12 +183,20 @@ def _single_event_plan_and_execution():
         projection_type="holding_report",
         table_id="t23",
     )
+    # An exact reference date: HCX may only restate answers whose question
+    # named one event (P1-A5-A), and these tests exercise the round trip.
     plan = QueryPlan(
         query=QUESTION,
         task_type="holding_change",
         metric="holding_shares",
         reporter="국민연금기금",
         disclosure_route=("holding",),
+        period=QueryPeriod(
+            year=2023,
+            from_date="2023-06-30",
+            to_date="2023-06-30",
+            period_type="holding_reference_date",
+        ),
         evidence={"requested_holding_fields": ["reference_date", "after_shares"]},
     )
     return plan, _execution(plan, pair)
@@ -554,7 +562,9 @@ class HcxIntegrationTests(unittest.TestCase):
         self.assertNotIn("%%", payload["answer"])
         self.assertNotIn("주주", payload["answer"])
         self.assertIsNone(
-            re.search(r"\[\d+\]\s*[%주원배]", payload["answer"])
+            # Same line only: the defect is a unit glued onto a citation
+            # marker, not a section heading that happens to start with 주.
+            re.search(r"\[\d+\][ 	]*[%주원배]", payload["answer"])
         )
 
     def test_normalized_literals_fall_back(self) -> None:

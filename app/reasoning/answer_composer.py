@@ -11,6 +11,11 @@ from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import EvidenceItem, EvidenceSet
 from app.reasoning.holding_event_resolver import HoldingEvent, HoldingResolution
+from app.reasoning.holding_event_selection import (
+    EXACT,
+    NOT_APPLICABLE,
+    is_semantically_unique,
+)
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFact,
     PeriodicFactResolution,
@@ -82,6 +87,7 @@ class AnswerComposer:
         *,
         holding_resolution: HoldingResolution | None = None,
         periodic_resolution: PeriodicFactResolution | None = None,
+        selection_mode: str = NOT_APPLICABLE,
     ) -> AnswerDraft:
         supplied = sum(
             value is not None for value in (holding_resolution, periodic_resolution)
@@ -89,14 +95,22 @@ class AnswerComposer:
         if supplied != 1:
             raise ValueError("exactly one resolver output must be supplied")
         if holding_resolution is not None:
-            return compose_holding_answer(holding_resolution, evidence_set)
+            return compose_holding_answer(
+                holding_resolution, evidence_set, selection_mode=selection_mode
+            )
         assert periodic_resolution is not None
         return compose_periodic_answer(periodic_resolution, evidence_set)
 
     def compose_holding(
-        self, resolution: HoldingResolution, evidence_set: EvidenceSet
+        self,
+        resolution: HoldingResolution,
+        evidence_set: EvidenceSet,
+        *,
+        selection_mode: str = NOT_APPLICABLE,
     ) -> AnswerDraft:
-        return compose_holding_answer(resolution, evidence_set)
+        return compose_holding_answer(
+            resolution, evidence_set, selection_mode=selection_mode
+        )
 
     def compose_periodic(
         self, resolution: PeriodicFactResolution, evidence_set: EvidenceSet
@@ -105,7 +119,10 @@ class AnswerComposer:
 
 
 def compose_holding_answer(
-    resolution: HoldingResolution, evidence_set: EvidenceSet
+    resolution: HoldingResolution,
+    evidence_set: EvidenceSet,
+    *,
+    selection_mode: str = NOT_APPLICABLE,
 ) -> AnswerDraft:
     evidence_by_id = _evidence_by_id(evidence_set)
     citation_builder = _CitationBuilder(evidence_by_id)
@@ -136,6 +153,19 @@ def compose_holding_answer(
     temporal_ambiguity = (
         resolution.temporal_ambiguity or resolution.matching_event_count > 1
     )
+    # Whether one event may be called *the* answer is a question about the
+    # question, not about how many events retrieval exposed.  A count of one is
+    # routinely an artifact of which projections were served, so it is recorded
+    # separately from whether the query ever identified a single event.
+    observed = len(reported_events)
+    semantic_unique = is_semantically_unique(
+        selection_mode, resolution.matching_event_count
+    )
+    scoped = bool(resolution.requested_fields) and bool(observed)
+    under_specified = scoped and selection_mode not in (NOT_APPLICABLE, EXACT)
+    exact_multi = (
+        scoped and selection_mode == EXACT and resolution.matching_event_count > 1
+    )
     warnings = [*evidence_set.warnings, *resolution.warnings]
     if temporal_ambiguity:
         warnings.append("multiple_matching_holding_events")
@@ -159,6 +189,11 @@ def compose_holding_answer(
             "matching_event_count": resolution.matching_event_count,
             "alternative_event_count": len(resolution.events),
             "latest_event_selected": False,
+            "selection_mode": selection_mode,
+            "semantic_unique": semantic_unique,
+            "under_specified": under_specified,
+            "exact_multi_match": exact_multi,
+            "observable_matching_event_count": observed,
         },
         warnings=tuple(dict.fromkeys(warnings)),
         confidence=confidence,

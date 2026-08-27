@@ -235,6 +235,58 @@ def _holding_sections(
     return _holding_section_list(draft, lines, section_citations), warnings, supported
 
 
+#: The question named no time point and one change was found.  It says what the
+#: question left open and scopes the finding to the evidence at hand -- it must
+#: not claim several were seen, nor that no others exist.  "해당" rather than
+#: "아래": this section renders after the events, so a positional word would
+#: point the wrong way.
+_HOLDING_UNDER_SPECIFIED_ONE = (
+    "질문에 특정 변동 시점이 지정되지 않았습니다. "
+    "현재 확인된 근거에서는 해당 변동이 확인됩니다."
+)
+
+#: The question named no time point and several changes were found.
+_HOLDING_UNDER_SPECIFIED_MANY = (
+    "질문에 특정 변동 시점이 지정되지 않아, "
+    "확인된 변동 내역을 함께 제시합니다."
+)
+
+#: The question did name a date, and several changes still answer to it.
+_HOLDING_EXACT_MANY = (
+    "동일한 변동 시점에 여러 일치 이벤트가 확인되어 "
+    "함께 제시합니다."
+)
+
+#: Several changes were observed, with nothing said about what the question
+#: asked for.  Predates the selection modes; kept for callers that supply none.
+_HOLDING_OBSERVED_MANY = (
+    "여러 변동 이벤트가 확인되어 특정 시점을 자동 선택하지 "
+    "않았습니다."
+)
+
+
+def _holding_notice(ambiguity: Mapping[str, Any]) -> str | None:
+    """Which caveat this holding answer carries, if any.
+
+    Presentation only: the composer has already decided what the question
+    supplied, and this chooses the sentence that states it.  Nothing here reads
+    the query, the events, or how they were retrieved.
+    """
+
+    observed = ambiguity.get("observable_matching_event_count")
+    if bool(ambiguity.get("under_specified")):
+        return (
+            _HOLDING_UNDER_SPECIFIED_ONE
+            if observed == 1
+            else _HOLDING_UNDER_SPECIFIED_MANY
+        )
+    if bool(ambiguity.get("exact_multi_match")):
+        return _HOLDING_EXACT_MANY
+    if bool(ambiguity.get("temporal_ambiguity")):
+        return _HOLDING_OBSERVED_MANY
+    return None
+
+
 def _holding_section_list(
     draft: AnswerDraft, lines: Sequence[str], citations: Sequence[str]
 ) -> list[GeneratedSection]:
@@ -247,16 +299,12 @@ def _holding_section_list(
             citations=_unique(list(citations)),
         )
     ]
-    if bool(draft.ambiguity.get("temporal_ambiguity")):
+    notice = _holding_notice(draft.ambiguity)
+    if notice is not None:
+        # The caveat is about the question, not about a source, so it carries
+        # no citation of its own.
         sections.append(
-            GeneratedSection(
-                title="주의",
-                content=(
-                    "여러 변동 이벤트가 확인되어 특정 시점을 자동 선택하지 "
-                    "않았습니다."
-                ),
-                citations=(),
-            )
+            GeneratedSection(title="주의", content=notice, citations=())
         )
     return sections
 

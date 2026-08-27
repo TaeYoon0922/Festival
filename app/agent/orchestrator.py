@@ -29,6 +29,9 @@ from app.reasoning.holding_date_intent import (
     execution_plan as holding_execution_plan,
 )
 from app.reasoning.holding_event_fusion import fuse as fuse_holding_events
+from app.reasoning.holding_event_selection import (
+    classify_holding_event_selection,
+)
 from app.reasoning.holding_evidence_coverage import (
     CoverageAssessment,
     assess as assess_holding_coverage,
@@ -198,8 +201,15 @@ class AgentOrchestrator:
             )
             resolution_before = copy.deepcopy(resolution.to_dict())
             trace.append("answer_composer")
+            # What the question itself said about which event is wanted, read
+            # from the plan alone. The composer must not re-derive it, and the
+            # count of served events must not stand in for it.
             draft = self.answer_composer.compose(
-                evidence, holding_resolution=resolution
+                evidence,
+                holding_resolution=resolution,
+                selection_mode=classify_holding_event_selection(
+                    holding_plan, routed_task_type=decision.task_type
+                ),
             )
         elif decision.task_type == "periodic_fact":
             trace.append("periodic_fact_resolver")
