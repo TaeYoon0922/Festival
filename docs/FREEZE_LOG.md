@@ -1002,6 +1002,131 @@ another:
 
 ---
 
+## P1-C — Table Sibling / Evidence Neighborhood Expansion
+
+**Status:** Phase 1 **DIAGNOSIS COMPLETE — TARGET EXISTS** ·
+**IMPLEMENTATION DEFERRED PENDING PERIODIC VALIDATION**
+
+This is not a freeze. **No production implementation exists**, so there is no
+contract to protect — only a measured target, a design that has not been built,
+and the conditions for resuming.
+
+> ### ⚠ Header recovery is **not** the target
+>
+> **0 of 10,318 split raw-table chunks lacked a rendered header.**
+> `_render_table_rows` prepends `column_headers` to every chunk and the chunker
+> synthesises `열 1 … 열 n` when a splitting table has none. Units are present on
+> 97% and period labels on 99.8% of projections. Expanding siblings to recover
+> header, unit or period context would solve a problem the corpus does not have,
+> and must not be used to justify P1-C.
+
+### The question
+An anchor chunk is retrieved; the evidence the answer needs sits in **another
+chunk of the same table**; the pipeline never surfaces it. Only that shape is
+P1-C.
+
+### Schema already supports it
+`table_id` · `row_start` / `row_end` · `prev_chunk_id` / `next_chunk_id` ·
+`column_headers` · `unit` · `period_labels` · `source_refs` · projection/source
+provenance. Deterministic table-neighborhood reconstruction needs **no schema
+change**.
+
+### No stage does this today
+No retrieval or evidence stage performs generic same-table sibling expansion.
+The in-retrieval rescues work from the fixed pool without table awareness, and
+graph expansion adds documents, not rows.
+
+### P1-A3 boundary
+P1-A3 is **holding-only** and **projection-only** (`holding_detail_row`,
+`holding_report`). It never adds a **raw same-table sibling row**, and
+**non-holding tables are outside its ownership**. P1-C must not touch its anchor
+semantics or its promotions.
+
+### Measured — table splitting
+45,311 sampled tables across all four doc groups:
+
+| doc group | tables | split | rate |
+|---|---|---|---|
+| periodic | 41,916 | 3,562 | **8.5%** |
+| holding | 2,555 | 229 | 9.0% |
+| **major** | 616 | 0 | **0.0%** |
+| **exchange** | 224 | 0 | **0.0%** |
+| **total** | 45,311 | **3,791** | **8.4%** |
+
+Chunks per table: p50 = 1, p90 = 1, p95 = 2, max 1,843.
+
+### Measured — the real target: paired metrics split within one table
+
+| pair | split / total containing both | rate |
+|---|---|---|
+| **자산총계 / 부채총계** | 217 / 689 | **31.5%** |
+| 영업이익 / 당기순이익 | 48 / 577 | 8.3% |
+| 매출액 / 영업이익 | 6 / 739 | 0.8% |
+| holding and contract pairs (보유주식수/보유비율, 변동전/변동후, 계약금액/계약기간) | 0 | **0.0%** |
+
+Every split instance observed was **periodic**. Since major and exchange never
+split and holding pairs never split, **periodic is the only meaningful target
+domain**, and P1-A3 already owns the holding side.
+
+### Measured — end-to-end probes
+15 generic paired-metric probes (no gold used):
+
+| outcome | count |
+|---|---|
+| BOTH_SERVED — pipeline already returns both | 6 |
+| NEITHER — retrieval found neither metric (P1-R territory) | 4 |
+| ONE_ONLY, sibling does **not** contain the missing fact (different table/document) | 4 |
+| **genuine SIBLING_RECOVERABLE** | **1** |
+
+The one genuine case: **이마트 영업이익 / 당기순이익** — one requested metric is
+absent from the served top-10 while unserved chunks with the same `table_id`
+contain it.
+
+### Candidate design, if later validated
+- **Trigger** — a served table chunk, an unmatched query term, and unserved
+  same-table siblings.
+- **Policy** — metric-hint / text-term match first, then distance fallback.
+- **Bounds** — max **1** sibling per anchor, max **2** added chunks per query.
+- **Isolation** — same document and same `table_id` only.
+- **Placement** — after the retrieval rescues, P1-A3 and graph expansion,
+  immediately before `EvidenceBuilder`.
+- **Score** — **do not fabricate** a lexical/vector/retrieval score.
+- **Provenance** — preserve the real `chunk_id`, `doc_id` and `source_refs`;
+  record `expansion_source`, `anchor_chunk_id`, `table_distance` and
+  `expansion_reason` internally only. No public schema change.
+
+Bounds are not optional: the one recoverable case offered **8** candidate
+siblings for a single needed fact, and one table in the corpus emits 1,843
+chunks.
+
+### Why implementation is deferred
+- periodic is the only meaningful target domain;
+- **periodic Gold questions were not evaluated** — their companies are outside
+  the seeded corpus;
+- the retrieval side of the probes used `DeterministicHashEmbedder`, so which
+  chunks were served is unreliable;
+- correction and multi-document controls were **not exercised**;
+- only **1 of 15** probes demonstrated end-to-end recoverable evidence;
+- the gain on real evaluation therefore remains unknown.
+
+### Reopen implementation only after
+1. periodic evaluation questions are available in the test corpus;
+2. same-table sibling misses are measured on **real questions**;
+3. frozen P0 / P1-A controls are verified against the expansion.
+
+### Ownership firewall
+| symptom | owner |
+|---|---|
+| filtered out **before scoring** | **P1-B** |
+| eligible but **ranked low** | **P1-R** |
+| anchor retrieved, required **same-table sibling absent** | **P1-C** |
+| evidence present but **reasoning wrong** | reasoning phases |
+
+A metric that lives in a *different* table or document is none of these — it is
+not a P1-C case.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -1018,3 +1143,4 @@ another:
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
 | P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED** | — |
 | P1-R Ranking / Reranking | **VALIDATION BLOCKED / DEFERRED** | — |
+| P1-C Table Sibling / Evidence Neighborhood | **TARGET EXISTS / IMPLEMENTATION DEFERRED** | — |
