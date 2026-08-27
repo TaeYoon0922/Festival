@@ -412,7 +412,7 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertNotIn("부가가치세 제외", text)
         self.assertNotIn("변경될 수 있습니다", text)
 
-    def test_holding_route_general_evidence_keeps_nine_items_without_resolver(self):
+    def test_gold60_hx12_holding_route_preserves_resolver_stage(self):
         items = [
             _candidate(
                 f"h1:ch_{index}",
@@ -425,7 +425,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             for index in range(1, 11)
         ]
         plan = QueryPlan(
-            query="국민연금기금 변동일 변동전 변동후",
+            query="파마리서치 국민연금기금 변동일 변동전 변동후",
             task_type="disclosure_lookup",
             disclosure_route=("holding",),
         )
@@ -433,12 +433,28 @@ class AgentOrchestratorTests(unittest.TestCase):
 
         result = AgentOrchestrator().run(plan.raw_query, plan, execution)
 
-        self.assertIsNone(result.resolution)
-        self.assertEqual(result.task_decision.task_type, "general_evidence")
-        self.assertIn("general_evidence_limited:max=9", result.answer_draft.warnings)
+        self.assertEqual(result.task_decision.task_type, "holding_event")
         self.assertEqual(
-            result.answer_draft.evidence_references,
-            tuple(f"h1:ch_{index}" for index in range(1, 10)),
+            result.task_decision.resolver_type,
+            "holding_event_resolver",
+        )
+        self.assertEqual(
+            result.execution_trace,
+            (
+                "task_router",
+                "evidence_builder",
+                "holding_event_resolver",
+                "answer_composer",
+            ),
+        )
+        self.assertIsInstance(result.resolution, HoldingResolution)
+        self.assertEqual(result.resolution.events, ())
+        self.assertIn("no_holding_event_groups", result.warnings)
+        self.assertFalse(result.answer_draft.answerable)
+        self.assertEqual(result.answer_draft.evidence_references, ())
+        self.assertEqual(
+            result.evidence_set.retrieval_order,
+            tuple(f"h1:ch_{index}" for index in range(1, 11)),
         )
 
     def test_input_plan_candidates_results_and_scores_are_not_mutated(self):

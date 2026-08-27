@@ -79,6 +79,70 @@ class MultiDocumentTrace(BaseModel):
     evidence_count: int
 
 
+class QuerySlotTrace(BaseModel):
+    value: Any = None
+    source: str
+    status: str
+    candidates: list[str] = Field(default_factory=list)
+
+
+class ClarificationOptionTrace(BaseModel):
+    id: str
+    label: str
+
+
+class ClarificationTrace(BaseModel):
+    question: str
+    options: list[ClarificationOptionTrace] = Field(default_factory=list)
+
+
+class HcxSemanticDiagnosticTrace(BaseModel):
+    transport_status: str
+    response_shape: str | None = None
+    content_present: bool
+    parse_status: str
+    content_format: str | None = None
+    prefix_text_present: bool = False
+    suffix_text_present: bool = False
+    schema_error_code: str | None = None
+    schema_error_fields: list[str] = Field(default_factory=list)
+
+
+class QueryUnderstandingTrace(BaseModel):
+    status: str
+    resolved_slots: dict[str, QuerySlotTrace] = Field(default_factory=dict)
+    missing_slots: list[str] = Field(default_factory=list)
+    ambiguous_slots: list[str] = Field(default_factory=list)
+    hcx_fallback_used: bool
+    hcx_fallback_status: str
+    hcx_elapsed_ms: float | None = None
+    hcx_diagnostic: HcxSemanticDiagnosticTrace | None = None
+    clarification_required: bool
+    clarification: ClarificationTrace | None = None
+
+
+class QueryValidationTrace(BaseModel):
+    status: str
+    retrieval_allowed: bool
+    reason: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+
+class AnswerabilityTrace(BaseModel):
+    status: str
+    evidence_count: int
+    citation_count: int
+    complete: bool | None = None
+    confirmed_fields: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    citable: bool = False
+    relevant_to_request: bool | None = None
+    answerable: bool = False
+
+
 class ThinkTrace(BaseModel):
     """Execution summary: which components ran and what they concluded.
 
@@ -101,6 +165,20 @@ class ThinkTrace(BaseModel):
     #: to this field so ordinary and Gold60 responses retain their exact prior
     #: key set, including the existing ``correction: null`` contract.
     multi_document_planner: MultiDocumentTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    #: Present only on the P0-D serving path. Legacy unit fixtures that do not
+    #: wire the verifier retain their byte-for-byte trace contract.
+    query_understanding: QueryUnderstandingTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    query_validation: QueryValidationTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    answerability: AnswerabilityTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
