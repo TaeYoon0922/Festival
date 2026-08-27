@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `d39a1b1`.
+Branch: `taeyoon` · Log current through `eaec179`.
 
 ---
 
@@ -511,8 +511,10 @@ Tests: `tests/test_holding_exact_event_resolution.py`
 | citations | preserved | preserved |
 
 **No-date controls** — HX08, HX10, HX12, HX16, HX20 behaviourally unchanged.
-HX10 in particular keeps its full row count: fusion does not fire without an
-exact date.
+HX10 remains outside P1-A4 fusion because no exact date is present. A later
+P1-A5-B presentation fix may reduce rendered rows by removing events that the
+resolver already marked non-matching; this does not violate the P1-A4 no-date
+fusion invariant.
 
 **P0 correction regression** — PASS.
 
@@ -534,6 +536,107 @@ exact date.
 
 ---
 
+## P1-A5-B — Render Matching Holding Events Only
+
+**Status:** FINAL FREEZE
+
+**Frozen commit:** `eaec179`
+
+### Problem solved
+`HoldingEventResolver` already marked each event with `matches_query`, derived
+from the question's reporter, temporal and direction constraints, but
+`AnswerComposer` discarded that filtering whenever the matching count was not
+exactly one:
+
+```python
+if len(matching) != 1:
+    return events        # every retrieved event, matching or not
+```
+
+Non-matching events were therefore rendered: decrease questions included
+increase events, and reporter-mismatched events appeared in answers.
+
+### Final architecture / behavior
+
+| `matching` | behaviour |
+|---|---|
+| **1** | unchanged — the existing single-event output P1-A4 depends on |
+| **> 1** | render all and only `matches_query is True` events |
+| **0** | unchanged — the previous fallback still shows what was retrieved |
+| no requested fields (history path) | unchanged — the whole timeline is kept |
+
+The executable change is one line: `if len(matching) != 1:` became
+`if not matching:`.
+
+**Selection semantics** — no rank-based event selection; no latest/earliest
+default; no new temporal semantics. Retrieval rank may affect presentation
+order only.
+
+### Production files
+- `app/reasoning/answer_composer.py`
+
+Tests: `tests/test_holding_matching_event_presentation.py`, plus an updated
+contract in `tests/test_holding_answer_scope.py` (one existing test asserted the
+old behaviour directly and was rewritten).
+
+### Invariants that must remain true
+
+**Selection**
+- Only `event.matches_query` decides what is rendered — it is already derived
+  from query-visible reporter, temporal and direction constraints.
+- No event is ever chosen for ranking first, for being newest, or for being
+  oldest.
+- Retrieval rank is presentation order only, never semantic selection.
+- `matching == 1` still returns that one event, so P1-A4's exact-event output is
+  unaffected.
+- `matching == 0` still falls back to the retrieved events, and the pre-existing
+  "holder absent from every event" guard still returns nothing.
+
+**Answerability**
+- `AnswerabilityGuard` is untouched. Multi-event ambiguity is **not** treated as
+  insufficient evidence.
+
+**Citation / public evidence**
+- No evidence is added; `retrieved_context` is unchanged.
+- Removing non-matching rows can only reduce or hold the citation count.
+- Every displayed citation remains grounded in the public `retrieved_context`.
+
+### Verification performed
+
+- Full suite: **1407 OK, skipped 13**.
+- `tests/test_holding_matching_event_presentation.py`: **16 OK**.
+- Mutation check: restoring `if len(matching) != 1:` fails 6 of the 16 new tests
+  and 1 in `test_holding_answer_scope`; restored → 60 OK.
+
+**Live BGE-M3 verification**
+
+| qid | result |
+|---|---|
+| HX20 | only decrease events rendered; no increase leakage |
+| HX16 | only matching decrease events rendered |
+| HX10 | reporter mismatch removed |
+| HX13 / HX17 | P1-A4 exact-date behaviour preserved |
+| HX12 | P1-A3 rescue behaviour preserved |
+
+**P0 correction regression** — PASS.
+
+### Known residual issues NOT solved
+
+- Semantic ambiguity when the query itself does not identify a unique event.
+- HX12 can still appear unique because P1-A3 may rescue only one structured
+  event from the served evidence — an artifact of what retrieval served, not of
+  what the question asked. This must never be read as semantic uniqueness.
+- Latest / previous / current semantics remain incomplete: `직전보고`, `현재`,
+  `최근`, `최초` and `마지막` all collapse to inert period labels the resolver
+  does not read.
+- A generic ambiguity notice is deferred to **P1-A5-A**.
+
+### Reopen conditions
+Proven regression, a citation/provenance break, or a later architecture that
+cannot preserve this contract additively.
+
+---
+
 ## Summary
 
 | Phase | Status | Frozen commit |
@@ -545,3 +648,4 @@ exact date.
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
+| P1-A5-B Render Matching Holding Events Only | FINAL FREEZE | `eaec179` |
