@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log written at `53e480f`.
+Branch: `taeyoon` · Log current through `d39a1b1`.
 
 ---
 
@@ -417,6 +417,123 @@ policy above.
 
 ---
 
+## P1-A4 — Exact Holding Event Resolution
+
+**Status:** FINAL FREEZE
+
+**Frozen commit:** `d39a1b1`
+
+### Problem solved
+Explicit holding-event dates could degrade to year-level semantics after
+`disclosure_lookup` was later promoted to `holding_event`, and one real holding
+event could be split across complementary evidence groups.
+
+Neither half was sufficient alone: the exact date narrowed the constraint but
+changed no answer, and fusion without the date regressed an undated question to
+unanswerable. The three parts shipped as one phase.
+
+### Final architecture / behavior
+
+**D1 — execution-scoped exact holding-reference date.** Reuses the existing
+`_period_from_query`; no new date parser. Fires only for `holding_event`
+execution, only on an exact full date; receipt wording, ranges, year-only and
+year-month are excluded. The original `QueryPlan` is immutable, `QueryPlan.task_type`
+is unchanged, and a native `holding_change` exact period is preserved rather than
+re-derived.
+
+**D2 — exact-date-only complementary same-event fusion.** Runs only for an
+exact-date P1-A4 execution. Two groups are one event only when they share a
+`doc_id` and a normalized `reference_date`, agree exactly on a populated and
+arithmetically consistent before/change/after transition that is not all-zero,
+draw on disjoint event-bearing source tables, and produce no non-reporter field
+conflict when merged. Reporter text and projection type never establish identity.
+The original `EvidenceSet` is immutable and no retrieval chunk is added or removed.
+
+**D2b — conservative reporter-alternative matching.** No alias table. Reporter
+alternatives retain their provenance; when they conflict, **every** retained
+alternative must satisfy the existing query reporter constraint, and
+cross-reporter fusion is declined outright without a reporter constraint.
+
+### Production files
+- `app/reasoning/holding_date_intent.py`
+- `app/reasoning/holding_event_fusion.py`
+- `app/agent/orchestrator.py`
+- `app/reasoning/holding_event_resolver.py`
+
+Tests: `tests/test_holding_exact_event_resolution.py`
+
+### Invariants that must remain true
+
+**D1**
+- The existing `_period_from_query` is reused; no second date parser or alias list.
+- Only `holding_event` execution, only an exact full date.
+- Receipt, range, year-only and year-month semantics never yield a holding date.
+- The original `QueryPlan` is never mutated and `QueryPlan.task_type` never changes.
+- A native `holding_change` exact period is preserved, never rewritten.
+
+**D2**
+- Fusion runs **only** for an exact-date P1-A4 execution — it is not a general
+  holding normalization pass.
+- Identity requires: same `doc_id`; same normalized `reference_date`; exact
+  before/change/after equality; all three populated; arithmetic consistent;
+  not all-zero; disjoint event-bearing source tables; no non-reporter conflict.
+- Reporter text and projection type never establish event identity.
+- The original `EvidenceSet` is immutable; grouping changes, membership does not.
+
+**D2b**
+- No reporter alias table, ever.
+- Reporter alternatives retain provenance.
+- Conflicting alternatives satisfy a reporter constraint only when **all** of
+  them do.
+- Cross-reporter fusion is declined when the query names no reporter.
+
+**Public / citation**
+- Fusion changes logical grouping only.
+- `retrieved_context` chunk IDs are unchanged by P1-A4.
+- Every answer citation remains present in the public `retrieved_context`,
+  preserving the P1-A3.1 synchronization invariant.
+
+### Verification performed
+
+- Full suite: **1391 OK, skipped 13** (confirmed at `d39a1b1`).
+- `tests/test_holding_exact_event_resolution.py`: **45 OK**.
+- Mutation checks: disabling D1 fails 4 tests, disabling D2 fails 6, flipping
+  D2b's `all` to `any` fails 1 — each part is load-bearing.
+
+**Live BGE-M3 verification**
+
+| | HX13 | HX17 |
+|---|---|---|
+| reference date | 2023-06-13 | 2023-06-30 |
+| shares | 2,202,050 | 1,092,455 |
+| ratio | 7.90% | 6.99% |
+| answerable | yes | yes |
+| citations | preserved | preserved |
+
+**No-date controls** — HX08, HX10, HX12, HX16, HX20 behaviourally unchanged.
+HX10 in particular keeps its full row count: fusion does not fire without an
+exact date.
+
+**P0 correction regression** — PASS.
+
+### Known residual issues NOT solved
+
+- Generic no-date multi-event ambiguity.
+- Multi-metric wording such as "보유 수량 비율" may still be parsed as only one
+  requested field in some cases.
+- Year-month exact holding semantics.
+- Same-holder identity cannot be proven from entity identifiers, because the
+  corpus exposes no such identifiers. Identity is argued from structure and
+  numbers alone, and the reporter rules bound the residual exposure.
+
+### Reopen conditions
+- a reproducible exact-date regression;
+- unsafe fusion demonstrated by the real corpus or an evaluation;
+- a citation/provenance break;
+- a later architecture that cannot preserve this contract additively.
+
+---
+
 ## Summary
 
 | Phase | Status | Frozen commit |
@@ -427,3 +544,4 @@ policy above.
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
+| P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
