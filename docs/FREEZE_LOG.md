@@ -881,6 +881,127 @@ downstream; only the first is a filter problem.
 
 ---
 
+## P1-R — Ranking / Reranking
+
+**Status:** Phase 1 **DIAGNOSIS COMPLETE** · Phase 1.5 **VALIDATION BLOCKED** /
+**IMPLEMENTATION DEFERRED**
+
+This is not a freeze. **No ranking implementation exists**, so there is no
+contract to protect — only a diagnosis, a measurement that could not be
+completed, and the conditions for resuming.
+
+> ### ⚠ Do not scope a reranker from the numbers below
+>
+> **R@1 = 0.50 is not a production measurement.** It was produced with
+> `DeterministicHashEmbedder`, whose vector channel is pseudo-random.
+> Production runs BGE-M3. The live value is **unknown**. Every ranking figure
+> in this entry inherits that caveat unless marked embedding-independent.
+
+### Phase 1 — what was measured
+
+A 22-question holding evaluation (the Gold60 subset whose gold document sits in
+the seeded corpus; 6 further questions are declined by P0-D and excluded), run
+against a disposable corpus of five companies across all four doc groups
+(222 documents, 85,493 chunks), with `DeterministicHashEmbedder`:
+
+| | R@1 | R@3 | R@5 | R@10 | MRR |
+|---|---|---|---|---|---|
+| **hash baseline (final served)** | **0.50** | 0.77 | 0.82 | **1.00** | 0.674 |
+| lexical only (production-real BM25) | 0.45 | 0.55 | 0.55 | 0.59 | 0.491 |
+| + document dedupe, cap 1/doc | 0.50 | 0.82 | **0.91** | 1.00 | 0.682 |
+
+Findings:
+
+- **11 / 11 rank-1 misses were same-company, same-`doc_group`, same-chunk-type
+  sibling disclosures** — mean length 376 chars at rank 1 against 363 for the
+  gold chunk. No wrong-company and no wrong-doc_group result reached rank 1.
+- **Document dedupe raised R@5 from 0.82 to 0.91 and unique-docs@10 from 6.3 to
+  9.6, but left R@1 at exactly 0.50.** Caps of 2 or 3 changed nothing.
+- **Crowding exists but is not the measured R@1 cause**: 11/22 queries had one
+  document holding ≥3 of 10 slots, yet removing that crowding moved no
+  rank-1 outcome.
+- **No deterministic lightweight method tested improved R@1** — dedupe,
+  aggregation, type priors and term-overlap boosts are all blind to the one
+  distinction that matters, because the competing documents differ only in
+  which event they report.
+- The existing `_hybrid_rerank` is a deterministic heuristic scorer
+  (0.60 × fusion + 0.40 × metadata), not a model, and has no signal that
+  separates sibling filings.
+
+Embedding-independent among these: the sibling-disclosure failure shape, the
+chunk-type and length parity, the existence of crowding, and lexical-only
+R@10 = 0.59. The exact rank values are not.
+
+### Phase 1.5 — why live validation stopped
+
+BGE-M3 was unreachable by every path the code supports:
+
+- `FlagEmbedding` / `torch` / `transformers` absent from the runtime;
+- no local BGE-M3 weights (the HF cache holds only two Korean sentence models);
+- `FESTIVAL_EMBEDDING_API_URL` / `FESTIVAL_EMBEDDING_API_KEY` unset, so the HTTP
+  and Clova providers cannot be used;
+- `EmbeddingConfig.from_env()` therefore resolves to `provider="hash"`.
+
+Substituting hash embeddings, or a different cached model, would have
+reproduced the invalid baseline while dressing it as live validation. Nothing
+was started; port 8010 was untouched.
+
+Validating ranking also needs the **corpus** embedded with BGE-M3, not only the
+queries — mixing BGE-M3 query vectors against hash chunk vectors is worse than
+either channel alone. That makes this a data-pipeline prerequisite, not a smoke
+test.
+
+### Decision
+**Do not scope or implement a reranker from the hash result.**
+
+### Reopen only after one of
+1. a live BGE-M3 endpoint becomes available
+   (`FESTIVAL_EMBEDDING_API_URL` + `FESTIVAL_EMBEDDING_API_KEY`);
+2. a BGE-M3 pre-embedded corpus/database becomes available
+   (`chunk_embeddings.embedding_model = BAAI/bge-m3`);
+3. a dedicated disposable BGE-M3 evaluation environment is prepared.
+
+**At reopen, run the same 22-question live smoke first**, unchanged in
+questions, gold documents, routing, filters and `top_k`, and compare against
+the hash baseline above.
+
+Then decide:
+
+| live smoke result | action |
+|---|---|
+| ranking already strong | close P1-R with **no implementation** |
+| a deterministic ranking defect is found | **lightweight fix** only |
+| semantic sibling discrimination still weak | **only then** test a small top-N cross-encoder |
+
+### External design reference
+Dart-Agent's published reranker experiment improves ranking metrics but adds
+roughly **11 seconds** of average latency. Against Festival's measured retrieval
+budget (221 ms mean, 285 ms p95) that is a warning, not a template: a heavy
+cross-encoder needs strong Festival-specific evidence before it is considered.
+
+### Ownership firewall
+Symptoms are owned by phase, and a weakness in one is not grounds to reopen
+another:
+
+| symptom | owner |
+|---|---|
+| filtered out **before scoring** | **P1-B** (deferred; 0 occurrences measured) |
+| eligible but **ranked low** | **P1-R** (this entry) |
+| retrieved but **sibling evidence missing** | **P1-C** / coverage |
+| evidence correct but **reasoning wrong** | reasoning phases (P1-A4 / P1-A5) |
+
+### Known gaps in the diagnosis
+- Correction (P0-A) and corporate/multi-document (P0-B/P0-C) ranking controls
+  were **not exercised** — their gold companies sit outside the seeded corpus.
+- RRF/fusion ablation, source-disagreement analysis and any cross-encoder trial
+  were **not run**: all require a meaningful vector channel.
+- The evaluable set is 22 holding questions from five companies; non-holding
+  ranking is unmeasured.
+- Capping to one chunk per document would remove a second gold chunk in 16 of 22
+  queries, which is a downstream risk for P1-A3 sibling anchoring.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -896,3 +1017,4 @@ downstream; only the first is a filter problem.
 | P1-A5-A Ambiguity-Safe Holding Presentation | FINAL FREEZE | `39574f9` |
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
 | P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED** | — |
+| P1-R Ranking / Reranking | **VALIDATION BLOCKED / DEFERRED** | — |
