@@ -1,6 +1,8 @@
 import inspect
+import json
 import unittest
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 from app.agent.task_router import TaskRouter, route_task
 from app.reasoning.query_plan import QueryPlan
@@ -33,6 +35,49 @@ class TaskRouterTests(unittest.TestCase):
         self.assertEqual(decision.task_type, "holding_event")
         self.assertEqual(decision.resolver_type, "holding_event_resolver")
         self.assertIn("plan:task_type=holding_change", decision.matched_signals)
+
+    def test_gold60_holding_routes_including_hx12_use_holding_resolver(self):
+        artifact = (
+            Path(__file__).resolve().parents[1]
+            / "reports/evaluation/gold60/2026-08-21-agent-90pct"
+            / "gold60_agent_questions.jsonl"
+        )
+        rows = [
+            json.loads(line)
+            for line in artifact.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        holding_routes = [
+            row
+            for row in rows
+            if row["query_plan"]["task_type"] == "disclosure_lookup"
+            and "holding" in row["query_plan"]["disclosure_route"]
+        ]
+
+        self.assertEqual(
+            [row["question_id"] for row in holding_routes],
+            [
+                "H02",
+                "H03",
+                "H05",
+                "H07",
+                "H08",
+                "HX04",
+                "HX12",
+                "HX13",
+                "HX17",
+            ],
+        )
+        for row in holding_routes:
+            with self.subTest(question_id=row["question_id"]):
+                decision = route_task(row["question"], row["query_plan"])
+
+                self.assertEqual(decision.task_type, "holding_event")
+                self.assertEqual(
+                    decision.resolver_type,
+                    "holding_event_resolver",
+                )
+                self.assertIn("plan:route=holding", decision.matched_signals)
 
     def test_periodic_question_routes_to_periodic_resolver(self):
         decision = TaskRouter().route("주요 제품과 연구개발 사업 내용")

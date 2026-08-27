@@ -27,6 +27,21 @@ from app.reasoning.periodic_fact_resolver import (
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
 
+#: How a routed execution shape maps onto the grouping EvidenceBuilder performs.
+#:
+#: TaskRouter answers "which resolver runs"; EvidenceBuilder answers "how is the
+#: evidence grouped". Those are separate questions in separate vocabularies, and
+#: the resolver can only read groups built for it -- ``holding_event_resolver``
+#: consumes ``holding_event`` groups, which EvidenceBuilder builds under its own
+#: ``holding_change`` grouping name. Routes absent from this table keep the
+#: plan's own task type as the grouping, which is what they already did: the
+#: periodic resolver accepts the default document/standalone groups, and the
+#: remaining routes use no group-consuming resolver at all.
+_EXECUTION_GROUPING_INTENT = {
+    "holding_event": "holding_change",
+}
+
+
 MAX_GENERAL_EVIDENCE = 5
 MAX_CORPORATE_EVENT_EVIDENCE = 6
 MAX_HOLDING_GENERAL_EVIDENCE = 9
@@ -99,7 +114,11 @@ class AgentOrchestrator:
         decision = self.task_router.route(question, query_plan)
 
         trace.append("evidence_builder")
-        evidence = self.evidence_builder.build(execution, question=question)
+        evidence = self.evidence_builder.build(
+            execution,
+            question=question,
+            grouping_intent=_EXECUTION_GROUPING_INTENT.get(decision.task_type),
+        )
         evidence_before = copy.deepcopy(evidence.to_dict())
         resolution: HoldingResolution | PeriodicFactResolution | None
 

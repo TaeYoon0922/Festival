@@ -290,6 +290,12 @@ class QueryUnderstanding:
         correction_intent, correction_intent_evidence = _correction_intent_from_query(
             raw_query
         )
+        operation = _operation_from_query(
+            raw_query,
+            task_type=task_type,
+            event_type=event_type,
+            correction_intent=correction_intent,
+        )
         if correction_policy is not None:
             parsed_correction = correction_policy
             correction_confidence = 1.0
@@ -372,8 +378,10 @@ class QueryUnderstanding:
                 "date_semantics": date_semantics,
                 "report_preference": "annual" if annual_preferred else None,
                 "company_resolved": bool(resolved),
+                "company_resolution_attempted": self._company_resolver is not None,
                 "metric": metric_evidence or holding_evidence,
                 "event_type": event_evidence,
+                "operation": operation,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
                 "correction_intent": correction_intent,
@@ -946,6 +954,42 @@ def _find_reporter(query: str) -> str | None:
         return None
     value = match.group(1)
     return re.sub(r"^보고자\s*[:：]?\s*", "", value).strip()
+
+
+def _operation_from_query(
+    query: str,
+    *,
+    task_type: str,
+    event_type: str | None,
+    correction_intent: str | None,
+) -> str:
+    """Return the deterministic operation without interpreting unknown prose.
+
+    The value is additive plan evidence. Retrieval does not read it; P0-D uses
+    it to distinguish a fully specified query from one that needs semantic
+    clarification.
+    """
+
+    compact = re.sub(r"\s+", "", query)
+    if correction_intent:
+        return "correction_lookup"
+    if task_type == "financial_metric":
+        return "lookup_metric"
+    if task_type == "holding_change":
+        return "lookup_holding"
+    if task_type == "corporate_event":
+        if event_type in {
+            "contract_termination",
+            "treasury_share_trust_termination",
+        } or any(term in compact for term in ("해지된", "해지한", "종료된")):
+            return "find_terminated"
+        if any(
+            term in compact
+            for term in ("몇건", "몇개", "모두", "전체", "목록", "나열")
+        ):
+            return "enumerate"
+        return "inspect_event"
+    return "lookup_disclosure"
 
 
 def _infer_company_prefix(query: str) -> str | None:

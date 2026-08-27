@@ -24,8 +24,15 @@ from app.generation.answer_generator import (
 from app.generation.hcx_verbalizer import (
     SKIPPED_MULTI_EVENT_CLAIM,
     SKIPPED_NO_COMPACT_CLAIM,
+    HcxSettings,
     HcxVerbalizer,
     VerbalizationOutcome,
+)
+from app.reasoning.answerability import (
+    AnswerabilityGuard,
+    AnswerabilityResult,
+    AnswerabilityStatus,
+    guarded_answer_text,
 )
 from app.reasoning.multi_document_evidence import (
     MultiDocumentEvidence,
@@ -35,7 +42,15 @@ from app.reasoning.multi_document_executor import MultiDocumentExecutor
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
 from app.reasoning.multi_document_semantics import check_answer
 from app.reasoning.query_understanding import QueryUnderstanding
+from app.reasoning.query_validation import (
+    CorpusScope,
+    PostgresEventScopeProvider,
+    QueryState,
+    QueryValidationResult,
+    QueryValidator,
+)
 from app.reasoning.router import QueryRouter
+from app.reasoning.semantic_query_fallback import HcxSemanticQueryFallback
 from app.retrieval.correction_expansion import (
     apply_expansion,
     build_default_expander,
@@ -71,6 +86,8 @@ _HCX_NOT_CALLED = frozenset(
         "skipped_not_answerable",
         SKIPPED_NO_COMPACT_CLAIM,
         SKIPPED_MULTI_EVENT_CLAIM,
+        "skipped_query_not_resolved",
+        "skipped_answerability_guard",
     }
 )
 
@@ -108,6 +125,9 @@ class AnswerPipeline:
         multi_document_planner: MultiDocumentPlanner | None = None,
         multi_document_executor: MultiDocumentExecutor | None = None,
         multi_document_evidence: MultiDocumentEvidenceBuilder | None = None,
+        query_validator: QueryValidator | None = None,
+        semantic_fallback: HcxSemanticQueryFallback | None = None,
+        answerability_guard: AnswerabilityGuard | None = None,
     ) -> None:
         self.settings = settings or ApiSettings()
         self.understanding = understanding
@@ -121,6 +141,19 @@ class AnswerPipeline:
         self.multi_document_planner = multi_document_planner
         self.multi_document_executor = multi_document_executor
         self.multi_document_evidence = multi_document_evidence
+        # Optional at construction for byte-for-byte compatibility with the
+        # frozen unit fixtures. ``from_env`` always wires the complete P0-D
+        # firewall used by the real serving path.
+        self.query_validator = query_validator
+        self.semantic_fallback = semantic_fallback
+        self.answerability_guard = answerability_guard
+        self._query_metrics = {
+            "deterministic_resolved_count": 0,
+            "hcx_fallback_count": 0,
+            "clarification_count": 0,
+            "unsupported_count": 0,
+            "out_of_scope_count": 0,
+        }
 
     @classmethod
     def from_env(cls) -> "AnswerPipeline":
@@ -141,9 +174,13 @@ class AnswerPipeline:
         )
         correction_repository = PostgresCorrectionRepository(backend)
         event_repository = PostgresCorporateEventRepository(backend)
+        multi_document_planner = MultiDocumentPlanner()
+        hcx_settings = HcxSettings.from_env()
+        corpus_scope = CorpusScope.repository_default()
         return cls(
             settings=settings,
             understanding=QueryUnderstanding(
+                corpus_scope.company_aliases() if corpus_scope else None,
                 company_resolver=backend.resolve_company
             ),
             executor=HybridQueryExecutor(
@@ -175,7 +212,8 @@ class AnswerPipeline:
             # ranking. It engages only for questions that name a company, an
             # enumerable family, a bounded period, and an explicit date basis;
             # everything else takes the path above unchanged.
-            multi_document_planner=MultiDocumentPlanner(),
+            verbalizer=HcxVerbalizer(hcx_settings),
+            multi_document_planner=multi_document_planner,
             multi_document_executor=MultiDocumentExecutor(
                 event_repository=event_repository,
                 correction_repository=correction_repository,
@@ -187,10 +225,27 @@ class AnswerPipeline:
                 chunk_backend=backend,
                 retriever=backend,
             ),
+            query_validator=QueryValidator(
+                corpus_scope=corpus_scope,
+                multi_document_planner=multi_document_planner,
+                event_scope_provider=PostgresEventScopeProvider(backend),
+            ),
+            semantic_fallback=HcxSemanticQueryFallback(hcx_settings),
+            answerability_guard=AnswerabilityGuard(),
         )
 
     def answer(self, question_id: str, question: str) -> dict[str, Any]:
-        plan, execution = self._retrieve(question)
+        validation: QueryValidationResult | None = None
+        if self.query_validator is None:
+            plan, execution = self._retrieve(question)
+        else:
+            plan, validation = self._validated_understanding(question)
+            if not validation.retrieval_allowed:
+                return self._blocked_response(question_id, question, validation)
+            try:
+                execution = self.executor.execute(plan)
+            except Exception as error:  # noqa: BLE001 - sanitized at API boundary
+                raise AnswerPipelineError(_classify(error)) from error
         # P0-C runs after retrieval so it can only add completeness evidence on
         # top of the frozen ranking, never replace it. A question P0-C declines
         # -- which is every Gold60 question -- takes exactly the path it always
@@ -204,13 +259,33 @@ class AnswerPipeline:
         except Exception as error:  # noqa: BLE001 - surfaced as a sanitized reason
             raise AnswerPipelineError(_classify(error)) from error
 
-        outcome = self.verbalizer.verbalize(
-            generated,
-            draft=result.answer_draft,
-            resolution=result.resolution,
-            task_type=result.task_decision.task_type,
-        )
-        outcome = _preserve_multi_document_semantics(outcome, generated, multi)
+        answerability: AnswerabilityResult | None = None
+        if self.answerability_guard is not None:
+            answerability = self.answerability_guard.evaluate(
+                generated,
+                plan=plan,
+                agent_result=result,
+                execution=execution,
+                multi_document=multi,
+            )
+        if answerability is None or answerability.model_answer_allowed:
+            outcome = self.verbalizer.verbalize(
+                generated,
+                draft=result.answer_draft,
+                resolution=result.resolution,
+                task_type=result.task_decision.task_type,
+            )
+            outcome = _preserve_multi_document_semantics(outcome, generated, multi)
+        else:
+            outcome = VerbalizationOutcome(
+                guarded_answer_text(
+                    answerability,
+                    generated.answer_text,
+                    multi_document=multi,
+                ),
+                "skipped_answerability_guard",
+                answerability.status.value,
+            )
         return {
             "question_id": question_id,
             "question": question,
@@ -221,9 +296,114 @@ class AnswerPipeline:
                 + _multi_document_count(multi),
             ),
             "think_trace": think_trace(
-                result, generated, outcome, execution, multi_document=multi
+                result,
+                generated,
+                outcome,
+                execution,
+                multi_document=multi,
+                query_validation=validation,
+                answerability=answerability,
             ),
             "answer": _non_empty(outcome.text, generated.answer_text),
+        }
+
+    @property
+    def query_metrics(self) -> dict[str, int]:
+        """A copy of the bounded, query-level P0-D counters."""
+
+        return dict(self._query_metrics)
+
+    def _validated_understanding(
+        self, question: str
+    ) -> tuple[Any, QueryValidationResult]:
+        try:
+            plan = self.understanding.understand(
+                question, top_k=self.settings.top_k
+            )
+            validation = self.query_validator.validate(plan)
+        except Exception as error:  # noqa: BLE001 - sanitized at API boundary
+            raise AnswerPipelineError(_classify(error)) from error
+
+        if validation.state is QueryState.RESOLVED:
+            self._query_metrics["deterministic_resolved_count"] += 1
+            return validation.plan, validation
+
+        if validation.fallback_recommended and self.semantic_fallback is not None:
+            outcome = self.semantic_fallback.interpret(question, validation)
+            if outcome.status not in {"not_needed", "disabled", "not_configured"}:
+                self._query_metrics["hcx_fallback_count"] += 1
+            if outcome.succeeded:
+                validation = self.query_validator.validate(
+                    plan,
+                    semantic=outcome.result,
+                    fallback_used=True,
+                    fallback_status=outcome.status,
+                    hcx_elapsed_ms=outcome.elapsed_ms,
+                    hcx_diagnostic=outcome.diagnostic(),
+                )
+            else:
+                validation = validation.with_fallback_failure(
+                    outcome.status,
+                    elapsed_ms=outcome.elapsed_ms,
+                    used=outcome.status not in {"not_needed", "disabled", "not_configured"},
+                    diagnostic=outcome.diagnostic(),
+                )
+
+        if validation.state in {QueryState.AMBIGUOUS, QueryState.INCOMPLETE}:
+            self._query_metrics["clarification_count"] += 1
+        elif validation.state is QueryState.UNSUPPORTED:
+            self._query_metrics["unsupported_count"] += 1
+        elif validation.state is QueryState.OUT_OF_SCOPE:
+            self._query_metrics["out_of_scope_count"] += 1
+        return validation.plan, validation
+
+    def _blocked_response(
+        self,
+        question_id: str,
+        question: str,
+        validation: QueryValidationResult,
+    ) -> dict[str, Any]:
+        state = validation.state
+        if state in {QueryState.AMBIGUOUS, QueryState.INCOMPLETE}:
+            answer = (
+                validation.clarification.question
+                if validation.clarification is not None
+                else "질문을 조금 더 구체적으로 알려주세요."
+            )
+            route = "clarification"
+        elif state is QueryState.UNSUPPORTED:
+            answer = "현재 시스템은 해당 요청 유형을 지원하지 않습니다. 공시 사실 조회 질문으로 바꿔주세요."
+            route = "unsupported"
+        else:
+            year = validation.plan.period.year
+            answer = (
+                f"현재 제공된 공시 데이터 범위에서는 {year}년 내용을 확인할 수 없습니다."
+                if year is not None and "period_out_of_corpus" in validation.issues
+                else "현재 제공된 공시 데이터 범위에서는 해당 기업 또는 기간을 확인할 수 없습니다."
+            )
+            route = "out_of_scope"
+        stages = ["query_understanding", "query_validation"]
+        if validation.fallback_used:
+            stages.append("hcx_semantic_fallback")
+            stages.append("query_revalidation")
+        return {
+            "question_id": question_id,
+            "question": question,
+            "retrieved_context": [],
+            "think_trace": {
+                "task_type": validation.plan.task_type,
+                "route": route,
+                "stages": stages,
+                "retrieval_count": 0,
+                "selected_evidence_count": 0,
+                "answerable": False,
+                "warnings": list(validation.issues),
+                "hcx_status": "skipped_query_not_resolved",
+                "correction": None,
+                "query_understanding": validation.to_public_dict(),
+                "query_validation": validation.to_validation_dict(),
+            },
+            "answer": answer,
         }
 
     def _multi_document(
@@ -370,6 +550,8 @@ def think_trace(
     execution: Any,
     *,
     multi_document: Any = None,
+    query_validation: QueryValidationResult | None = None,
+    answerability: AnswerabilityResult | None = None,
 ) -> dict[str, Any]:
     """Summarize what the pipeline executed.
 
@@ -422,6 +604,20 @@ def think_trace(
         if getattr(multi_document, "added_results", ()):
             stages.insert(2, "multi_document_evidence")
         trace["multi_document_planner"] = multi_document.trace()
+    if query_validation is not None:
+        stages.insert(0, "query_understanding")
+        stages.insert(1, "query_validation")
+        if query_validation.fallback_used:
+            stages.insert(2, "hcx_semantic_fallback")
+            stages.insert(3, "query_revalidation")
+        trace["query_understanding"] = query_validation.to_public_dict()
+        trace["query_validation"] = query_validation.to_validation_dict()
+    if answerability is not None:
+        stages.append("answerability_guard")
+        trace["answerability"] = answerability.to_public_dict()
+        trace["answerable"] = (
+            answerability.status is AnswerabilityStatus.ANSWERABLE
+        )
     return trace
 
 
