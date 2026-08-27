@@ -223,13 +223,16 @@ def _reported_holding_events(
     The resolver already decides which events satisfy the question's company,
     reporter, direction, and date constraints.  Reporting every retrieved event
     regardless answers a question nobody asked: given "2022-12-05 기준 보유
-    비율", the reader also gets 2023 and 2024 holdings.
+    비율", the reader also gets 2023 and 2024 holdings, and given "감소 후
+    주식수" the reader is shown increases.
 
-    Narrowing is deliberately limited to the unambiguous case — the question
-    named specific fields and exactly one event satisfies it.  A history
-    question names no field, and an ambiguous one matches several events; both
-    keep the existing multi-event answer, and no event is ever picked for being
-    the newest or the closest.
+    So every event that satisfies the question is reported, and nothing else.
+    That is one event when the question identifies one and several when it does
+    not; which of several the reader wanted is a question this function does not
+    answer, and no event is ever picked for ranking first, or for being the
+    newest or the closest.  A history question names no field and keeps its
+    whole timeline, and when nothing satisfies the question the existing
+    fallback still shows what was retrieved rather than nothing at all.
     """
 
     events = tuple(resolution.events)
@@ -246,7 +249,7 @@ def _reported_holding_events(
         )
     ):
         return ()
-    if len(matching) != 1:
+    if not matching:
         return events
     return matching
 
