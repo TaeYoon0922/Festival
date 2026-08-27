@@ -120,13 +120,28 @@ class EvidenceSet:
 class EvidenceBuilder:
     """Build an EvidenceSet from a completed production retrieval execution."""
 
-    def build(self, execution: Any, *, question: str | None = None) -> EvidenceSet:
+    def build(
+        self,
+        execution: Any,
+        *,
+        question: str | None = None,
+        grouping_intent: str | None = None,
+    ) -> EvidenceSet:
+        """Build the EvidenceSet for one execution.
+
+        ``grouping_intent`` lets the caller state which grouping strategy the
+        resolver it has already chosen needs.  Omitting it keeps the plan's own
+        task type as the grouping strategy, which is what every caller did
+        before the argument existed.
+        """
+
         plan = execution.plan
         return build_evidence_set(
             question=question or _plan_question(plan),
             query_plan=plan,
             candidates=execution.chunks,
             results=execution.results,
+            grouping_intent=grouping_intent,
         )
 
 
@@ -136,11 +151,23 @@ def build_evidence_set(
     query_plan: Any,
     candidates: Sequence[CandidateChunk],
     results: Sequence[RetrievalResult],
+    grouping_intent: str | None = None,
 ) -> EvidenceSet:
-    """Build evidence without mutating, filtering, or reranking the inputs."""
+    """Build evidence without mutating, filtering, or reranking the inputs.
+
+    ``task_type`` reports what query understanding decided and is what the
+    EvidenceSet carries downstream.  ``grouping_intent`` is a separate question:
+    which grouping the resolver chosen for this execution can consume.  They are
+    usually the same, and are deliberately allowed to differ -- a question the
+    plan reads as a plain disclosure lookup can still be executed as a holding
+    event, and the groups have to match the resolver, not the plan.  When no
+    intent is given the plan's task type is used, so an omitted argument
+    reproduces the previous behaviour exactly.
+    """
 
     plan = _plan_mapping(query_plan)
     task_type = _text(plan.get("task_type"))
+    grouping_task = _text(grouping_intent) or task_type
     candidate_by_id = {candidate.chunk_id: candidate for candidate in candidates}
     warnings: list[str] = []
     seen: set[str] = set()
@@ -164,7 +191,7 @@ def build_evidence_set(
         )
         for item in items
     ]
-    groups = _group_items(items, task_type=task_type)
+    groups = _group_items(items, task_type=grouping_task)
     ambiguity = _ambiguity_metadata(groups, temporal_constraint)
     if ambiguity["temporal_ambiguity"]:
         warnings.append("multiple_temporal_alternatives")
