@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `eaec179`.
+Branch: `taeyoon` · Log current through `39574f9`.
 
 ---
 
@@ -637,6 +637,190 @@ cannot preserve this contract additively.
 
 ---
 
+## P1-A5-A — Ambiguity-Safe Holding Presentation
+
+**Status:** FINAL FREEZE
+
+**Frozen commit:** `39574f9`
+
+### Problem solved
+A holding answer could present one event as the answer when the question had
+never identified one. The count of matching events is a fact about what
+retrieval served, not about what was asked: measured on the corpus, a holder
+alone leaves more than one event in 84% of cases, a year in 71%, a direction in
+69%. A single observed event is routinely produced by which projections happened
+to be returned — promoting more of the already-fetched pool took HX12 from one
+matching event to nine without the question changing at all.
+
+### Final architecture / behavior
+
+**Core invariant** — `observable_matching_event_count == 1` does **not** imply
+semantic uniqueness.
+
+```
+semantic_unique = exact query-visible selector AND matching_event_count == 1
+```
+
+**Selector taxonomy**
+
+| class | signals |
+|---|---|
+| **EXACT_SELECTOR** | exact holding reference date only |
+| **FILTER_ONLY** | reporter · year · quarter · range · receipt date · direction |
+| **FIELD_REQUEST** | 변동일 · 변동전 · 변동후 · 주식수 · 비율 |
+| **INERT** | 직전보고 · 현재 · 최근 · 최신 · 최초 · 마지막 |
+
+**Presentation**
+
+| case | result |
+|---|---|
+| EXACT + 1 | single event, **no notice** |
+| non-EXACT + 1 | the event + under-specified **CASE A** |
+| non-EXACT + >1 | all matching events + **CASE B** |
+| EXACT + >1 | all matching events + **CASE C**, no pick |
+| history path (no requested fields) | full timeline, no notice |
+
+A pure helper classifies the mode from the plan alone; the composer consumes it
+and records structured flags; the generator selects the deterministic sentence.
+
+### Production files
+- `app/reasoning/holding_event_selection.py` (new)
+- `app/reasoning/answer_composer.py`
+- `app/agent/orchestrator.py`
+- `app/generation/answer_generator.py`
+
+Tests: `tests/test_holding_event_ambiguity_presentation.py`
+
+### Invariants that must remain true
+- A count of one is never, on its own, treated as semantic uniqueness.
+- Only an exact holding reference date qualifies as an EXACT_SELECTOR, read
+  through P1-A4's existing helper — no second date parser.
+- Filter-only signals narrow events but never establish uniqueness.
+- Field requests are never event selectors.
+- The inert labels select nothing until a later phase gives them semantics.
+  `최초` and `마지막` are opposites that produce the same period label, which is
+  the evidence they select nothing.
+- The classifier reads the plan only — never rank, evidence, events, or `top_k`.
+- No event is chosen for ranking first, for being newest, or for being oldest.
+- **Answerability remains independent**: under-specification is presentation,
+  not an evidence failure.
+- **P0-D clarification remains untouched**; no new clarification flow.
+- P1-A5-B matching-only rendering is preserved: non-matching events never return.
+
+### Verification performed
+- Full suite: **1450 OK, skipped 13** (confirmed at `39574f9`).
+- `tests/test_holding_event_ambiguity_presentation.py`: **33 OK**.
+- Mutation checks: forcing every mode to EXACT fails 14; removing the CASE A
+  notice fails 4; reusing the old multi-event wording for one observed event
+  fails 5; making the notice force verbose rendering fails 1; collapsing
+  `matching > 1` to the first event fails 13.
+- Retrieval-shape stability: one and nine matching events from the same plan
+  carry the same semantic claim.
+
+### Known residual issues NOT solved
+- The inert labels still carry no selection semantics; giving them any is a
+  separate phase with its own diagnosis.
+- Year-month is still reduced to year-only by frozen P0-D.
+- Every non-EXACT holding answer now carries a notice, which changes answer
+  length broadly and warrants a deliberate Gold60 re-baseline.
+
+### Reopen conditions
+Proven regression, a citation/provenance break, or a later architecture that
+cannot preserve this contract additively.
+
+---
+
+## P1-A5-A.1 — Lossless Semantic Notice Preservation
+
+**Status:** FINAL FREEZE
+
+**Frozen commit:** `39574f9`
+
+### Problem solved
+HCX compact verbalization does not include the deterministic semantic-control
+notice, and its reply replaces the whole deterministic answer — so a successful
+rewrite silently dropped the notice. Proven, not inferred: `build_compact_claim`
+renders only verified factual fields, so the notice is absent from
+`claim.deterministic_text`, from the text sent to the model, from
+`required_terms`, and from every expectation the lossless validator compares
+against. A perfectly compliant stub model reproduced the live HX12 failure
+exactly.
+
+### Final architecture / behavior
+
+```
+if draft.ambiguity["under_specified"] or draft.ambiguity["exact_multi_match"]:
+    the HCX rewrite must not become the final answer
+```
+
+A structured boolean guard inside `HcxVerbalizer`, returning the deterministic
+answer with status `skipped_semantic_control_notice`. No Korean substring
+matching, no prompt-only enforcement, no post-HCX text surgery.
+
+The guard sits as the **last gate before the model call**, so the established
+earlier skip statuses retain their precedence and no HCX request is ever made.
+
+### Production files
+- `app/generation/hcx_verbalizer.py`
+
+Tests: added to `tests/test_hcx_verbalizer.py`.
+
+### Invariants that must remain true
+- The guard reads `under_specified` / `exact_multi_match` structurally. It must
+  never match on the notice text: the wording belongs to the generator, and a
+  verbalizer holding a copy of a sentence it does not write would drift.
+- No HCX request occurs once the guard fires — asserted against the transport's
+  own call log, not inferred from output text.
+- Established earlier skip statuses (`disabled`, `not_configured`,
+  `skipped_not_answerable`, `skipped_no_compact_verified_claim`,
+  `skipped_multi_event_compact_claim`) keep precedence.
+- A draft without an `ambiguity` mapping behaves exactly as before.
+- The deterministic answer is returned byte-identical, so citations and every
+  rendered section survive.
+- Preservation must not depend on model compliance, nor on how much evidence
+  retrieval happened to serve.
+- `skipped_semantic_control_notice` is a new **value** for the existing
+  `think_trace.hcx_status`; no schema change.
+
+### Verification performed
+
+- Full suite: **1450 OK, skipped 13**.
+- `tests/test_hcx_verbalizer.py`: **59 OK**.
+- Mutation checks: disabling the predicate fails 6; checking only
+  `exact_multi_match` fails 4; checking only `under_specified` fails 3;
+  detecting the notice but calling HCX anyway fails 6.
+
+**Live BGE-M3 verification**
+
+| qid | result |
+|---|---|
+| HX12 | 2024-02-19 · CASE A present · answerable · 2 citations · `skipped_semantic_control_notice` |
+| HX10 | CASE B present · 8 citations · answerable, regardless of compact-claim eligibility |
+| HX16 | CASE B present · 9 citations · decrease-only |
+| HX20 | CASE B present · 6 citations · decrease-only |
+| HX13 | 2,202,050 / 7.90% · no ambiguity notice |
+| HX17 | 1,092,455 / 6.99% · no ambiguity notice |
+
+HX16/HX20 keep the existing no-compact skip; HX13/HX17 take no semantic-control
+skip, so exact-date behaviour is preserved.
+
+**P0 correction regression** — PASS.
+
+### Known residual issues NOT solved
+- HCX's holding surface is now narrow: it runs only for exact-date,
+  single-event, conflict-free answers. P1-A4 fusion marks fused events
+  `field_conflict=True`, so offline no Gold holding question reaches the model.
+  This predates the phase but is now structural.
+- Two guard patterns coexist for one concern: this skip, and
+  `_preserve_multi_document_semantics`'s post-hoc reject-and-fall-back in
+  `pipeline.py`. Worth unifying later.
+
+### Reopen conditions
+Proven regression, a semantic-control notice reaching production stripped, or a
+later architecture that cannot preserve this contract additively.
+
+---
+
 ## Summary
 
 | Phase | Status | Frozen commit |
@@ -649,3 +833,5 @@ cannot preserve this contract additively.
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
 | P1-A5-B Render Matching Holding Events Only | FINAL FREEZE | `eaec179` |
+| P1-A5-A Ambiguity-Safe Holding Presentation | FINAL FREEZE | `39574f9` |
+| P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
