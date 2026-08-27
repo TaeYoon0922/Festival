@@ -381,7 +381,7 @@ def _resolve_group(
     reporter_match = (
         _reporter_matches(reporter, reporter_constraint)
         if reporter_constraint and reporter
-        else None
+        else _conflicting_reporter_match(provenance["reporter"], reporter_constraint)
         if reporter_constraint
         else True
     )
@@ -766,6 +766,29 @@ def _reporter_matches(value: str, constraint: str) -> bool:
     return any(
         left == right + suffix or right == left + suffix for suffix in suffixes
     )
+
+
+def _conflicting_reporter_match(
+    provenance: FieldProvenance, constraint: str
+) -> bool | None:
+    """Whether a group holding several holder labels answers to the constraint.
+
+    A group normally carries one holder, so this is reached only when evidence
+    describing one event was spelled two ways and the field could not resolve.
+    Every label must answer to the constraint: if even one names someone else,
+    the group is not wholly about the holder that was asked for, and attributing
+    it to them would be wrong.  Unknown, not False, when nothing is resolvable --
+    the same answer this returned before there was anything to look at.
+    """
+
+    values = [
+        text
+        for alternative in provenance.alternatives
+        if (text := _string_value(alternative.value))
+    ]
+    if not values:
+        return None
+    return all(_reporter_matches(value, constraint) for value in values)
 
 
 def _combine_matches(values: Sequence[bool | None]) -> bool | None:

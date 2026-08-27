@@ -24,6 +24,11 @@ from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactResolver,
 )
+from app.reasoning.holding_date_intent import (
+    exact_reference_date,
+    execution_plan as holding_execution_plan,
+)
+from app.reasoning.holding_event_fusion import fuse as fuse_holding_events
 from app.reasoning.holding_evidence_coverage import (
     CoverageAssessment,
     assess as assess_holding_coverage,
@@ -147,19 +152,49 @@ class AgentOrchestrator:
                 results=list(coverage.results),
             )
 
+        # P1-A4 D1. A question naming one calendar day is asking about one
+        # event, but the plan only carries that day when its own task type was
+        # already holding_change -- a promoted execution gets the year instead.
+        # Re-read the date with the routed semantics and carry it on a copy, so
+        # the frozen plan (and the understanding trace) stay exactly as P0-D
+        # left them.
+        holding_plan = holding_execution_plan(
+            question, query_plan, routed_task_type=decision.task_type
+        )
+        if holding_plan is not query_plan:
+            trace.append("holding_date_intent")
+
         trace.append("evidence_builder")
         evidence = self.evidence_builder.build(
             evidence_input,
             question=question,
             grouping_intent=_EXECUTION_GROUPING_INTENT.get(decision.task_type),
         )
+
+        # P1-A4 D2. One filing can render one event twice -- the detail row
+        # carries the shares, the report the ratios -- and the two are grouped
+        # apart because their holder labels differ. Asked about a single day,
+        # that reads as two events, which is both one too many and each one
+        # short of the requested fields. Merge only those views, only on the day
+        # that was asked about, and only when the numbers say they are the same
+        # event. The builder's own output is left untouched.
+        if decision.task_type == "holding_event":
+            fused = fuse_holding_events(
+                evidence,
+                reference_date=exact_reference_date(holding_plan),
+                reporter=getattr(holding_plan, "reporter", None),
+            )
+            if fused is not evidence:
+                trace.append("holding_event_fusion")
+                evidence = fused
+
         evidence_before = copy.deepcopy(evidence.to_dict())
         resolution: HoldingResolution | PeriodicFactResolution | None
 
         if decision.task_type == "holding_event":
             trace.append("holding_event_resolver")
             resolution = self.holding_resolver.resolve(
-                evidence, query_plan=query_plan
+                evidence, query_plan=holding_plan
             )
             resolution_before = copy.deepcopy(resolution.to_dict())
             trace.append("answer_composer")
