@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
@@ -23,6 +23,10 @@ from app.reasoning.holding_event_resolver import (
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactResolver,
+)
+from app.reasoning.holding_evidence_coverage import (
+    CoverageAssessment,
+    assess as assess_holding_coverage,
 )
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
@@ -58,6 +62,14 @@ class AgentResult:
     answer_draft: AnswerDraft
     warnings: tuple[str, ...]
     execution_trace: tuple[str, ...]
+    #: Internal diagnostic only; never serialised into the public response.
+    holding_coverage: CoverageAssessment = field(default_factory=CoverageAssessment)
+    #: The served evidence the answer was actually built from.  This equals the
+    #: retrieval output unless a post-retrieval stage enriched it; because that
+    #: output is immutable, an enriched list can only be carried out here.  The
+    #: public response renders this list, so what the resolver used and what the
+    #: caller is shown stay the same evidence.
+    evidence_results: tuple[Any, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         resolution = self.resolution
@@ -113,9 +125,31 @@ class AgentOrchestrator:
         trace = ["task_router"]
         decision = self.task_router.route(question, query_plan)
 
+        # A holding execution can be served plenty of evidence and still be
+        # unable to answer: the structured projections carrying the fields may
+        # have missed the cutoff, or the served ones may be the wrong projection
+        # type for what was asked. Top the gap up from the pool retrieval
+        # already fetched -- no query is issued here -- and leave the original
+        # execution untouched so the read-only invariants still hold.
+        coverage = assess_holding_coverage(
+            question,
+            query_plan,
+            execution.chunks,
+            execution.results,
+            routed_task_type=decision.task_type,
+        )
+        evidence_input = execution
+        if coverage.rescued:
+            trace.append("holding_evidence_coverage")
+            evidence_input = SimpleNamespace(
+                plan=execution.plan,
+                chunks=execution.chunks,
+                results=list(coverage.results),
+            )
+
         trace.append("evidence_builder")
         evidence = self.evidence_builder.build(
-            execution,
+            evidence_input,
             question=question,
             grouping_intent=_EXECUTION_GROUPING_INTENT.get(decision.task_type),
         )
@@ -188,6 +222,8 @@ class AgentOrchestrator:
             answer_draft=draft,
             warnings=warnings,
             execution_trace=tuple(trace),
+            holding_coverage=coverage,
+            evidence_results=tuple(evidence_input.results),
         )
 
 

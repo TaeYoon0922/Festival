@@ -10,7 +10,7 @@ rendered answer and falls back to it whenever validation fails.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import psycopg
@@ -259,13 +259,19 @@ class AnswerPipeline:
         except Exception as error:  # noqa: BLE001 - surfaced as a sanitized reason
             raise AnswerPipelineError(_classify(error)) from error
 
+        # One evidence set from here on: whatever the orchestrator resolved,
+        # composed and cited from is what the guard judges and what the caller
+        # is shown.  ``execution`` stays the immutable retrieval record and is
+        # still what the retrieval diagnostics describe.
+        evidence = final_evidence(execution, result)
+
         answerability: AnswerabilityResult | None = None
         if self.answerability_guard is not None:
             answerability = self.answerability_guard.evaluate(
                 generated,
                 plan=plan,
                 agent_result=result,
-                execution=execution,
+                execution=evidence,
                 multi_document=multi,
             )
         if answerability is None or answerability.model_answer_allowed:
@@ -290,7 +296,7 @@ class AnswerPipeline:
             "question_id": question_id,
             "question": question,
             "retrieved_context": retrieved_context(
-                execution,
+                evidence,
                 self.settings.top_k
                 + _expanded_count(execution)
                 + _multi_document_count(multi),
@@ -508,6 +514,38 @@ def _expanded_count(execution: Any) -> int:
         except (TypeError, ValueError):
             continue
     return total
+
+
+class _FinalEvidence:
+    """An execution whose served results were replaced, not mutated.
+
+    Retrieval output is immutable, so a post-retrieval stage that enriches the
+    served list has to hand its own list forward.  This wraps the original so
+    every retrieval attribute still reads through untouched while ``results``
+    reports what the agent actually answered from.
+    """
+
+    __slots__ = ("_execution", "results")
+
+    def __init__(self, execution: Any, results: Sequence[Any]) -> None:
+        self._execution = execution
+        self.results = tuple(results)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._execution, name)
+
+
+def final_evidence(execution: Any, result: Any) -> Any:
+    """The evidence set the answer was actually built from.
+
+    Returns the execution itself whenever nothing enriched it, so an untouched
+    question keeps rendering the exact object it always did.
+    """
+
+    results = tuple(getattr(result, "evidence_results", ()) or ())
+    if not results or list(results) == list(execution.results):
+        return execution
+    return _FinalEvidence(execution, results)
 
 
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
