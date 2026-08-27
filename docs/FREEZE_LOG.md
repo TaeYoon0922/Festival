@@ -821,9 +821,69 @@ later architecture that cannot preserve this contract additively.
 
 ---
 
+## P1-B — Filter Relaxation / Retrieval Recovery
+
+**Status:** DIAGNOSIS COMPLETE / **IMPLEMENTATION DEFERRED**
+
+This is not a freeze. Nothing was built, so there is no frozen contract to
+protect — only a measured decision not to build, and the conditions that would
+change it.
+
+### Question asked
+Should retrieval recover from an over-restrictive filter by relaxing filters and
+searching again?
+
+### What was measured
+Against the complete 4,204-row disclosure table, and a disposable corpus holding
+all four doc groups for five companies (222 documents, 85,493 chunks):
+
+- Gold60 evaluable questions whose gold document is already in the **strict**
+  candidate set: **54 / 54**.
+- Strict filter exclusions (a gold document dropped before anything scored it):
+  **0**.
+- Holding questions served: **22 / 22**, **Recall@10 = 1.00**, with periodic,
+  major and exchange chunks competing.
+- `reporter` is **not a retrieval filter** — it is absent from
+  `QueryPlan.backend_filters()` and lives only in the resolver.
+- Relaxing **company** — Recall@10 1.00 → 0.64, Recall@1 0.50 → 0.23, 160
+  wrong-company results served, 5.5× chunks, 3.8× latency.
+- Relaxing **doc_group** — Recall@10 1.00 → 0.86, 32× chunks, 15× latency.
+  (Note: `doc_group` is enforced twice, in SQL through `backend_filters` and
+  again post-SQL through `hard_routes`; removing it from one alone does nothing.)
+
+Every relaxation degraded recall, precision and latency together. There was
+nothing for a relaxation ladder to recover.
+
+### Decision
+**Do not implement relaxation now.**
+
+The remaining measured headroom is elsewhere and belongs to other work: Recall@1
+is 0.50 while Recall@10 is 1.00 (a ranking matter), and six Gold60 questions are
+declined by P0-D for company disambiguation, not by any retrieval filter.
+
+### Reopen only if
+- a real `STRICT_ZERO` case is demonstrated — the candidate set is empty after
+  filtering; or
+- hidden/live evaluation proves a document is excluded **before ranking**.
+
+A wrong answer is not evidence of a filter problem. The distinction that matters
+is whether the document was excluded before scoring, ranked too low, or lost
+downstream; only the first is a filter problem.
+
+### Future fallback, if it is ever needed
+- strict-zero trigger only;
+- maximum **2** attempts;
+- relax **optional inferred metadata only** (`doc_subtype`, `section_path`,
+  inferred `is_correction`);
+- **company, corp_code, doc_group and date remain hard**;
+- union the results, strict candidates keeping their ranks ahead of relaxed ones;
+- internal trace only, no public schema change.
+
+---
+
 ## Summary
 
-| Phase | Status | Frozen commit |
+| Phase | Status | Commit |
 |---|---|---|
 | P0-A Correction Graph | FINAL FREEZE | `9200ee1` (from `0e6542a`) |
 | P0-B Corporate Event Timeline | FINAL FREEZE | `e21ee27` |
@@ -835,3 +895,4 @@ later architecture that cannot preserve this contract additively.
 | P1-A5-B Render Matching Holding Events Only | FINAL FREEZE | `eaec179` |
 | P1-A5-A Ambiguity-Safe Holding Presentation | FINAL FREEZE | `39574f9` |
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
+| P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED** | — |
