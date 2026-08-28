@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `4cc767a`.
+Branch: `taeyoon` · Log current through `96d3968`.
 
 ---
 
@@ -663,6 +663,171 @@ fusion invariant.
 
 ---
 
+## P1-A4.1 — Holding Reporter Normalization
+
+**Status:** FINAL FREEZE
+
+**Frozen commit:** `96d3968`
+
+A narrow reopened extension of P1-A4 above. The P1-A4 freeze is **unchanged**:
+its D1 exact-date, D2 fusion and D2b reporter-alternative contracts stand
+exactly as recorded, and this entry only replaces the string predicate they call.
+
+### Problem solved
+Reporter matching handled family suffixes — `국민연금` ↔ `국민연금공단` — but
+treated Korean legal-designator variants as different holders:
+
+```
+하이브              !=  (주)하이브
+한국기업투자홀딩스   !=  (주)한국기업투자홀딩스
+한국기업투자홀딩스   !=  주식회사 한국기업투자홀딩스
+```
+
+The defect is **generic and embedding-independent**. Measured over the holding
+corpus: **1,083 documents**, **51,730 reporter occurrences**, **1,199 unique raw
+reporter strings**, and a **~65.2% false-negative rate** on designator-removed
+query-like forms under the previous matcher.
+
+### Final architecture / behavior
+One shared pure helper, `app/reasoning/holding_reporter.py`, exposing
+`canonical_reporter_key` and `reporter_matches`. Both `holding_event_resolver`
+and `answer_composer` delegate to it; `holding_event_fusion` inherits it through
+the resolver wrapper.
+
+```
+raw reporter
+→ strip at most one syntactically-recognizable legal designator from each outer edge
+→ normalize case / punctuation / whitespace
+→ empty key            => no match
+→ exact canonical equality
+→ existing family-suffix compatibility (공단 / 기금 / 조합 / 법인 / 회사)
+→ otherwise false
+```
+
+Recognized legal forms, as implemented: `(주)`, `㈜`, `주식회사`, `(유)`,
+`유한회사`, `유한책임회사`, `합자회사`, `합명회사`, `사단법인`, `재단법인`.
+
+> ### ⚠ Stripping happens on the **raw** string, never after normalization
+>
+> Normalizing first deletes the brackets and leaves a bare `주` that is
+> indistinguishable from the first syllable of `주성엔지니어링`. A bare Hangul
+> `주` or `유` is **never** removed from an ordinary entity name — only a
+> syntactically recognizable legal form is, and at most one per edge.
+
+### Production files
+- **NEW** `app/reasoning/holding_reporter.py`
+- `app/reasoning/holding_event_resolver.py`
+- `app/reasoning/answer_composer.py`
+
+Tests: `tests/test_holding_reporter_normalization.py`
+
+No change to query understanding, query validation, `QueryPlan`, retrieval, the
+database, or the public API schema.
+
+### Invariants that must remain true
+1. The same raw inputs produce deterministic reporter-match results.
+2. Legal-designator canonicalization is **comparison-only**; raw display
+   reporter text is preserved.
+3. **No substring containment.**
+4. **No reporter alias table**, ever — as already frozen by P1-A4 D2b.
+5. An empty canonical key matches nothing.
+6. P1-A4 exact-date semantics are unchanged.
+7. `국민연금` family semantics are unchanged.
+8. Resolver and composer reporter matching stay **one** shared contract;
+   duplicated independent normalizers must not reappear.
+9. P1-A5 contracts remain unchanged.
+10. The public response exposes exactly five top-level fields.
+
+Also frozen as non-goals: no fuzzy matching, no LLM reporter matching, no
+company-master / `corp_code` dependency, no company-specific exception, no
+Gold- or question-specific exception.
+
+### Placeholder semantics — an intentional correctness change
+Placeholder-like reporters that normalize to empty, such as `-` and `…`, now
+**match nothing**. The previous behaviour treated two empty-normalized
+placeholders as the same reporter, asserting that two filings with no stated
+holder described the same one.
+
+### Verification performed
+
+**Corpus-wide match audit** (1,199 × 1,199 ordered pairs)
+
+| | |
+|---|---|
+| before | 1,531 |
+| after | 1,573 |
+| newly true | **46** |
+| newly false | **4** |
+
+The 46 newly-true pairs form **15 canonical collision groups**, each reviewed
+and all legal-designator or spelling variants of the same entity — for example
+`삼성생명보험` ‖ `삼성생명보험(주)` (4,492 occurrences) and `삼성물산` ‖
+`삼성물산 주식회사` ‖ `삼성물산(주)` ‖ `삼성물산주식회사`. **No semantically
+distinct canonical collision was found.** The four newly-false pairs are
+combinations of empty placeholder reporters: `("-", "-")`, `("-", "…")`,
+`("…", "-")`, `("…", "…")`.
+
+**Non-Gold generic proof** — a `고려아연` query whose reporter is
+`한국기업투자홀딩스`, where corpus reporter forms carry legal designators:
+
+| | events | matches_query | rendered |
+|---|---|---|---|
+| before | 10 | **0** | **0** |
+| after | 10 | **10** | **10** |
+
+No such company literal exists in production matching logic; the names appear
+only in diagnostics and tests.
+
+**Frozen holding regression** — HX05, HX09, HX10, HX12, HX13, HX16, HX17, HX20:
+**0 / 8 semantic changes**. Exact-date controls unchanged: HX09 → `2022-12-05`,
+HX13 → `2023-06-13`, HX17 → `2023-06-30`. P1-A4 exact-date semantics intact.
+
+**P1-A5 regression** — P1-A5-B matching-only rendering unchanged; P1-A5-A
+ambiguity semantics unchanged; P1-A5-A.1 HCX semantic-control guard unchanged.
+Targeted suites all passed.
+
+**Mutation evidence** — mutations were applied to real source and caught for:
+containment; missing empty-key guard; missing prefix stripping; missing suffix
+stripping; resolver/composer matcher divergence; arbitrary bare `주`/`유`
+stripping. Each is what fixes the semantic boundary in place.
+
+**Test baseline** — **1488 OK, skipped 13** before; **1516 OK, skipped 13**
+after. 28 new reporter-normalization tests, zero regressions.
+
+### P0-D.1 downstream compatibility
+P1-A4.1 proves **downstream reporter compatibility** for the issuer/reporter
+representation diagnosed in P0-D.1 — `company = 에스엠`, `reporter = 하이브`
+against corpus reporter `(주)하이브`. Offline downstream controls:
+
+| question | matching events |
+|---|---|
+| H01 | 0 → 1 |
+| H02 | 0 → 1 |
+| HX01 | 0 → 1 |
+| HX02 | 0 → 4 |
+| HX03 | 0 → 1 |
+| HX04 | reporter compatibility preserved, matching event available |
+
+> **These six Gold questions are NOT fixed end-to-end.** P0-D still declines
+> them, and **P0-D remains independently frozen** until separately reopened.
+> HX02 remains an undated multi-event shape, governed by existing P1-A5-A
+> ambiguity semantics.
+
+### Known residual issues NOT solved
+- The legal-designator vocabulary is intentionally finite and Korean-focused.
+- Latin `Inc` / `Ltd` forms remain outside this normalization.
+- Widening reporter matching may expose pre-existing **undated multi-event**
+  questions, which remain governed by frozen P1-A5-A.
+- P1-A4.1 alone does **not** solve the six P0-D-declined Gold questions.
+- P0-D role resolution remains a separate future phase.
+
+### Reopen conditions
+- a reproducible reporter false positive merging two distinct holders;
+- a demonstrated exact-date or 국민연금 family regression;
+- a later architecture that cannot preserve this contract additively.
+
+---
+
 ## P1-A5-B — Render Matching Holding Events Only
 
 **Status:** FINAL FREEZE
@@ -1266,6 +1431,7 @@ not a P1-C case.
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
+| P1-A4.1 Holding Reporter Normalization | FINAL FREEZE | `96d3968` |
 | P1-A5-B Render Matching Holding Events Only | FINAL FREEZE | `eaec179` |
 | P1-A5-A Ambiguity-Safe Holding Presentation | FINAL FREEZE | `39574f9` |
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
