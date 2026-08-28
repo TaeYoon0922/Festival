@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `39574f9`.
+Branch: `taeyoon` · Log current through `4cc767a`.
 
 ---
 
@@ -214,6 +214,133 @@ intentionally preserved.
 
 ### Reopen conditions
 Proven regression or blocking architectural incompatibility.
+
+---
+
+## P0-D.1 — Multi-company Query Understanding Diagnosis
+
+**Status:** **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN**
+
+This is **not** a new FINAL FREEZE. The **P0-D FINAL FREEZE above remains in
+force**, and no production implementation was changed. This entry records why
+six declining Gold questions were investigated and deliberately left declining.
+
+### What prompted the diagnosis
+P2-A attributed **6 of 60** Gold questions to `QUERY_UNDERSTANDING_DECLINE` —
+the only non-`COMPLETE` category in the structural pass. All six name **both
+에스엠 and 하이브**, and all six resolve to the same structural domain shape:
+**PRIMARY_COMPANY_WITH_COUNTERPARTY**.
+
+### Corpus evidence for that shape
+The gold document's structured projection carries both roles as distinct fields:
+
+| role | value |
+|---|---|
+| disclosure owner / issuer (`corp_name`) | **에스엠** |
+| reporter / holder (`보고자/보유자`) | **(주)하이브** |
+
+A 대량보유상황보고서 is filed *about* an issuer *by* a holder, so the two names
+describe one document's two roles rather than two search targets.
+
+### The current ambiguity rule is count-based
+`_company_slot` in `app/reasoning/query_validation.py`:
+
+```
+len(plan.companies) > 1  and  no explicit company_comparison  =>  AMBIGUOUS
+```
+
+It is not competing aliases, not an unresolved canonical, not a confidence tie,
+and not a corp_code conflict. A multi-company **accept** path already exists —
+`comparison.type == "company_comparison"` — but it fires only on the literal
+terms `비교` / `대비`, which none of the six contain.
+
+> ### ⚠ These six are **not** ambiguous aliases
+>
+> **Corpus-wide alias collision count was measured as zero.** No alias key maps
+> to more than one canonical company, so `len(plan.companies) > 1` can never
+> mean "one mention with two candidate readings". In every such case **two
+> distinct companies were intentionally named**.
+
+### Structural capability vs safe consumption
+`QueryPlan.companies` / `corp_codes` are tuples, `backend_filters()` emits both,
+and the SQL predicate is `corp_code = ANY(%s)` — a **union**. The plan and the
+backend can therefore *represent* multiple companies. **Downstream components do
+not safely consume arbitrary multi-company holding queries**: the P0-C executor
+keys slots by a single `corp_code`, and the holding resolver derives one
+`corp_code` per group.
+
+### Unrestricted two-company retrieval is rejected
+Measured offline against the seeded pair, hash embeddings:
+
+| routing | gold reached | wrong-owner documents in top-10 |
+|---|---|---|
+| **both companies (OR union)** | **2 / 6** | **2–5 per query** |
+| owner + reporter | 3 / 6 | 0 |
+| owner only | 3 / 6 | 0 |
+
+OR-union retrieval introduces wrong-owner documents and is **worse than
+declining** — on one question the counterparty's filings displace a gold hit
+that owner-only routing finds. **Unrestricted multi-company acceptance is
+rejected.**
+
+### A deterministic direction does exist for the observed pair
+Derived from corpus projections only — no Gold, no company literal:
+
+| direction | supporting documents |
+|---|---|
+| 에스엠 issuer + 하이브 reporter | **10** |
+| reverse | **0** |
+
+### Why the natural representation is nevertheless unsafe today
+The otherwise natural plan shape is:
+
+```
+company  = 에스엠
+reporter = 하이브
+```
+
+Frozen P1-A4 reporter matching currently gives:
+
+```
+_reporter_matches("(주)하이브", "하이브")  ==  False
+```
+
+**This is a statement about the current contract, not a defect finding.** P1-A4
+is frozen and is not asserted here to be wrong; what is recorded is that its
+reporter matching **does not equate `"(주)하이브"` with `"하이브"`**, and that
+this blocks the proposed P0-D role resolution.
+
+Full orchestrator simulations showed that assigning the reporter can change
+`matches_query=True` to `matches_query=False`, and that under frozen **P1-A5-B**
+(render matching events only) this can render **zero events**.
+
+### Decision
+**KEEP P0-D FINAL FREEZE.** Reopening P0-D alone would convert an explicit
+clarification into a potentially **silent evidence loss** — a strictly worse
+outcome than the current behaviour.
+
+P0-D may be reconsidered **only after reporter-role compatibility downstream is
+independently proven safe**.
+
+**Next prerequisite:** diagnose **P1-A4 reporter normalization**.
+
+### Also recorded
+- **Unrestricted multi-company acceptance is rejected** (measured above).
+- **P0-C is not a general multi-company planner** — its executor keys slots by a
+  single `corp_code`; it plans multiple *documents*, not multiple *companies*.
+- **Gold60 has no true alias-ambiguity negative control.** With zero alias
+  collisions corpus-wide, no case exists to prove a relaxation still declines
+  genuine ambiguity.
+- **The remaining 3 of 6 owner-routed misses under hash embeddings belong to
+  blocked P1-R and are not P0-D evidence.** They are ranking failures measured
+  with `DeterministicHashEmbedder`, not understanding failures.
+
+### Ownership firewall
+| symptom | owner |
+|---|---|
+| query declined before retrieval | **P0-D** |
+| holder label not equated across corporate-prefix forms | **P1-A4** (frozen) |
+| eligible but **ranked low** under a verified embedding | **P1-R** (blocked) |
 
 ---
 
@@ -1135,6 +1262,7 @@ not a P1-C case.
 | P0-B Corporate Event Timeline | FINAL FREEZE | `e21ee27` |
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
+| P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
