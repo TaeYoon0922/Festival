@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -16,6 +15,7 @@ from app.reasoning.holding_event_selection import (
     NOT_APPLICABLE,
     is_semantically_unique,
 )
+from app.reasoning.holding_reporter import reporter_matches
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFact,
     PeriodicFactResolution,
@@ -290,20 +290,9 @@ def _reported_holding_events(
 
 
 def _holding_reporter_matches(value: str | None, constraint: str | None) -> bool:
-    left = _normalize_holding_reporter(value)
-    right = _normalize_holding_reporter(constraint)
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    suffixes = ("공단", "기금", "조합", "법인", "회사")
-    return any(
-        left == right + suffix or right == left + suffix for suffix in suffixes
-    )
+    """The same contract the resolver applies, so the two cannot disagree."""
 
-
-def _normalize_holding_reporter(value: str | None) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
+    return reporter_matches(value, constraint)
 
 
 def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:

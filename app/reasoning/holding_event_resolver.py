@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import EvidenceGroup, EvidenceItem, EvidenceSet
+from app.reasoning.holding_reporter import reporter_matches
 
 
 _FIELD_NAMES = (
@@ -758,14 +759,9 @@ def _canonical_direction(value: Any) -> str | None:
 
 
 def _reporter_matches(value: str, constraint: str) -> bool:
-    left = _normalize_text(value)
-    right = _normalize_text(constraint)
-    if left == right:
-        return True
-    suffixes = ("공단", "기금", "조합", "법인", "회사")
-    return any(
-        left == right + suffix or right == left + suffix for suffix in suffixes
-    )
+    """Delegates to the shared contract so the composer cannot drift from it."""
+
+    return reporter_matches(value, constraint)
 
 
 def _conflicting_reporter_match(
