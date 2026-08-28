@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `96d3968`.
+Branch: `taeyoon` · Log current through `92549d0`.
 
 ---
 
@@ -347,8 +347,7 @@ independently proven safe**.
 ## P0-D.2 — Issuer / Reporter Role Resolution
 
 **Status:** Phase 1 **DIAGNOSIS COMPLETE — REOPEN TARGET EXISTS** ·
-**IMPLEMENTATION / ACTIVATION DEFERRED PENDING LIVE RETRIEVAL SAFETY
-VALIDATION**
+**ACTIVATION DEFERRED — LIVE BGE-M3 SAFETY GATE FAILED (INFRA-E1)**
 
 This is **not** a FINAL FREEZE. The **P0-D FINAL FREEZE above remains active**
 and **no production behavior has changed**. This entry records a target that was
@@ -496,6 +495,50 @@ reliable evidence; **or**
 convert a clarification into a confident wrong answer.
 
 **Gold and expected answers must not be used for that safety decision.**
+
+
+### Live BGE-M3 activation result (INFRA-E1)
+
+Production P0-D was **not** modified; only the diagnosed representation was
+simulated downstream. All six roles resolved structurally from the corpus
+relation — **issuer = 에스엠, reporter = 하이브** (forward support 10 documents,
+reverse 0), at the `>=2` document threshold.
+
+| question | intended document, final rank |
+|---|---|
+| H01 | **top-10 MISS** |
+| H02 | 1 |
+| HX01 | 2 |
+| HX02 | **top-10 MISS** |
+| HX03 | 7 |
+| HX04 | 1 |
+
+The gate requires the intended evidence in the final top-10 **for all six**. It
+**FAILED** because H01 and HX02 miss.
+
+**P0-D.2 therefore remains TARGET EXISTS · ACTIVATION DEFERRED.**
+
+### Safety-positive findings
+Despite those ranking misses:
+
+- **no confidently wrong unique filing was produced**;
+- exact-date **HX01 selected the correct structural date**;
+- **H01 and HX02 remained under-specified multi-event shapes**;
+- **P1-A4.1 reporter normalization worked** — `(주)하이브` matched `하이브`;
+- **negative controls were unchanged**.
+
+This confirms **frozen P1-A5-A is providing the intended safety behaviour**: the
+two misses surfaced as visibly under-specified answers rather than confident
+wrong ones.
+
+### Ownership of the remaining loss
+| concern | owner |
+|---|---|
+| issuer/reporter role resolution | **P0-D.2** |
+| reporter string compatibility | **P1-A4.1** |
+| remaining retrieval ranking loss | **P1-R** |
+| undated multi-event safety | **P1-A5-A** |
+| the observed misses | **not P1-B** |
 
 ---
 
@@ -1270,11 +1313,23 @@ later architecture that cannot preserve this contract additively.
 
 ## P1-B — Filter Relaxation / Retrieval Recovery
 
-**Status:** DIAGNOSIS COMPLETE / **IMPLEMENTATION DEFERRED**
+**Status:** DIAGNOSIS COMPLETE / **IMPLEMENTATION DEFERRED — STRENGTHENED BY
+LIVE BGE-M3 EVIDENCE (INFRA-E1)**
 
 This is not a freeze. Nothing was built, so there is no frozen contract to
 protect — only a measured decision not to build, and the conditions that would
 change it.
+
+> ### Live BGE-M3 reinforcement
+>
+> Under real BGE-M3, **all 22** evaluable holding questions had the **gold
+> document present in the candidate set** and **full expected vector candidate
+> coverage** (11,925 of 11,925 rows). The three remaining final misses are
+> therefore **neither `FILTER_EXCLUSION` nor evidence-coverage failures** — they
+> belong to **P1-R**. MODE A on the complete 17-company evaluation database
+> likewise reproduced `FILTER_EXCLUSION = 0` with structural inclusion 54/54.
+>
+> **P1-B remains implementation-deferred.**
 
 ### Question asked
 Should retrieval recover from an over-restrictive filter by relaxing filters and
@@ -1330,19 +1385,23 @@ downstream; only the first is a filter problem.
 
 ## P1-R — Ranking / Reranking
 
-**Status:** Phase 1 **DIAGNOSIS COMPLETE** · Phase 1.5 **VALIDATION BLOCKED** /
-**IMPLEMENTATION DEFERRED**
+**Status:** Phase 1 **DIAGNOSIS COMPLETE** · Phase 1.5 **LIVE BGE-M3 VALIDATION
+COMPLETE — LIGHTWEIGHT TARGET EXISTS** / **IMPLEMENTATION DEFERRED**
 
 This is not a freeze. **No ranking implementation exists**, so there is no
-contract to protect — only a diagnosis, a measurement that could not be
-completed, and the conditions for resuming.
+contract to protect — only a diagnosis, a live measurement, and a target that has
+not been built.
 
-> ### ⚠ Do not scope a reranker from the numbers below
+> ### ⚠ Do not scope a reranker from the Phase 1 numbers below
 >
 > **R@1 = 0.50 is not a production measurement.** It was produced with
 > `DeterministicHashEmbedder`, whose vector channel is pseudo-random.
-> Production runs BGE-M3. The live value is **unknown**. Every ranking figure
-> in this entry inherits that caveat unless marked embedding-independent.
+> Every Phase 1 ranking figure in this entry inherits that caveat unless marked
+> embedding-independent.
+>
+> The live value is **no longer unknown** — see **Phase 1.5 live BGE-M3 results**
+> at the end of this entry. The hash and live figures cover **different question
+> subsets** and **must never be combined into one metric**.
 
 ### Phase 1 — what was measured
 
@@ -1381,6 +1440,10 @@ R@10 = 0.59. The exact rank values are not.
 
 ### Phase 1.5 — why live validation stopped
 
+*Historical: this records the state at Phase 1.5 diagnosis time. **INFRA-E1 has
+since supplied the environment (condition 3 below) and live validation is
+complete** — see **Phase 1.5 — LIVE BGE-M3 results** further down.*
+
 BGE-M3 was unreachable by every path the code supports:
 
 - `FlagEmbedding` / `torch` / `transformers` absent from the runtime;
@@ -1407,6 +1470,11 @@ test.
 2. a BGE-M3 pre-embedded corpus/database becomes available
    (`chunk_embeddings.embedding_model = BAAI/bge-m3`);
 3. a dedicated disposable BGE-M3 evaluation environment is prepared.
+
+**Condition 3 was satisfied by INFRA-E1**, and the 22-question live smoke has been
+run exactly as required — unchanged in questions, gold documents, routing,
+filters and `top_k`. Its outcome is the **LIGHTWEIGHT TARGET** verdict recorded
+below; the decision table that follows is retained as the rule that produced it.
 
 **At reopen, run the same 22-question live smoke first**, unchanged in
 questions, gold documents, routing, filters and `top_k`, and compare against
@@ -1446,6 +1514,53 @@ another:
   ranking is unmeasured.
 - Capping to one chunk per document would remove a second gold chunk in 16 of 22
   queries, which is a downstream risk for P1-A3 sibling anchoring.
+
+
+### Phase 1.5 — LIVE BGE-M3 results (INFRA-E1)
+
+Measured on the **22 evaluable holding questions** (the 28 holding questions minus
+the 6 P0-D declines), under the pinned `BAAI/bge-m3` revision
+`6892b95fed65c899a30896eb40d619ae284d0455`, at frozen production retrieval
+defaults, with **no tuning**.
+
+| hybrid | value |
+|---|---|
+| R@1 | **0.3636** |
+| R@3 | **0.8636** |
+| R@5 | **0.8636** |
+| R@10 | **0.8636** |
+| MRR | **0.5833** |
+| nDCG@5 | **0.6553** |
+| nDCG@10 | **0.6553** |
+
+Latency: mean **269.7 ms**, p95 **388.4 ms**, max **515.6 ms**.
+
+> **Do not combine these with the earlier HASH_DIAGNOSTIC numbers** — the prior
+> hash subset was a different set of questions.
+
+### Phase 1.5 — the failure shape
+Final rank distribution: **rank 1 → 8 · rank 2 → 7 · rank 3 → 4 · miss → 3**.
+**No question lands at final ranks 4–10.** A question is either found by rank 3
+or not found at all.
+
+Exactly three final misses — **HX08, HX16, HX20** — and all three share one
+signature:
+
+- the gold document **is** structurally inside the candidate set;
+- a **BGE vector exists** for it;
+- **lexical rank is absent**;
+- **BGE vector rank is 14–25**;
+- fusion fails to lift the document into the final top-10.
+
+### Phase 1.5 — diagnosis
+
+**P1-R = LIGHTWEIGHT TARGET.**
+
+Current evidence supports a **deterministic fusion / candidate-cutoff issue**,
+**not** a semantic reranker target — BGE-M3 does retrieve these documents, merely
+too deep for fusion to recover when the lexical lane contributes nothing.
+
+**The solution is not yet known.** This entry records a target, not a design.
 
 ---
 
@@ -1574,6 +1689,96 @@ not a P1-C case.
 
 ---
 
+## INFRA-E1 — Reproducible BGE-M3 Evaluation Environment
+
+**Status:** **PHASE 2 COMPLETE — P1-R UNBLOCKED · P0-D.2 ACTIVATION REMAINS
+DEFERRED**
+
+This is **not** a production feature freeze. No production behaviour was changed;
+this records an evaluation environment and the live measurements it produced.
+
+### Environment
+A local, isolated evaluation stack: an **NVIDIA RTX 4060**, a **disposable Docker
+BGE-M3 runtime**, and the **isolated pgvector database on port 55433**.
+Production and dev services were untouched, and **port 8010 was untouched**.
+
+### Model identity
+Evaluation ran on **real BGE-M3**, not a stand-in:
+
+```
+model      BAAI/bge-m3
+revision   6892b95fed65c899a30896eb40d619ae284d0455
+dimensions 1024
+```
+
+Resolved runtime: Python 3.11.16 · torch 2.5.1+cu121 · FlagEmbedding 1.4.2 ·
+transformers 5.16.1 · sentence-transformers 6.0.0. Dense vectors were **L2
+normalized**.
+
+> ### ⚠ FlagEmbedding accepted the revision and did not honour it
+>
+> **FlagEmbedding 1.4.2 takes a `revision` argument and silently resolves current
+> `main` instead.** Left unchecked, every number here would have described an
+> unpinned model.
+>
+> The evaluation therefore introduced a **fail-closed pinned snapshot loader**
+> that resolves the requested HuggingFace commit explicitly, **asserts the
+> resolved snapshot commit**, requires the pinned **safetensors** checkpoint, and
+> passes the verified local snapshot path to FlagEmbedding. **Every figure below
+> comes from the verified pinned revision.**
+>
+> Separately: production `bge_m3_local` **passes `revision` to FlagEmbedding but
+> does not independently verify the resolved snapshot**. That is a **production
+> identity-hardening concern**, was **not changed** by INFRA-E1, and **must not be
+> conflated with P1-R**.
+
+### Structural evaluation baseline
+The evaluation database now holds the complete structural corpus for all **17
+Gold60 companies**. MODE A on that complete database:
+
+| | |
+|---|---|
+| `QUERY_UNDERSTANDING_DECLINE` | 6 |
+| `FILTER_EXCLUSION` | **0** |
+| `COMPLETE` | 54 |
+| structural inclusion | **54 / 54** |
+
+This independently reinforces the **P1-B deferral**.
+
+### Authoritative candidate union
+After complete structural seeding the Gold60 candidate union is **75,786 unique
+chunks**. The earlier **21,832** figure was collected against a 7-company
+database, is **incomplete, and is superseded**. P0-D-accepted questions with zero
+candidates: **0**.
+
+### Required BGE scope and coverage
+The required holding subset is **9,987 unique candidate chunks**. Live BGE vector
+coverage for the **22 evaluable holding questions**:
+
+| | |
+|---|---|
+| expected vector-eligible rows | 11,925 |
+| stored matching BGE rows | **11,925** |
+| missing | **0** |
+| zero-vector questions | **0** |
+
+### Embedding performance
+Sustained **~11.95 chunks/sec**, peak GPU VRAM **~1,975 MiB**, **no failed
+embeddings**. Pre-existing hash embeddings **remained intact** and coexist with
+BGE rows under the `(chunk_id, model, version)` key.
+
+### Fail-closed invariants
+Evaluation must remain fail-closed and must reject:
+
+- any **hash** fallback;
+- a model other than the exact pinned model;
+- a revision other than the exact pinned revision;
+- a dimension other than the expected one;
+- **incomplete or zero** BGE candidate coverage;
+- a **stale manifest**.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -1583,7 +1788,7 @@ not a P1-C case.
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
-| P0-D.2 Issuer / Reporter Role Resolution | **TARGET EXISTS / ACTIVATION DEFERRED** | — |
+| P0-D.2 Issuer / Reporter Role Resolution | **TARGET EXISTS / ACTIVATION DEFERRED — live ranking safety gate** | — |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
@@ -1591,6 +1796,7 @@ not a P1-C case.
 | P1-A5-B Render Matching Holding Events Only | FINAL FREEZE | `eaec179` |
 | P1-A5-A Ambiguity-Safe Holding Presentation | FINAL FREEZE | `39574f9` |
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
-| P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED** | — |
-| P1-R Ranking / Reranking | **VALIDATION BLOCKED / DEFERRED** | — |
+| P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED — strengthened by live BGE evidence** | — |
+| P1-R Ranking / Reranking | **LIVE BGE VALIDATION COMPLETE — LIGHTWEIGHT TARGET EXISTS** | — |
 | P1-C Table Sibling / Evidence Neighborhood | **TARGET EXISTS / IMPLEMENTATION DEFERRED** | — |
+| INFRA-E1 Reproducible BGE-M3 Evaluation Environment | **PHASE 2 COMPLETE — P1-R UNBLOCKED** | — |
