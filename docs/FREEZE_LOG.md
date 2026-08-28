@@ -339,8 +339,163 @@ independently proven safe**.
 | symptom | owner |
 |---|---|
 | query declined before retrieval | **P0-D** |
-| holder label not equated across corporate-prefix forms | **P1-A4** (frozen) |
+| holder corporate-prefix normalization — a downstream blocker **at P0-D.1 diagnosis time** | **P1-A4** (frozen then) → subsequently resolved by **P1-A4.1** FINAL FREEZE |
 | eligible but **ranked low** under a verified embedding | **P1-R** (blocked) |
+
+---
+
+## P0-D.2 — Issuer / Reporter Role Resolution
+
+**Status:** Phase 1 **DIAGNOSIS COMPLETE — REOPEN TARGET EXISTS** ·
+**IMPLEMENTATION / ACTIVATION DEFERRED PENDING LIVE RETRIEVAL SAFETY
+VALIDATION**
+
+This is **not** a FINAL FREEZE. The **P0-D FINAL FREEZE above remains active**
+and **no production behavior has changed**. This entry records a target that was
+proven to exist, the narrow contract that would serve it, and the specific
+safety condition that keeps it switched off.
+
+### Target shape
+**PRIMARY_COMPANY_WITH_REPORTER** — exactly two distinct companies are named in
+a holding-routed query; one is the disclosure issuer, the other the
+reporter/holder.
+
+Distinct from: company comparison · arbitrary two-company lookup · M&A ·
+contract counterparty · parent/subsidiary relation · parallel multi-company
+lookup.
+
+### Deterministic corpus signal
+Holding projection reporter metadata only. For candidate companies A and B:
+
+```
+support(A -> B) = distinct holding documents where
+                  issuer = A and reporter canonically matches B
+support(B -> A) = symmetric
+```
+
+**P1-A4.1 reporter normalization is the frozen comparison contract** used for
+that match. No Gold, no document-id lookup, no embeddings, no ranking.
+
+### Corpus-wide relation inventory
+
+| | |
+|---|---|
+| holding reporter occurrences | **51,730** |
+| linked to another corpus master company | **107** |
+| distinct directed issuer→reporter pairs | **16** |
+| asymmetric | **16** |
+| reverse-direction pairs observed | **0** |
+
+Representative examples of the relation's shape — strong support
+(한화오션 → 한화에어로스페이스, 15 documents; 현대자동차 → 현대모비스, 10),
+mid support (현대오토에버 → 현대자동차, 5), and single-document support
+(삼성E&A → 삼성SDI). These illustrate the distribution; **none of them is a
+special case**, and the rule treats every pair identically.
+
+> ### ⚠ A corpus relation alone is NOT sufficient
+>
+> 한화오션 → 한화에어로스페이스 carries the strongest holding support in the
+> corpus, yet a **contract** question naming those two companies must not be
+> read as a holding issuer/reporter query. Relation support says the pair exists;
+> it says nothing about what the question is asking.
+>
+> The role resolver must therefore additionally require
+> **`disclosure_route == ["holding"]`**. Comparison handling retains precedence.
+
+### Proposed narrow contract
+Trigger only when **all** hold:
+
+- the company slot would otherwise be AMBIGUOUS;
+- exactly two distinct canonical companies;
+- not `company_comparison`;
+- `disclosure_route == ["holding"]`.
+
+Then inspect directed holding support. A direction is eligible only when
+supported by **≥2 distinct documents**. If exactly one eligible direction exists:
+
+```
+companies         = (issuer,)
+corp_codes        = (issuer_code,)
+reporter          = counterparty name
+QueryState        may become RESOLVED
+retrieval_allowed may become True
+```
+
+Otherwise the current AMBIGUOUS clarification is retained. Queries naming **3+
+companies remain conservative and unchanged**.
+
+### Why the threshold matters
+Of the 16 observed relation pairs, **6 rely on a single supporting document**. A
+`≥2` threshold retains **10 of 16** and rejects the six weakest relations. This
+is a **safety threshold supported by the current small relation inventory**, and
+it **must be reconsidered if larger evidence changes the distribution**.
+
+### The six Gold60 declines
+All six known 에스엠 / 하이브 declines resolve structurally as
+**issuer = 에스엠, reporter = 하이브**, with **forward support = 10 documents**
+and **reverse support = 0**.
+
+Frozen P1-A4.1 now gives `reporter_matches("(주)하이브", "하이브") == True`,
+so **the P0-D.1 downstream reporter blocker is removed**.
+
+> ### ⚠ Activation blocker — the six are NOT fixed
+>
+> Offline downstream simulation used `DeterministicHashEmbedder`. Role
+> resolution succeeded **6/6**, but only **H02, HX01 and HX04** reached the
+> intended Gold document. **H01, HX02 and HX03 did not** under hash ranking.
+>
+> H01 and HX03 could therefore change from today's explicit clarification into a
+> **confident answer based on a different filing** if P0-D.2 were activated
+> without live retrieval validation. That is why activation remains deferred.
+>
+> Every ranking conclusion from this experiment is **HASH_DIAGNOSTIC, not live
+> BGE-M3**.
+
+### Ownership
+| concern | owner |
+|---|---|
+| role determination | **P0-D.2** |
+| reporter string compatibility | **P1-A4.1** (frozen) |
+| eligible evidence ranked incorrectly | **P1-R** |
+| undated multiple matching events | **P1-A5-A** (frozen) |
+
+Ranking and event uniqueness must **not** be fixed inside P0-D.2.
+
+### Runtime architecture finding
+| approach | measured cost | verdict |
+|---|---|---|
+| per-query DB `GROUP BY` | **~311 ms** on the measured subset | rejected |
+| full projection scan at startup | **~8.4 s** | rejected |
+
+A production implementation would require a small **precomputed,
+corpus-versioned issuer→reporter relation artifact** loaded with `CorpusScope`.
+Measured artifact shape in the current corpus: **~16 rows / ~3.2 KB**.
+
+**Stale-artifact protection and refresh semantics are mandatory** — a relation
+that outlives its corpus silently mis-assigns roles.
+
+### Risks
+- only **16** linked relation pairs exist;
+- **6** have one-document support;
+- no symmetric pair was observed, but **absence is not a domain guarantee**;
+- the company master covers only a tiny share of all holders;
+- **live ranking is still unavailable**;
+- the route gate has been tested on **constructed controls**, not a broad
+  real-user set.
+
+### Reopen / activation gate
+Implementation may proceed only while the role-resolution algorithm and the
+relation artifact remain **deterministic and generic**.
+
+Activation that changes user-visible P0-D behavior additionally requires one of:
+
+**A.** live BGE-M3 evaluation showing the newly accepted queries retrieve
+reliable evidence; **or**
+
+**B.** an equally strong deterministic evidence-safety mechanism proven not to
+convert a clarification into a confident wrong answer.
+
+**Gold and expected answers must not be used for that safety decision.**
 
 ---
 
@@ -1428,6 +1583,7 @@ not a P1-C case.
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
+| P0-D.2 Issuer / Reporter Role Resolution | **TARGET EXISTS / ACTIVATION DEFERRED** | — |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
