@@ -1,0 +1,106 @@
+{
+  "metadata": {
+    "mode": "A",
+    "gold": "reports/evaluation/gold60/2026-08-21-agent-90pct/gold60_agent_questions.jsonl",
+    "questions": 60,
+    "embedding_provider": "hash",
+    "commit": "6af7118a2c8e8deeefbc22ab10a9d96e7772c4e5",
+    "corpus": "data\\processed\\structural_v2_1_full_4204",
+    "companies": [
+      "00105855",
+      "00126380",
+      "00126566",
+      "00161383",
+      "00190321",
+      "00260930",
+      "00356370",
+      "00413046",
+      "00828497",
+      "00872984",
+      "00970453",
+      "01105153",
+      "01204056",
+      "01261644",
+      "01316245",
+      "01384787",
+      "01412725"
+    ]
+  },
+  "total": 60,
+  "retrieval": {
+    "ranking_measured": 0,
+    "candidate_inclusion_rate": 1.0,
+    "recall_at_1": 0.0,
+    "recall_at_3": 0.0,
+    "recall_at_5": 0.0,
+    "recall_at_10": 0.0,
+    "mrr": 0.0
+  },
+  "counts": {
+    "QUERY_UNDERSTANDING_DECLINE": 6,
+    "FILTER_EXCLUSION": 0,
+    "RANKING_LOW": 0,
+    "MULTI_DOCUMENT_INCOMPLETE": 0,
+    "TABLE_SIBLING_MISS": 0,
+    "EVIDENCE_COVERAGE_MISS": 0,
+    "DOWNSTREAM_LOSS": 0,
+    "COMPLETE": 54
+  },
+  "rates": {
+    "QUERY_UNDERSTANDING_DECLINE": 0.1,
+    "FILTER_EXCLUSION": 0.0,
+    "RANKING_LOW": 0.0,
+    "MULTI_DOCUMENT_INCOMPLETE": 0.0,
+    "TABLE_SIBLING_MISS": 0.0,
+    "EVIDENCE_COVERAGE_MISS": 0.0,
+    "DOWNSTREAM_LOSS": 0.0,
+    "COMPLETE": 0.9
+  },
+  "owners": {
+    "QUERY_UNDERSTANDING_DECLINE": "P0-D",
+    "FILTER_EXCLUSION": "P1-B",
+    "RANKING_LOW": "P1-R",
+    "MULTI_DOCUMENT_INCOMPLETE": "P0-C / P0-B",
+    "TABLE_SIBLING_MISS": "P1-C",
+    "EVIDENCE_COVERAGE_MISS": "evidence coverage",
+    "DOWNSTREAM_LOSS": "resolver / composer / verbalizer",
+    "COMPLETE": "none"
+  },
+  "by_doc_group": {
+    "exchange": {
+      "COMPLETE": 8
+    },
+    "holding": {
+      "QUERY_UNDERSTANDING_DECLINE": 6,
+      "COMPLETE": 22
+    },
+    "major": {
+      "COMPLETE": 10
+    },
+    "periodic": {
+      "COMPLETE": 14
+    }
+  },
+  "by_task_type": {
+    "corporate_event": {
+      "COMPLETE": 15
+    },
+    "disclosure_lookup": {
+      "COMPLETE": 23,
+      "QUERY_UNDERSTANDING_DECLINE": 2
+    },
+    "financial_metric": {
+      "COMPLETE": 1
+    },
+    "holding_change": {
+      "QUERY_UNDERSTANDING_DECLINE": 4,
+      "COMPLETE": 15
+    }
+  },
+  "modes": {
+    "A": 60
+  },
+  "embedding_confidence": {
+    "LEXICAL_ONLY": 60
+  }
+}

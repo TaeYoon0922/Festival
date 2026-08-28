@@ -1,0 +1,82 @@
+{
+  "metadata": {
+    "mode": "B",
+    "gold": "reports/evaluation/gold60/2026-08-21-agent-90pct/gold60_agent_questions.jsonl",
+    "questions": 10,
+    "embedding_provider": "hash",
+    "commit": "6af7118a2c8e8deeefbc22ab10a9d96e7772c4e5",
+    "corpus": "data\\processed\\structural_v2_1_full_4204",
+    "companies": [
+      "00161383",
+      "00872984"
+    ]
+  },
+  "total": 10,
+  "retrieval": {
+    "ranking_measured": 10,
+    "candidate_inclusion_rate": 1.0,
+    "recall_at_1": 0.2,
+    "recall_at_3": 0.5,
+    "recall_at_5": 0.5,
+    "recall_at_10": 1.0,
+    "mrr": 0.4145634920634921
+  },
+  "counts": {
+    "QUERY_UNDERSTANDING_DECLINE": 0,
+    "FILTER_EXCLUSION": 0,
+    "RANKING_LOW": 0,
+    "MULTI_DOCUMENT_INCOMPLETE": 0,
+    "TABLE_SIBLING_MISS": 0,
+    "EVIDENCE_COVERAGE_MISS": 0,
+    "DOWNSTREAM_LOSS": 0,
+    "COMPLETE": 10
+  },
+  "rates": {
+    "QUERY_UNDERSTANDING_DECLINE": 0.0,
+    "FILTER_EXCLUSION": 0.0,
+    "RANKING_LOW": 0.0,
+    "MULTI_DOCUMENT_INCOMPLETE": 0.0,
+    "TABLE_SIBLING_MISS": 0.0,
+    "EVIDENCE_COVERAGE_MISS": 0.0,
+    "DOWNSTREAM_LOSS": 0.0,
+    "COMPLETE": 1.0
+  },
+  "owners": {
+    "QUERY_UNDERSTANDING_DECLINE": "P0-D",
+    "FILTER_EXCLUSION": "P1-B",
+    "RANKING_LOW": "P1-R",
+    "MULTI_DOCUMENT_INCOMPLETE": "P0-C / P0-B",
+    "TABLE_SIBLING_MISS": "P1-C",
+    "EVIDENCE_COVERAGE_MISS": "evidence coverage",
+    "DOWNSTREAM_LOSS": "resolver / composer / verbalizer",
+    "COMPLETE": "none"
+  },
+  "by_doc_group": {
+    "exchange": {
+      "COMPLETE": 2
+    },
+    "holding": {
+      "COMPLETE": 6
+    },
+    "periodic": {
+      "COMPLETE": 2
+    }
+  },
+  "by_task_type": {
+    "corporate_event": {
+      "COMPLETE": 1
+    },
+    "disclosure_lookup": {
+      "COMPLETE": 5
+    },
+    "holding_change": {
+      "COMPLETE": 4
+    }
+  },
+  "modes": {
+    "B": 10
+  },
+  "embedding_confidence": {
+    "HASH_DIAGNOSTIC": 10
+  }
+}
