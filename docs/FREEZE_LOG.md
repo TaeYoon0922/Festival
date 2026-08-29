@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `92549d0`.
+Branch: `taeyoon` · Log current through `6503c77`.
 
 ---
 
@@ -1383,14 +1383,24 @@ downstream; only the first is a filter problem.
 
 ---
 
-## P1-R — Ranking / Reranking
+## P1-R — Bounded Additive Document Recovery
 
-**Status:** Phase 1 **DIAGNOSIS COMPLETE** · Phase 1.5 **LIVE BGE-M3 VALIDATION
-COMPLETE — LIGHTWEIGHT TARGET EXISTS** / **IMPLEMENTATION DEFERRED**
+**Status:** **FINAL FREEZE**
 
-This is not a freeze. **No ranking implementation exists**, so there is no
-contract to protect — only a diagnosis, a live measurement, and a target that has
-not been built.
+**Implementation commit:** `6503c77`
+
+**Regression-test commit:** `283edfb`
+
+> ### Scope of this freeze
+>
+> This FINAL FREEZE covers **only the bounded additive document recovery
+> contract**. It does **not** mean all ranking failures are solved: **HX08 and
+> HX16 remain unrecovered**, and **P0-D.2 remains activation-deferred**.
+
+The diagnosis history below is retained deliberately — Phase 1 was hash-based and
+diagnostic only, INFRA-E1 later enabled real pinned BGE-M3 validation, and a
+replacement-style cap was implemented and rejected before the additive contract
+was reached.
 
 > ### ⚠ Do not scope a reranker from the Phase 1 numbers below
 >
@@ -1560,7 +1570,221 @@ Current evidence supports a **deterministic fusion / candidate-cutoff issue**,
 **not** a semantic reranker target — BGE-M3 does retrieve these documents, merely
 too deep for fusion to recover when the lexical lane contributes nothing.
 
-**The solution is not yet known.** This entry records a target, not a design.
+*Historical: at Phase 1.5 the solution was not yet known. It was reached in
+Phases 2–5.1 below, after a replacement-style cap was tried and rejected.*
+
+
+### Phase 2–5.1 — the frozen contract
+
+### Problem solved
+A filing whose table splits into several similar chunks can occupy most of the
+final list, so a document retrieved just below it is never shown. Ranking scores
+chunks, not documents, and nothing corrected for that.
+
+> ### ⚠ REJECTED: replacement-style diversification (`cap = 2`)
+>
+> A per-document cap of **2** was implemented and measured under live pinned
+> BGE-M3. It improved document recall and recovered HX20 — and was **REJECTED**,
+> because it **replaced existing top-10 chunks and changed answer semantics**:
+>
+> - **HX07 lost three distinct dated events** (2023-05-18, 2023-06-05, 2023-06-09);
+> - further distinct-fact losses on **H03**, **H08** and **HX15**.
+>
+> **Document/chunk replacement for diversity is NOT part of the frozen
+> contract.** This is a negative invariant, not a discarded draft: any future
+> diversity work must not reach for it again.
+
+### Final architecture / behavior — bounded additive document recovery
+Normal hybrid `top_k` stays **10** and the baseline top-10 is **immutable**.
+After normal hybrid retrieval, the existing latest-event and statement-metric
+rescues, and correction/event expansion, the recovery may append **at most one**
+candidate.
+
+**Trigger** — within the currently emitted evidence, one canonical document
+occupies **at least 3** slots.
+
+**Candidate** — the highest-ranked candidate from the existing scored tail whose
+canonical `doc_id` is not already represented in the emitted context. It keeps
+its own existing scored rank.
+
+No score recomputation, no reranking, no second database query, no model call,
+no fabricated candidate.
+
+`_hybrid_rerank` still truncates its emitted output to `top_k`, but retains
+diagnostics and scored information for the complete `final_order`. An internal
+**`ScoredTail`** lets the post-retrieval rescue materialise one already-scored
+candidate **without widening normal `top_k`**. `ScoredTail` is internal
+retrieval machinery — not public API, not a new public result schema, and not a
+second retrieval pass.
+
+**Budget invariant.** Normal retrieval budget = existing `top_k` = **10**;
+additive recovery allowance = **maximum 1**. Base evidence never exceeds the
+normal budget, and expanded evidence may carry at most one extra chunk from this
+rescue. **This contract must never be re-implemented by setting `plan.top_k` or
+`final_top_k` to 11.**
+
+**Document identity** comes only from the canonical `RetrievalResult` /
+`FusedCandidate` `doc_id` — never inferred from `chunk_id` parsing, report name,
+company or date. A missing `doc_id` neither contributes to crowding nor can be
+selected as the rescue candidate.
+
+### Production files
+- `app/retrieval/hybrid.py`
+
+Tests: `tests/test_additive_document_recovery.py`
+
+No change to `app/retrieval/bge_m3.py`, query understanding, query validation,
+P0-D, the holding event resolver, the answer composer, or the public API schema.
+
+### Verification performed
+
+**Model identity.** `BAAI/bge-m3` revision
+`6892b95fed65c899a30896eb40d619ae284d0455`, 1024 dimensions, loaded through the
+INFRA-E1 **fail-closed pinned-snapshot loader**. Full candidate-union coverage
+was completed *before* global validation.
+
+**Global BGE coverage** — the first complete LIVE pinned-BGE Gold60 retrieval
+baseline:
+
+| | |
+|---|---|
+| accepted Gold60 questions | **54** |
+| vector-eligible candidate rows | **157,377** |
+| matching stored pinned BGE rows | **157,377** |
+| missing | **0** |
+| questions with zero BGE candidates | **0** |
+| authoritative candidate union | **75,786 chunks** |
+
+**Global LIVE BGE baseline** — official frozen evaluator, `legacy` production
+rerank mode. These are **BASE normal retrieval metrics**:
+
+| group | n | R@1 | R@3 | R@5 | R@10 | MRR |
+|---|---|---|---|---|---|---|
+| exchange | 8 | 0.7500 | 1.0000 | 1.0000 | 1.0000 | 0.8542 |
+| major | 10 | 0.8000 | 0.9000 | 0.9000 | 1.0000 | 0.8667 |
+| holding | 22 | 0.4091 | 0.7273 | 0.7273 | 0.8636 | 0.5537 |
+| periodic | 14 | 0.2857 | 0.3571 | 0.5000 | 0.6429 | 0.3661 |
+| **all accepted** | **54** | **0.5000** | **0.7037** | **0.7407** | **0.8519** | **0.6075** |
+
+nDCG@10 across all accepted: **0.6660**.
+
+**Additive recovery impact** across the 54 accepted questions:
+
+| | |
+|---|---|
+| rescue triggered | **19 / 54** |
+| appended | **13 / 54** |
+| normal baseline top-10 byte-identical | **54 / 54** |
+| Gold document newly recovered | **1 — HX20** |
+
+In the document-level A/B harness, base document R@10 **0.9074** and expanded
+evidence recall **@11 0.9259**. For holding, base R@10 remains **0.8636** and
+expanded evidence **@11** becomes **0.9091**.
+
+> **Expanded evidence recall is never R@10.** Do not write "R@10 improved to
+> 0.9091", and keep the document-level harness figures separate from the
+> official chunk-level retrieval metrics above.
+
+**HX20 — validation evidence, not a production case.** Its gold document was
+outside the normal emitted top-10; the recovery appends
+`holding_20230704000260` from existing scored **rank 11**, yielding the grounded
+event **2023-06-30, 1,092,455 shares**. No prior fact disappears. Production
+code contains no HX20, document, or date special case.
+
+**Evidence preservation — the decisive distinction from the rejected cap.**
+Across all 54 accepted questions: baseline top-10 prefix identical **54/54**,
+**lost grounded facts 0**, harmful or contradictory additions **0**. Of the
+additions: **2 useful grounded** (HX20's intended event; H03 one additional
+grounded event), **11 redundant with no downstream effect**, **0 irrelevant or
+contradictory**.
+
+**Holding frozen controls** — HX05, HX09, HX10, HX12, HX13, HX16, HX17, HX20 all
+preserve existing grounded facts. The exact-date controls **HX05, HX09, HX13,
+HX17** are unchanged in selected event, `semantic_unique`, exact mode and
+citations. HX20 gains evidence additively. **P1-A3 / P1-A4 / P1-A4.1 / P1-A5
+contracts remain valid.**
+
+**Non-holding global validation** (after completing real BGE coverage) —
+exchange **0** appends, major **1**, periodic **3**. For every non-holding
+append: baseline evidence preserved, no grounded fact lost, no citation lost, no
+uniqueness break, no contradictory evidence, downstream output unchanged.
+**Periodic/table baseline chunks are never displaced.** This resolves the Phase 5
+global-scope validation concern.
+
+**Existing expansion interaction** — the recovery runs after the existing
+retrieval rescues and expansions and checks the actual emitted document set. No
+duplicate expansion document was observed. *Caveat: the live Gold60 run contained
+no case where a graph/rescue expansion had already added a document, so this
+exact overlap path is unit-tested but not live-exercised.*
+
+**Latency and context** — no extra database query or model call. Observed
+holding latency delta **≈ +2.9 ms mean**. Across 54 questions: **13 additional
+chunks**, **6,421 added characters** total, mean **~494 characters / ~291
+tokens** per appended chunk, maximum **1,104**. Context growth from this rescue
+is bounded to one chunk.
+
+**Tests** — after the regression test file was committed at `283edfb`, the full
+suite gate was re-run: **1555 OK, skipped 13**, with **19 new additive-recovery
+tests**. The frozen contract is therefore protected by tracked tests. Mutations
+caught: replacement instead of append; baseline reorder; threshold lowered to
+2; appending more than one; appending an already represented document; widening
+the normal budget; unstable ordering.
+
+### Invariants that must remain true
+1. The normal top-10 remains **byte-identical**.
+2. `top_k` remains unchanged.
+3. Crowding trigger = **≥ 3** chunks from one canonical document.
+4. Rescue limit = **1**.
+5. The rescue is **additive only**.
+6. The rescue candidate must come from an **unseen canonical document**.
+7. Existing score and candidate order are **reused**, never recomputed.
+8. Baseline grounded evidence is **never removed**.
+9. Exact-date semantics remain unchanged.
+10. No domain, question or company special casing.
+11. Public API unchanged.
+12. Deterministic repeatability.
+13. `ScoredTail` remains internal-only retrieval machinery.
+
+**Negative invariants — never do any of these:** replace the baseline top-10 for
+document diversity · reorder the baseline top-10 · remove same-document evidence
+merely to raise document count · widen normal `plan.top_k` to implement this
+rescue · append more than one candidate · trigger below crowding count 3 ·
+append a document already represented · infer document identity from `chunk_id`
+· use Gold, question, company or domain-specific logic · modify scores for this
+rescue.
+
+### Known residual issues NOT solved
+**P1-R ranking is not globally solved.** Two live BGE misses remain:
+
+- **HX08** — remains unrecovered; the rescue does not trigger.
+- **HX16** — the rescue may trigger, but the appended unseen document is not the
+  Gold document; remains unrecovered.
+
+Do **not** reopen the frozen additive contract merely because these residuals
+remain; future work needs separate evidence.
+
+**P0-D.2 is not unblocked by this freeze.** H01 and HX02 still miss intended
+evidence, so P0-D.2 remains **TARGET EXISTS · ACTIVATION DEFERRED**. HX04's
+intended document ranks 1 while holding-event construction remains zero in the
+simulation — a separate P0-D.2 correctness issue.
+
+**P1-B remains deferred.** Complete BGE validation continues to show the relevant
+misses are not caused by metadata/filter exclusion. Do not reopen P1-B because of
+P1-R residual misses.
+
+**Periodic retrieval is materially weaker under full LIVE BGE** — R@1 **0.2857**,
+R@10 **0.6429**. Recorded here as a **separate follow-up finding**, not part of
+this freeze and not to be solved in P1-R.
+
+**Production BGE revision identity** — `app/retrieval/bge_m3.py` passes
+`revision` to FlagEmbedding but does not independently verify the resolved
+HuggingFace snapshot, and INFRA-E1 proved this may resolve the wrong revision.
+Not fixed by P1-R; a separate **Embedding Identity Hardening** follow-up.
+
+### Reopen conditions
+- a demonstrated baseline top-10 mutation, reordering or evidence loss;
+- a harmful or contradictory addition in any domain;
+- a later architecture that cannot preserve this contract additively.
 
 ---
 
@@ -1797,6 +2021,6 @@ Evaluation must remain fail-closed and must reject:
 | P1-A5-A Ambiguity-Safe Holding Presentation | FINAL FREEZE | `39574f9` |
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
 | P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED — strengthened by live BGE evidence** | — |
-| P1-R Ranking / Reranking | **LIVE BGE VALIDATION COMPLETE — LIGHTWEIGHT TARGET EXISTS** | — |
+| P1-R Bounded Additive Document Recovery | FINAL FREEZE | `6503c77` |
 | P1-C Table Sibling / Evidence Neighborhood | **TARGET EXISTS / IMPLEMENTATION DEFERRED** | — |
 | INFRA-E1 Reproducible BGE-M3 Evaluation Environment | **PHASE 2 COMPLETE — P1-R UNBLOCKED** | — |
