@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `f592e9d`.
+Branch: `taeyoon` · Log current through `b1e31aa`.
 
 ---
 
@@ -2211,6 +2211,303 @@ infer their correctness merely from `embedding_version`.
 
 ---
 
+## Retrieval Vector-Availability Policy
+
+**Status:** **FINAL FREEZE**
+
+**Implementation commit:** `b1e31aa`
+
+> ### Scope of this freeze
+>
+> This freeze covers **strict vector-coverage enforcement for repository-owned
+> real-vector evaluation** and **production degradation observability through
+> existing `ThinkTrace.warnings`**.
+>
+> It does **not** make production requests fail closed on missing vectors,
+> change retrieval ranking, change P1-R, change Embedding Identity Hardening,
+> change readiness, change the database schema, or add a top-level API field.
+
+### Confirmed availability defect
+Before this change, exact model/version/dimension vector coverage could be zero,
+partial, or unavailable while production continued serving. Zero coverage was
+internally marked `no_coverage`, but partial coverage still reported
+`vector_status = "ok"` despite asymmetric hybrid ranking: the lexical lane ranks
+every candidate, while the vector lane can rank only already-embedded candidates.
+Already-embedded candidates therefore receive a structural two-lane advantage.
+
+The defect was reproduced reversibly against the corpus with an isolated
+temporary identity:
+
+| state | stored vectors | result |
+|---|---:|---|
+| full | **75,786** | healthy |
+| partial | **37,938** | candidate-scoped coverage **≈ 0.536** |
+| zero | **0** | `vector_status = no_coverage`; lexical fallback |
+
+At partial coverage, `vector_status` still read `"ok"`, approximately **91.2%**
+of served chunks came from the embedded subset, **H03 degraded from rank 2 to
+rank 5**, and **P01 lost the Gold evidence from top-10**. Partial coverage can
+therefore be more misleading than zero coverage: it appears healthy while
+comparing candidates asymmetrically.
+
+### Final policy — evaluation and production deliberately differ
+
+**Evaluation.** Any repository-owned evaluation claiming real-vector metrics
+must have complete candidate-scoped coverage under the exact configured
+model/version/dimensions. If coverage is incomplete, it **fails closed before
+metrics**.
+
+For every evaluated question:
+
+```
+embedded_candidate_count == eligible_candidate_count
+```
+
+and, when eligible candidates exist:
+
+```
+embedded_candidate_count > 0
+```
+
+Zero- or partial-coverage results must never be produced or labelled as
+real-vector/BGE metrics.
+
+**Production.** Production retains the existing fallback and availability
+semantics. It does not fail a request merely because coverage is incomplete;
+instead, degradation is made explicitly observable in `think_trace.warnings`.
+
+### Shared coverage policy
+`app/reasoning/vector_coverage_policy.py` is the shared semantic definition of
+coverage state used by serving and evaluation. It classifies the existing
+vector status and candidate-scoped coverage facts as:
+
+- `healthy`
+- `zero_coverage`
+- `partial_coverage`
+- `empty_vector_result`
+- `vector_unavailable`
+- `coverage_unknown`
+
+Existing hybrid `vector_status` values are **not renamed**. The shared policy
+prevents evaluation and serving from independently defining what complete
+coverage means.
+
+### Production trace and warning contract
+The public response retains exactly the existing five top-level keys:
+
+```
+question_id
+question
+retrieved_context
+think_trace
+answer
+```
+
+There is no sixth top-level key and no new `ThinkTrace` schema field.
+Degradation uses the existing `think_trace.warnings` list and repository warning
+token convention. Representative forms, matching implementation formatting,
+are:
+
+```
+vector_coverage_partial:provider=<provider>,candidates=<n>,embedded=<n>,ratio=<ratio>
+vector_coverage_absent:provider=<provider>,candidates=<n>,embedded=0,ratio=0
+vector_results_empty:provider=<provider>
+vector_unavailable:provider=<provider>,error=<ExceptionType>
+vector_coverage_unknown:provider=<provider>,error=<ExceptionType>
+```
+
+Errors expose only a sanitized exception type. They must never expose an
+exception message, DSN, password, host credential, or stack trace.
+
+### Serving-state contracts
+
+**Healthy full coverage.** When candidate-scoped exact-identity coverage is
+complete and vector retrieval succeeds, there is no degradation warning.
+Ranking, answer, and retrieval context remain unchanged; healthy full-coverage
+behaviour is equivalent to the pre-policy behaviour.
+
+**Partial coverage.** When
+`0 < embedded_count < candidate_count`, production continues existing hybrid
+retrieval. It does not remove vector results, force lexical-only operation, or
+fail the request, but it **must** emit `vector_coverage_partial` with candidate
+count, embedded count, and coverage ratio. Partial coverage must never be
+observationally indistinguishable from a healthy hybrid request.
+
+**Zero coverage.** When `candidate_count > 0` and `embedded_count == 0`, existing
+lexical fallback remains. `think_trace.warnings` must expose
+`vector_coverage_absent` with candidate count, embedded count `0`, and ratio
+`0`.
+
+**Empty vector search.** Vectors existing while vector search returns no rows is
+distinct from stored vectors being absent. Existing lexical fallback remains,
+and the warning is `vector_results_empty`; this state must not be classified as
+zero coverage.
+
+**Vector error.** Existing configuration remains authoritative:
+
+| `fallback_on_vector_error` | behaviour |
+|---|---|
+| `True` | serve existing fallback and emit sanitized `vector_unavailable` diagnostics |
+| `False` | raise as before |
+
+This freeze does not alter availability semantics.
+
+**Coverage lookup unavailable.** A failed coverage lookup is exposed as
+`vector_coverage_unknown`, with provider and sanitized exception type only.
+
+**Hash and diagnostic providers.** Intentional hash/dev retrieval is never
+labelled as a BGE failure. Provider identity is reported generically, and any
+coverage asymmetry is reported under the actual provider identity. Strict
+evaluation enforcement does not prohibit intentionally configured hash or
+lexical-only diagnostics. Under the evaluator policy, non-hash providers are
+treated as real-vector providers.
+
+### Evaluation enforcement
+Before this implementation, `scripts/bge_eval_preflight.py` contained
+`assert_vector_coverage`, but no real evaluation entry point called it. The
+existence of a helper was insufficient.
+
+Strictness is now mandatory through both:
+
+- shared enforcement inside `QueryPlanHybridEvaluator`;
+- a strict vector-executor wrapper for repository-owned direct metric scripts.
+
+Do not revert to optional caller discipline. The tracked direct evaluation
+entry points updated to use the strict path are:
+
+- `scripts/diagnose_p1r_additive.py`
+- `scripts/validate_p1r_additive_live.py`
+- `scripts/validate_p1r_global_domains.py`
+
+Shared evaluation/preflight infrastructure enforces the same policy. This does
+**not** mean arbitrary future external scripts are automatically protected;
+future repository-owned real-vector evaluation entry points must use the same
+strict enforcement path.
+
+### Production and evaluation implementation surface
+The exact tracked surface of implementation commit `b1e31aa` is:
+
+- `app/api/pipeline.py`
+- `app/reasoning/hybrid_evaluation.py`
+- `app/reasoning/vector_coverage_policy.py`
+- `scripts/bge_eval_preflight.py`
+- `scripts/diagnose_p1r_additive.py`
+- `scripts/validate_p1r_additive_live.py`
+- `scripts/validate_p1r_global_domains.py`
+- `tests/test_vector_availability_policy.py`
+
+No change to `app/retrieval/hybrid.py`, `app/retrieval/bge_m3.py`,
+`app/api/schemas.py`, health/readiness, or the database schema.
+
+### Verification performed
+
+**Controlled isolated `festival-verify` smoke:**
+
+| identity | stored rows | strict result | metrics |
+|---|---:|---|---|
+| full pinned | **75,786** | preflight **PASS** | allowed |
+| temporary partial | **37,938** | evaluation **FAIL** | blocked |
+| temporary zero | **0** | evaluation **FAIL** | blocked |
+
+The temporary identities were removed. Existing rows remained unchanged:
+**75,786 pinned BGE** and **132,768 hash**.
+
+**Production trace smoke:**
+
+| state | serving result | trace result |
+|---|---|---|
+| full | serves | no degradation warning |
+| partial | serves | `vector_coverage_partial` visible |
+| zero | serves lexical fallback | `vector_coverage_absent` visible |
+| vector error with fallback enabled | serves fallback | `vector_unavailable` visible |
+
+All responses retained exactly the existing five top-level API keys.
+
+**Ranking immutability.** This policy is observability/evaluation enforcement
+only. `app/retrieval/hybrid.py` remained **byte-unchanged**. Representative live
+comparisons across exchange, holding, major, and periodic produced identical
+`retrieved_context`, ordering, answer, and all non-warning trace fields. The
+only intended difference under degraded coverage is the warning.
+
+**Tests.** Implementation gate: **1598 OK, skipped 13**, with **20 new tests**.
+Coverage includes full-coverage health; partial and zero visibility; empty vector
+results as a distinct state; vector-error fallback and the fail-closed switch;
+hash/dev behaviour; strict evaluation under full, partial, and zero coverage;
+API top-level invariance; ranking immutability; count/ratio visibility; and error
+sanitization.
+
+**Mutations caught:** partial coverage reported healthy · zero warning removed ·
+evaluation coverage assertion skipped · partial metrics allowed · vector-error
+warning suppressed · healthy coverage incorrectly warned · hash incorrectly
+rejected · top-level API changed · ranking changed while observability was added
+· coverage counts or ratio omitted.
+
+### Relationship to other frozen contracts
+**P1-R remains FINAL FREEZE — bounded additive document recovery. Embedding
+Identity Hardening remains FINAL FREEZE.** This availability policy must not
+alter either contract.
+
+The concerns are complementary and distinct:
+
+| concern | question |
+|---|---|
+| Embedding Identity | Are these vectors really the configured model/revision? |
+| Vector Availability | Do the required vectors for this candidate set exist completely? |
+
+Both are required for trustworthy real-vector evaluation.
+
+**P0-D.2 remains activation-deferred.** This freeze does not change its status.
+
+### Readiness deliberately deferred
+The `/healthz` and readiness contracts are unchanged. Requiring complete corpus
+coverage at readiness could prevent rolling re-embedding or deployment. This
+freeze deliberately chooses **evaluation strictness plus serving
+observability**, not readiness enforcement.
+
+### Invariants that must remain true
+1. Repository-owned real-vector evaluation fails before metrics on zero or
+   partial exact-identity candidate coverage.
+2. Production continues its existing serving and fallback behaviour.
+3. Partial coverage is explicitly visible with candidate count, embedded count,
+   and ratio.
+4. Zero coverage, empty vector results, vector errors, and unknown coverage stay
+   distinguishable.
+5. Healthy full-coverage retrieval remains unchanged and unwarned.
+6. Error diagnostics expose exception type only.
+7. Existing hybrid `vector_status` values remain unchanged.
+8. Ranking, P1-R, Embedding Identity Hardening, readiness, schemas, and database
+   schema remain unchanged.
+
+**Negative invariants — never do any of these:** publish real-vector metrics
+with partial coverage · publish real-vector metrics with zero coverage · treat
+configured model identity as proof that vectors exist · make partial coverage
+look healthy · hide production vector degradation from the trace · expose raw
+vector exception messages or secrets · change ranking as part of availability
+observability · alter P1-R math · alter the Embedding Identity contract · add
+readiness gating under this freeze · add a sixth top-level API key · Gold-special
+case the availability policy.
+
+### Known residual issues NOT solved
+- `filtered_candidates` can mask an empty vector result; the classifier falls
+  back to coverage state.
+- A future custom evaluation script can bypass enforcement if it does not use
+  repository strict infrastructure.
+- Non-hash providers are treated as real-vector providers for evaluator policy.
+- An incomplete corpus may produce frequent warnings during long re-embedding.
+- Multi-document requests currently expose warning information from the primary
+  retrieval execution only.
+- No production readiness threshold is defined.
+
+### Reopen conditions
+- a repository-owned real-vector evaluator produces metrics under incomplete
+  exact-identity candidate coverage;
+- degraded production vector availability is not visible in the existing trace;
+- observability changes ranking, serving fallback, or a separately frozen
+  contract;
+- a later architecture cannot preserve this evaluation/production split.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -2233,3 +2530,4 @@ infer their correctness merely from `embedding_version`.
 | P1-C Table Sibling / Evidence Neighborhood | **TARGET EXISTS / IMPLEMENTATION DEFERRED** | — |
 | INFRA-E1 Reproducible BGE-M3 Evaluation Environment | **PHASE 2 COMPLETE — P1-R UNBLOCKED** | — |
 | Embedding Identity Hardening | FINAL FREEZE | `f592e9d` |
+| Retrieval Vector-Availability Policy | FINAL FREEZE | `b1e31aa` |
