@@ -29,6 +29,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from app.reasoning.holding_correction_finality import (
+    COLLAPSED,
+    UNPROVEN,
+    CollapseResult,
+    HoldingCorrectionFinality,
+    load_finality,
+)
 from app.reasoning.holding_report_relative import (
     ROLE_CHANGE,
     ROLE_CURRENT,
@@ -223,12 +230,30 @@ class HoldingReportIndex:
         identity: Mapping[str, Any] | None = None,
         complete: bool = False,
         correction_finality_available: bool = False,
+        correction_finality: HoldingCorrectionFinality | None = None,
     ) -> None:
         self.identity = dict(identity or {})
         self.complete = bool(complete)
         #: Whether a frozen source can prove which member of a correction chain
-        #: is final.  False means correction-bearing timelines decline.
+        #: is final.  False means correction-bearing timelines decline.  In-memory
+        #: callers set it to assert that the records they built are already
+        #: collapsed; the generated artifact never sets it, so production
+        #: finality arrives only as ``correction_finality`` below.
         self.correction_finality_available = bool(correction_finality_available)
+        #: P0-A's materialized holding correction groups.  Accepted only when it
+        #: describes this same corpus: a source built from another corpus may
+        #: name a final document this index does not hold, or miss a chain it
+        #: does, and either way it would collapse the wrong reports.
+        self.correction_finality: HoldingCorrectionFinality | None = None
+        self.correction_finality_status = "absent"
+        if correction_finality is not None:
+            if not correction_finality.usable:
+                self.correction_finality_status = "unusable"
+            elif not correction_finality.matches_identity(self.identity):
+                self.correction_finality_status = "identity_mismatch"
+            else:
+                self.correction_finality = correction_finality
+                self.correction_finality_status = "attached"
         by_pair: dict[tuple[str, str], list[HoldingReportRecord]] = {}
         seen: set[tuple[str, str]] = set()
         duplicates: list[str] = []
@@ -251,6 +276,16 @@ class HoldingReportIndex:
             items.sort(key=lambda r: (r.reference_date, r.doc_id, r.projection_chunk_id))
         self._by_pair = {pair: tuple(items) for pair, items in by_pair.items()}
         self.duplicate_chunk_ids = tuple(duplicates)
+        # Which timelines a document reports for.  A correction chain may only
+        # collapse a timeline when every member of it stays inside that one
+        # issuer and holder, and this is what proves it.
+        pairs_by_doc: dict[str, set[tuple[str, str]]] = {}
+        for pair, items in self._by_pair.items():
+            for record in items:
+                pairs_by_doc.setdefault(record.doc_id, set()).add(pair)
+        self._pairs_by_doc = {
+            doc: frozenset(pairs) for doc, pairs in pairs_by_doc.items()
+        }
 
     # ------------------------------------------------------------- inspection
     @property
@@ -319,36 +354,72 @@ class HoldingReportIndex:
 
         # Correction finality is resolved before dates are compared, because a
         # correction restating an earlier date arrives later: comparing first
-        # would rank the restatement as its own report.
-        if any(record.is_correction for record in candidates):
-            if not self.correction_finality_available:
-                return ReportSelection(
-                    CORRECTION_AMBIGUOUS, **base, candidates=candidates,
-                    detail={
-                        "correction_records": sum(
-                            1 for r in candidates if r.is_correction),
-                        "reason": "correction finality is not provable from a "
-                                  "frozen source for this corpus",
-                    },
-                )
+        # would rank the restatement as its own report.  Five chains in this
+        # corpus have exactly that shape, with unrelated reports filed in
+        # between, so the order of these two steps is not a formality.
+        collapse = self._collapse(candidates)
+        if not collapse.proven:
+            return ReportSelection(
+                CORRECTION_AMBIGUOUS, **base, candidates=candidates,
+                detail={
+                    "correction_records": sum(
+                        1 for r in candidates if r.is_correction),
+                    **dict(collapse.detail),
+                },
+            )
+        candidates = tuple(collapse.eligible)
+        # Recorded so a resolved answer can be audited back to the chain that
+        # removed the filings it is not based on.
+        collapsed = ({"superseded_doc_ids": list(collapse.superseded_doc_ids)}
+                     if collapse.superseded_doc_ids else {})
 
         if selector == SELECTOR_LATEST:
             newest = max(record.reference_date for record in candidates)
             matches = [r for r in candidates if r.reference_date == newest]
-            return self._unique(matches, base, candidates, {"reference_date": newest})
+            return self._unique(matches, base, candidates,
+                                {"reference_date": newest, **collapsed})
         if selector == SELECTOR_EXACT_REFERENCE_DATE:
             wanted = _normalize_date(reference_date)
             if not wanted:
                 return ReportSelection(NO_MATCH, **base, candidates=candidates,
                                        detail={"reason": "no reference date given"})
             matches = [r for r in candidates if r.reference_date == wanted]
-            return self._unique(matches, base, candidates, {"reference_date": wanted})
+            return self._unique(matches, base, candidates,
+                                {"reference_date": wanted, **collapsed})
         wanted = _normalize_date(receipt_date)
         if not wanted:
             return ReportSelection(NO_MATCH, **base, candidates=candidates,
                                    detail={"reason": "no receipt date given"})
         matches = [r for r in candidates if r.receipt_date == wanted]
-        return self._unique(matches, base, candidates, {"receipt_date": wanted})
+        return self._unique(matches, base, candidates,
+                            {"receipt_date": wanted, **collapsed})
+
+    def _collapse(self, candidates: Sequence[HoldingReportRecord]) -> CollapseResult:
+        """Remove the reports P0-A proved superseded, or refuse to proceed.
+
+        A timeline with no correction passes through untouched, so a corpus
+        without a finality source keeps answering every question it could
+        answer before.  A timeline *with* one is answered only when P0-A proved
+        which filing supersedes which -- never by ignoring the correction, which
+        is the one outcome that silently returns a withdrawn holding.
+        """
+
+        if self.correction_finality is not None:
+            return self.correction_finality.collapse(
+                candidates, pair_lookup=self._pairs_by_doc.get
+            )
+        if not any(record.is_correction for record in candidates):
+            return CollapseResult(COLLAPSED, tuple(candidates))
+        if self.correction_finality_available:
+            # The caller states these records are already the final ones.  Used
+            # by fixtures that build a collapsed timeline directly; the
+            # generated artifact never asserts it.
+            return CollapseResult(COLLAPSED, tuple(candidates))
+        return CollapseResult(UNPROVEN, detail={
+            "reason": "correction finality is not provable from a frozen source "
+                      "for this corpus",
+            "finality_source": self.correction_finality_status,
+        })
 
     @staticmethod
     def _unique(matches, base, candidates, detail) -> ReportSelection:
@@ -598,12 +669,19 @@ def execute_report_relative(
     return ReportExecution(status, selection, projection)
 
 
-def load_index(path: str | Path) -> HoldingReportIndex | None:
+def load_index(
+    path: str | Path, *, finality_path: str | Path | None = None
+) -> HoldingReportIndex | None:
     """Read a generated index, or ``None`` when there is nothing usable.
 
     A malformed or differently-versioned artifact yields ``None`` rather than a
     partially populated index: half an enumeration answers "latest" wrongly and
     confidently.
+
+    ``finality_path`` attaches P0-A's materialized correction groups.  A source
+    that is missing, malformed, or built from another corpus is simply not
+    attached, and correction-bearing timelines go on declining -- the one thing
+    that never happens is proceeding with the corrections ignored.
     """
 
     location = Path(path)
@@ -631,5 +709,8 @@ def load_index(path: str | Path) -> HoldingReportIndex | None:
         complete=bool(payload.get("complete")),
         correction_finality_available=bool(
             payload.get("correction_finality_available")
+        ),
+        correction_finality=(
+            load_finality(finality_path) if finality_path is not None else None
         ),
     )
