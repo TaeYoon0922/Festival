@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
+from app.reasoning import holding_report_relative
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -283,6 +284,18 @@ class QueryUnderstanding:
             task_type=task_type,
             routes=routes,
         )
+        # Which report the question speaks relative to, and which of that
+        # report's fields. Read from the period parser's own date decision so
+        # reference-date and receipt-date wording keep the axis it assigned.
+        report_relative = (
+            holding_report_relative.parse(
+                raw_query,
+                date_semantics=date_semantics,
+                has_exact_date=bool(period.from_date and period.from_date == period.to_date),
+            )
+            if "holding" in routes
+            else None
+        )
         basis, basis_evidence, basis_span = _basis_from_query(raw_query)
         parsed_correction, correction_confidence, correction_evidence = (
             _correction_from_query(raw_query)
@@ -391,6 +404,9 @@ class QueryUnderstanding:
                 "correction_intent": correction_intent,
                 "correction_intent_evidence": correction_intent_evidence,
                 "comparison_frame": comparison_frame,
+                "holding_report_relative": (
+                    report_relative.to_dict() if report_relative else None
+                ),
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
             },
         )
