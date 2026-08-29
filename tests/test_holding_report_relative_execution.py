@@ -296,14 +296,22 @@ class GatingTests(unittest.TestCase):
                 query_plan = plan(question)
                 intent = query_plan.evidence["holding_report_relative"]
                 self.assertEqual(intent["selector"], "selected_context")
-                self.assertIsNone(
-                    adapter(index_of(OLD, NEW)).adapt(
-                        question,
-                        query_plan,
-                        execution(query_plan, candidate(OLD)),
-                        routed_task_type="holding_event",
-                    )
+                outcome = adapter(index_of(OLD, NEW)).adapt(
+                    question,
+                    query_plan,
+                    execution(query_plan, candidate(OLD)),
+                    routed_task_type="holding_event",
                 )
+                # Phase 3 owns the question -- leaving it to ranked retrieval
+                # would answer it from whichever report happened to rank first.
+                # No report was named, so the execution is authoritatively
+                # empty rather than the latest one.
+                self.assertIsNotNone(outcome)
+                self.assertEqual(outcome.status, "unsupported_selector")
+                self.assertFalse(outcome.resolved)
+                self.assertEqual(outcome.chunks, ())
+                self.assertEqual(outcome.results, ())
+                self.assertFalse(outcome.report_execution.executable)
 
     def test_missing_reporter_and_comparison_firewall_stay_outside_phase_3(self) -> None:
         missing_question = f"{COMPANY} 최신 보고 보유주식수"
@@ -762,6 +770,49 @@ class RepositoryWiringTests(unittest.TestCase):
             "holding_report_relative_execution",
             payload["think_trace"]["stages"],
         )
+
+    def test_natural_language_selected_context_fails_closed(self) -> None:
+        question = f"{REPORTER} {COMPANY} 이번 보고 보유주식수"
+        query_plan = plan(question)
+        old = candidate(OLD)
+        new = candidate(NEW)
+        source = execution(
+            query_plan,
+            old,
+            new,
+            results=[ranked(old, 1), ranked(new, 2)],
+        )
+
+        class _Understanding:
+            def understand(self, _question, *, top_k):
+                self.top_k = top_k
+                return query_plan
+
+        class _Executor:
+            def execute(self, supplied):
+                self.plan = supplied
+                return source
+
+        pipeline = AnswerPipeline(
+            understanding=_Understanding(),
+            executor=_Executor(),
+            orchestrator=AgentOrchestrator(
+                report_relative_execution=adapter(index_of(OLD, NEW))
+            ),
+        )
+        payload = AnswerResponse.model_validate(
+            pipeline.answer("PHASE3-E2E-SELECTED", question)
+        ).model_dump()
+
+        # The ranked pool held both reports.  Neither may reach the public
+        # evidence, because "이번 보고" named no report for Phase 3 to select.
+        self.assertEqual(payload["retrieved_context"], [])
+        self.assertIn(
+            "holding_report_relative_execution",
+            payload["think_trace"]["stages"],
+        )
+        self.assertEqual(payload["think_trace"]["selected_evidence_count"], 0)
+        self.assertIs(payload["think_trace"]["answerable"], False)
 
 
 if __name__ == "__main__":

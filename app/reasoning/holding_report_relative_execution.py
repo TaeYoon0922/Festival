@@ -330,7 +330,10 @@ def _eligible(
     if routed_task_type != ROUTED_TASK_TYPE or not intent:
         return False
     selector = str(intent.get("selector") or "")
-    if selector == SELECTOR_SELECTED_CONTEXT or selector not in _EXECUTABLE_SELECTORS:
+    if (
+        selector not in _EXECUTABLE_SELECTORS
+        and selector != SELECTOR_SELECTED_CONTEXT
+    ):
         return False
     if not _has_report_relative_wording(question, intent):
         return False
