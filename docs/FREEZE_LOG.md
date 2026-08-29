@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `6503c77`.
+Branch: `taeyoon` · Log current through `f592e9d`.
 
 ---
 
@@ -2003,6 +2003,214 @@ Evaluation must remain fail-closed and must reject:
 
 ---
 
+## Embedding Identity Hardening — Pinned BGE-M3 Snapshot Verification
+
+**Status:** **FINAL FREEZE**
+
+**Frozen commit:** `f592e9d`
+
+> ### Scope of this freeze
+>
+> This covers **production `bge_m3_local` model snapshot identity verification
+> only**. It changes **none** of: retrieval ranking · P1-R · the vector
+> availability / lexical-fallback policy · P0-D · P1-A · the database schema ·
+> the public API.
+
+### Problem solved
+`app/retrieval/bge_m3.py` passed `revision=config.version` to `BGEM3FlagModel`.
+**FlagEmbedding 1.4.2 accepted that argument and demonstrably resolved `main`
+instead of the configured pinned revision.**
+
+| | |
+|---|---|
+| configured | `6892b95fed65c899a30896eb40d619ae284d0455` |
+| **actually resolved before the fix** | **`5617a9f61b028005a4858fdac845db406aefb181`** (main) |
+
+The crash observed under transformers 5.16.1 / torch 2.5.1 was **accidental
+protection** — `main` ships `pytorch_model.bin` and that runtime refuses
+`torch.load`. On a compatible runtime the wrong snapshot loads **silently**
+while every row is stamped with the configured `embedding_version`.
+
+### Final architecture / behavior
+Production loading now follows:
+
+```
+configured model + configured revision
+→ explicit HuggingFace snapshot resolution
+→ exact commit verification
+→ local required-file validation
+→ BGEM3FlagModel(verified_local_path)
+```
+
+FlagEmbedding **no longer receives the repository id** for production BGE
+loading, and **receives no `revision` argument** once the snapshot is resolved.
+It therefore has no opportunity to re-resolve to `main`.
+
+**Immutable revision.** `bge_m3_local` now rejects mutable revisions — `main`,
+branch names, tags, truncated hashes — and requires a full 40-character
+hexadecimal commit SHA. `embedding_version` is persisted as model identity and
+must describe one immutable snapshot. The current production revision is already
+a full SHA, so the known production configuration remains valid. **This is an
+intentional fail-closed compatibility break for mutable-revision configuration.**
+
+**Cache / offline contract:**
+
+| case | behaviour |
+|---|---|
+| A exact pinned usable snapshot cached | load **offline** |
+| B pin absent, network available | fetch exact pin, verify, load |
+| C pin absent, network unavailable | **fail clearly** |
+| D `main` cached, requested pin absent | **fail clearly; never substitute `main`** |
+| E requested snapshot missing required files | **fail clearly** |
+| F `main` and pin both cached | **pin selected deterministically** |
+
+Resolution is offline-first, so a warm verified cache needs no network.
+
+> ### Pattern-partial caches are valid
+>
+> An INFRA-E1 finding worth keeping: **a usable BGE dense-inference snapshot is
+> not a complete mirror of the HuggingFace repository.** The resolver validates
+> the files required for inference rather than demanding README,
+> `.gitattributes`, or the sparse/ColBERT heads. A pattern-partial cache matching
+> the INFRA-E1 cache shape is explicitly tested and accepted.
+
+**Required files** — `config.json`, `model.safetensors`, and **at least one local
+tokenizer payload** (`tokenizer.json` **or** `sentencepiece.bpe.model`). The
+tokenizer requirement is **deliberately stricter than the underlying loader's
+minimum**: without a local tokenizer payload, tokenizer resolution could occur
+from another source and reintroduce identity drift. `README`, `.gitattributes`,
+`sparse_linear.pt` and `colbert_linear.pt` are **not** required for dense
+inference.
+
+**safetensors is mandatory.** `pytorch_model.bin` does **not** satisfy the
+contract and there is **no `.bin` fallback** — the pinned revision already ships
+safetensors, loading stays deterministic, the unsafe `torch.load` path is
+avoided, and behaviour no longer depends on the runtime's handling of
+CVE-2025-32434.
+
+**Internal identity diagnostics.** `BgeM3LocalEmbeddingProvider` exposes
+`configured_model`, `configured_revision`, `resolved_model`, `resolved_revision`,
+`resolved_snapshot_path`, `requested_device`, `verified`. **Resolved values
+describe actual verified identity and must never simply echo the configured
+revision.** An injected or test encoder without verified provenance reports
+`verified = false` and `resolved_revision = None`. No public API contract
+changed.
+
+### Production files
+- `app/retrieval/bge_m3.py`
+
+Tests: `tests/test_bge_m3.py`, `tests/test_bge_m3_identity.py`
+
+No change to `app/retrieval/hybrid.py`, query understanding, query validation,
+query plan, the holding resolver, the answer composer, schemas/API, or the
+database schema.
+
+**Dependency decision** — `requirements-embedding.txt` is **unchanged**.
+`huggingface_hub` is already available through the embedding dependency stack,
+and this follows the existing `bge_m3.py` convention, which already imports
+transitively supplied `torch` directly. *Recorded as the current repository
+dependency policy, not as a universal best practice.*
+
+### Invariants that must remain true
+1. Revision must be an immutable full 40-character hexadecimal commit SHA.
+2. Explicitly resolve configured model + revision through the HuggingFace Hub.
+3. Verify the actual resolved snapshot commit equals the configured revision.
+4. Validate the required dense-inference files.
+5. Require `model.safetensors`.
+6. Pass the **verified local snapshot path** to `BGEM3FlagModel`.
+7. Do not delegate `revision` to FlagEmbedding after resolution.
+8. Never substitute `main` or another revision.
+9. Never fall back to `.bin`.
+10. Never fall back to hash or another model.
+11. Preserve dimensions, normalization and device behaviour.
+12. Expose configured and resolved identities **separately** in internal
+    diagnostics.
+
+**Negative invariants — never do any of these:** rely on FlagEmbedding's revision
+enforcement · pass the repository id directly after resolution · accept an actual
+revision differing from the configured one · substitute `main` · use a mutable
+revision for `bge_m3_local` · use a `.bin` fallback · claim configured identity
+as resolved identity without verification · silently load tokenizer or model
+assets from another revision · fall back to hash, another model, or another
+revision.
+
+### Verification performed
+
+**Isolated real-model smoke** — `BAAI/bge-m3` @
+`6892b95fed65c899a30896eb40d619ae284d0455`, production loader after the fix:
+
+| | |
+|---|---|
+| configured revision | `6892b95f…` |
+| resolved revision | **`6892b95f…`** |
+| `model.safetensors` | present |
+| `pytorch_model.bin` | absent in the pinned snapshot |
+| CUDA smoke | **PASS** |
+| output | 1024 dimensions · finite · L2 norms **1.0** |
+| repeat cosine | **1.0** |
+| different-text cosine | **≈ 0.337051** |
+
+**Production ↔ evaluation equivalence** — production loader vs the INFRA-E1
+verified loader over three fixed texts:
+
+| | |
+|---|---|
+| cosine similarity | **1.000000000000** |
+| max absolute difference | **0.000e+00** |
+
+Production and evaluation loaders now agree **exactly** on the frozen model
+identity.
+
+**Tests** — implementation gate **1578 OK, skipped 13**, including **23 new
+identity tests** covering: exact pin · wrong/`main` revision rejection · mutable
+revision rejection · warm-cache offline load · cold-cache network retry · missing
+pin · required-file failures · partial-cache acceptance · safetensors requirement
+· local-path delegation · resolved diagnostics · no fallback.
+
+> The existing BGE loader test was **intentionally updated** because it asserted
+> the old defective behaviour — repository id plus `revision` delegated to
+> FlagEmbedding. The replacement freezes the correct contract: **verified local
+> path passed, and no revision delegated.**
+
+**Mutations caught** — remove resolved-commit verification · pass repository id
+instead of the verified path · accept `main` · remove the safetensors requirement
+· fake resolved diagnostics using the configured revision · allow a mutable
+revision · delegate `revision` to FlagEmbedding · remove the tokenizer
+requirement.
+
+### Database identity
+The key remains `(chunk_id, embedding_model, embedding_version)`. **No schema
+change.** The **75,786** pinned BGE evaluation rows were produced by INFRA-E1's
+verified loader and are considered valid. **No evidence currently shows that any
+production database contains rows written by the old unverified loader.** Should
+such rows later be discovered, treat them as **suspect and re-embed** — do not
+infer their correctness merely from `embedding_version`.
+
+### Known residual issues NOT solved
+- Mutable-revision configurations now **fail closed**.
+- The broad exception around offline snapshot resolution may cause a network
+  retry before the final error is surfaced.
+- The tokenizer requirement is deliberately stricter than the underlying
+  loader's need.
+- Resolved metadata is attached to the encoder object internally.
+- Hardening applies **only to `bge_m3_local`**; remote providers resolve model
+  identity externally.
+
+> ### Retrieval Vector-Availability Policy — explicitly NOT part of this freeze
+>
+> Current behaviour is unchanged: when exact model/version/dimension vector
+> coverage is zero, diagnostics report `vector_status` and hybrid retrieval may
+> degrade to lexical-only. **This freeze does not make retrieval itself
+> fail-closed.** Carried forward as a separate follow-up: **Retrieval
+> Vector-Availability Policy**.
+
+### Reopen conditions
+- a demonstrated resolution of any revision other than the configured commit;
+- a snapshot accepted without the required dense-inference files;
+- a later architecture that cannot preserve this contract additively.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -2024,3 +2232,4 @@ Evaluation must remain fail-closed and must reject:
 | P1-R Bounded Additive Document Recovery | FINAL FREEZE | `6503c77` |
 | P1-C Table Sibling / Evidence Neighborhood | **TARGET EXISTS / IMPLEMENTATION DEFERRED** | — |
 | INFRA-E1 Reproducible BGE-M3 Evaluation Environment | **PHASE 2 COMPLETE — P1-R UNBLOCKED** | — |
+| Embedding Identity Hardening | FINAL FREEZE | `f592e9d` |
