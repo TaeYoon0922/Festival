@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `e8851d7`.
+Branch: `taeyoon` · Log current through `7a0921e`.
 
 ---
 
@@ -348,16 +348,23 @@ independently proven safe**.
 
 **Status:** Phase 1 **DIAGNOSIS COMPLETE — REOPEN TARGET EXISTS** ·
 **ACTIVATION DEFERRED — LIVE BGE-M3 SAFETY GATE FAILED (INFRA-E1)** ·
-Phase 3 **SAFETY RECHECK COMPLETE — KEEP DEFERRED** (`e8851d7`)
+Phase 3 **SAFETY RECHECK COMPLETE — KEEP DEFERRED** (`e8851d7`) ·
+**ACTIVATION DEFERRED — TARGET B H01/HX02 RETRIEVAL-RANKING RESIDUAL REMAINS**
 
-**Two independent blockers remain: the comparison-intent firewall and the
-H01/HX02 retrieval-ranking residuals.** See
-[Safety recheck — Phase 3](#safety-recheck--phase-3) below.
+**Target A — the comparison-intent firewall — is RESOLVED** by *Comparison
+Intent Firewall* (`7a0921e`, FINAL FREEZE), which did **not** activate P0-D.2.
+**Target B — the H01/HX02 retrieval-ranking residual — remains open and is now
+the sole blocker.** See [Safety recheck — Phase 3](#safety-recheck--phase-3)
+below.
 
-This is **not** a FINAL FREEZE. The **P0-D FINAL FREEZE above remains active**
-and **no production behavior has changed**. This entry records a target that was
-proven to exist, the narrow contract that would serve it, and the specific
-safety condition that keeps it switched off.
+This is **not** a FINAL FREEZE. **No P0-D.2 role resolution runs in
+production** — this entry records a target that was proven to exist, the narrow
+contract that would serve it, and the specific safety condition that keeps it
+switched off.
+
+Query understanding has since been reopened once, in a bounded way, for the
+Target A comparison firewall; that change is frozen separately below and is
+**not** part of this target.
 
 ### Target shape
 **PRIMARY_COMPANY_WITH_REPORTER** — exactly two distinct companies are named in
@@ -694,6 +701,14 @@ Other tested comparison phrasings remained ambiguous, which demonstrates the
 issue is an **incomplete comparison detector**, not a desired role-resolution
 behaviour. **This blocker is independent of the H01/HX02 retrieval blocker.**
 
+> **⚠ Corrected later — this blocker was UNDER-measured.** The harness behind
+> this section read a `QueryPlan` attribute that does not exist, so the
+> comparison signal it reported was always false. Re-measured against the real
+> `plan.comparison` during Target A diagnosis, **6 of the 10** required matrix
+> questions would have been stolen, not the one recorded here, and **17 of 20**
+> comparison constructions were unprotected. The scale is corrected in
+> *Comparison Intent Firewall* below; this section is kept as it was recorded.
+
 #### 7 · False-positive sweep
 
 **93 questions tested** — Gold60, both orderings of the corpus relation pairs,
@@ -710,6 +725,13 @@ and an unrelated pair control.
 | **false role resolution** | **1** |
 
 The single false resolution is the **company-comparison case** above.
+
+> **⚠ `false role resolution = 1` is an artefact of the harness bug.** The
+> sweep's comparison column never read the real field, so comparison precedence
+> was never exercised across these 93 questions. The corrected comparison-side
+> numbers are recorded in *Comparison Intent Firewall*. The remaining counts in
+> this table — trigger-eligible, role-resolved, ambiguous, Gold60 — do not
+> depend on that column and stand as recorded.
 
 **Word-order independence: PASS.** Issuer/reporter direction did not depend on
 mention order.
@@ -791,6 +813,12 @@ current comparison detection is **not complete enough to be a safe firewall**.
 
 P0-D.2 must **not** activate until the comparison-intent gap is repaired and
 **independently regression-tested**.
+
+> **RESOLVED by *Comparison Intent Firewall* (`7a0921e`, FINAL FREEZE).** The
+> gap is repaired and independently regression-tested, and the precedence
+> invariant *comparison firewall before `PRIMARY_COMPANY_WITH_REPORTER`* is now
+> pre-armed in the validator. **P0-D.2 activation remains deferred on Target
+> B.**
 
 #### 13 · Relation performance
 
@@ -880,8 +908,11 @@ RECHECK REQUIRED.**
 
 Current blockers:
 
-1. **comparison-intent firewall**
-2. **H01 / HX02 retrieval-ranking residuals**
+1. **comparison-intent firewall** — **RESOLVED.** See *Comparison Intent
+   Firewall* (`7a0921e`, FINAL FREEZE). Target A is closed, and closing it did
+   **not** activate P0-D.2.
+2. **H01 / HX02 retrieval-ranking residuals** — **STILL OPEN.** This is now the
+   sole remaining blocker, and diagnosis must precede any retrieval change.
 
 **HX04 Acquisition Semantics remains FINAL FREEZE.**
 
@@ -3370,6 +3401,397 @@ HX04 downstream blocker is cleared and left two unrelated blockers standing.
 
 ---
 
+## Comparison Intent Firewall — Cross-Company Frame Detection
+
+**Status:** FINAL FREEZE
+
+**Frozen commit:** `7a0921e`
+
+> ### ⚠ This freeze resolves **P0-D.2 Target A only**
+>
+> It does **not** activate P0-D.2. `PRIMARY_COMPANY_WITH_REPORTER` remains
+> **NOT production-active**, and P0-D.2 remains **ACTIVATION DEFERRED — TARGET B
+> H01/HX02 RETRIEVAL-RANKING RESIDUAL REMAINS**.
+
+### Reopen justification
+
+This was an **explicit bounded reopen of P0-D Query Understanding**, admitted
+under reopen ground (1) — a reproducible defect — not as a convenience feature.
+
+The whole cross-company detector was one condition:
+
+```
+len(companies) > 1  AND  (literal "비교" OR literal "대비")
+```
+
+It was defective in **both** directions.
+
+**False negatives** — genuine cross-company frames it did not recognize:
+`A와 B 중 어디가 …` · `A와 B 중 누가 …` · `A보다 B …` · `A와 B 각각 …` ·
+`A와 B의 차이 …` — and `차이` was not in the term list at all.
+
+**False positives** — genuine issuer/reporter temporal constructions it claimed,
+using the corpus's own wording `직전 보고 대비` / `직전보고 대비`.
+
+The second class was a **live production defect while P0-D.2 was inactive**: a
+holding fact request was being read as a company-versus-company comparison.
+
+### ⚠ Phase 3 measurement correction
+
+The P0-D.2 Phase 3 safety recheck recorded **false role resolution = 1**. That
+number was **under-measured**, and the historical record above is annotated
+rather than rewritten.
+
+`scripts/diagnose_p0d2_firewalls.py` read:
+
+```python
+getattr(plan, "company_comparison", False)
+```
+
+`QueryPlan` has **no `company_comparison` attribute** — the real signal is
+`plan.comparison`, whose `type` the validator compares against
+`"company_comparison"`. The `getattr` therefore always returned `False` and the
+comparison-precedence column never measured anything.
+
+Corrected, against the real field:
+
+| | Phase 3 recorded | corrected |
+|---|---|---|
+| required 10-question matrix | — | **6 / 10** would have been stolen |
+| 20-construction inventory | — | **17 / 20** unprotected by the old detector |
+| false role resolution | 1 | **6** on the required matrix |
+
+**This was discovered during Target A diagnosis, not during Phase 3.** Phase 3
+did not measure these correctly, and this entry does not claim it did.
+
+### Frozen semantic contract
+
+An **additive internal signal** on the channel `operation`, `periodic_intent`
+and `correction_intent` already use:
+
+```
+plan.evidence["comparison_frame"] ∈ { "cross_company", "uncertain", None }
+```
+
+**No new `QueryPlan` dataclass field. No new public API field.** `ThinkTrace`
+carries neither `comparison` nor `evidence`, so the response contract is
+unchanged.
+
+`comparison_frame` is a **firewall signal**. It is **not execution
+authorization** and never asserts that a comparison can be answered.
+
+#### `cross_company`
+The query structurally treats two or more canonical company mentions **jointly,
+comparatively, selectively, or enumeratively**, such that issuer/reporter
+reinterpretation would be unsafe.
+
+It does **not** mean a proven executor exists for that comparison. A newly
+detected frame is **not** promoted into `plan.comparison.type ==
+"company_comparison"` unless it already had that behaviour before this freeze.
+
+#### `uncertain`
+Multi-company comparative-looking language is present, but the parser **cannot
+safely determine** whether the question is a cross-company comparison, a
+temporal/event comparison, or an issuer/reporter request.
+
+**`uncertain` fails closed** against future P0-D.2 role reinterpretation and
+remains **AMBIGUOUS**. It is never forced into either role resolution or
+executable comparison semantics.
+
+Representative control:
+
+```
+하이브가 에스엠 주식을 더 많이 취득한 시점은 언제야?
+  → comparison_frame = uncertain
+  → AMBIGUOUS
+  → future P0-D.2 blocked
+```
+
+#### absent
+No comparison firewall evidence.
+
+### Structural detector
+
+Three helpers in `app/reasoning/query_understanding.py`:
+
+| helper | what it establishes |
+|---|---|
+| `_company_mentions` | where each canonical company is named, **in reading order** |
+| `_operator_binds_companies` | whether a comparison operator takes a company as its left operand |
+| `_companies_are_coordinated` | whether two mentions are joined into one operand list |
+
+Mention positions are **reconstructed from the text** because canonical
+`plan.companies` ordering is sorted, not textual.
+
+`대비` and `보다` are **postpositional** — Korean attaches them to the *left*
+operand — so they are resolved **structurally**:
+
+- a **company-bound** operator can indicate a cross-company frame;
+- a **temporal- or metric-bound** operator does not.
+
+Coordination is recognized for `와` · `과` · comma · `및` · middle dot · `랑` ·
+`이랑` · `하고`. **Bare whitespace is deliberately not coordination**, which is
+what preserves keyword-style issuer/reporter questions such as
+`에스엠 하이브 …`.
+
+Resolution order: fewer than two companies → absent · no comparative token →
+absent · fewer than two positioned mentions → `uncertain` · **structure**
+(bound operator, or coordination plus a frame) → `cross_company` · **temporal
+anchor** → absent · otherwise → `uncertain`. Structure outranks vocabulary, so
+`A와 B 중 어디가 변화가 커?` is a frame while `A에서 B의 지분율 변화` is not.
+
+### Relation independence
+
+Comparison semantics **must not** depend on issuer/reporter corpus relations ·
+support counts · relation direction · Gold labels · question IDs · company
+allowlists · `disclosure_route` · `task_type`.
+
+Classifier input is **only**: question text · canonical extracted companies ·
+textual structure. **Relation direction cannot influence `comparison_frame`.**
+
+### Existing `company_comparison` compatibility
+
+Explicit comparison behaviour using the literal `비교` is unchanged: it still
+yields `plan.comparison.type == "company_comparison"` and the prior
+`QueryValidator` behaviour.
+
+**This phase did not widen executable comparison.**
+
+| | |
+|---|---|
+| known cross-company frames protected by `comparison_frame` | **20 / 20** |
+| still executable as `company_comparison` | **5** — the same 5 as before |
+| recognized but remaining AMBIGUOUS | **15** |
+
+### Temporal false-positive fix
+
+| question | before | after |
+|---|---|---|
+| 에스엠에서 하이브가 **직전 보고 대비** 늘린 주식수 | `company_comparison` | `None` · frame `None` |
+| 에스엠 공시에서 하이브의 **직전보고 대비** 증감 | `company_comparison` | `None` · frame `None` |
+| 한화오션에서 한화에어로스페이스의 **직전 보고 대비** 지분율 | `company_comparison` | `None` · frame `None` |
+
+All three remain **eligible for a future issuer/reporter interpretation**
+instead of being misread as company-versus-company.
+
+> The fix is **structural** — the operator's left operand decides. It is **not**
+> the removal of `대비`.
+
+### Temporal / metric precedence
+
+Existing temporal semantics are preserved and remain authoritative:
+`before_after` · `year_over_year` · `period_comparison` · `trend`.
+
+Metric-ratio constructions remain non-company comparisons, including
+`자기자본 대비` and `매출액 대비`. No financial-metric dictionary was added.
+
+**Comparison words alone do not establish cross-company semantics.** `더`,
+`차이`, `대비` and `보다` are never interpreted without structure or context.
+
+### Cross-company frame coverage
+
+Generic **firewall** patterns protected: explicit `비교` · structurally
+company-bound `대비` · company `차이` · `중 어디가` · `중 누가` ·
+`중 어느 회사가` · `어느 쪽이` · explicit choice + `더 많다` · explicit choice +
+`더 높다` · `더 적다` / `더 낮다` under company structure · `A보다 B` ·
+`B보다 A` · `각각` · `각 회사` · `둘 다` · `양사` · reversed company order.
+
+These are **firewall** patterns. They do not imply the comparison planner can
+execute every phrase.
+
+### Issuer/reporter negative controls
+
+**10 genuine issuer/reporter questions across 5 corpus-linked pairs** —
+에스엠/하이브 · 한화오션/한화에어로스페이스 · 현대제철/기아 ·
+현대자동차/현대모비스 · 레인보우로보틱스/삼성전자:
+
+> **10 / 10 `comparison_frame = None`** · **10 / 10
+> `role_reinterpretation_blocked = false`**
+
+The **six historical P0-D.2 target questions** (H01, H02, HX01, HX02, HX03,
+HX04) likewise carry `comparison_frame = None` and are **not blocked** by
+Target A.
+
+**This is the critical result: Target A must not destroy the intended P0-D.2
+use case, and it does not.**
+
+### Validator firewall
+
+An additive defensive guard in the multi-company validation path of
+`app/reasoning/query_validation.py`. Existing `company_comparison` precedence
+remains **first**. For a future P0-D.2:
+
+```
+comparison_frame in { cross_company, uncertain }
+   → issuer/reporter reinterpretation MUST be blocked
+```
+
+P0-D.2 is unimplemented, so **this guard activates no role resolution today**.
+It pre-arms the precedence invariant:
+
+> **COMPARISON FIREWALL → BEFORE → PRIMARY_COMPANY_WITH_REPORTER**
+
+### Route independence
+
+`comparison_frame` classification is **route-independent**. The classifier
+consumes neither `disclosure_route` nor `task_type`; equivalent language is
+classified semantically before route-specific execution. Verified across
+**holding · periodic · major · exchange**.
+
+### Reversed order
+
+Company mention order does not change whether a frame exists. `A보다 B` /
+`B보다 A`, `A 대비 B` / `B 대비 A`, and `A와 B 중` / `B와 A 중` receive
+equivalent firewall semantics. **Corpus relation direction is irrelevant.**
+
+### Three-plus company safety
+
+The classifier may identify a frame for 3+ companies. P0-D.2 remains
+**independently ineligible** because its future contract requires **exactly
+two** companies. **No pair picking · no strongest-relation selection · no
+company dropping.**
+
+### 41-row diagnostic replay
+
+Rows: cross-company **20** · issuer/reporter **8** · temporal **8** ·
+single-company **5**. The three axes are recorded separately and **must not be
+collapsed into one boolean metric**.
+
+**Axis A — firewall classification**
+
+| rows | result |
+|---|---|
+| cross-company | **20 / 20** `cross_company` |
+| issuer/reporter | **8 / 8** `None` |
+| temporal | **7** `None` · **1** `uncertain` |
+| single-company | **5 / 5** `None` |
+
+**Axis B — executable `company_comparison`**
+
+| rows | result |
+|---|---|
+| cross-company | **5** — unchanged from baseline |
+| issuer/reporter | **0** |
+| temporal | **0** |
+| single-company | **0** |
+
+**Axis C — future P0-D.2 eligibility**
+
+| rows | result |
+|---|---|
+| cross-company | **0 / 20** eligible |
+| issuer/reporter | **8 / 8** eligible |
+| temporal | **7 / 8** eligible · **1** `uncertain` and blocked |
+| single-company | not relevant to a two-company contract |
+
+### Mutation gate
+
+**13 applied behavioural mutations, 13 caught.** Two initially survived and
+exposed a real test gap — `중 누가` and `작년보다` were not isolated by any
+assertion — which was closed by adding a predicate-free choice-frame control and
+a period-anchored-predicate control before the gate was declared passing.
+
+Representative protected mutations: remove `중 어디가` · remove `중 누가` ·
+remove `A보다 B` · classify `작년보다` as cross-company · classify every `더` as
+cross-company · classify every `차이` as cross-company · classify
+`직전 보고 대비` as `company_comparison` · promote every `comparison_frame` to
+executable `company_comparison` · treat `uncertain` as safe for issuer/reporter ·
+route-dependent classification · relation-direction-dependent classification ·
+company or question special-casing.
+
+Two mutations have **no source to mutate** and were gated **structurally**
+instead: the executable classifier contains no `relation`, `issuer`, `reporter`,
+`support`, `corp_code`, `disclosure_route`, `task_type`, `event_type` or Gold
+token, and neither production file contains a corpus company literal, a question
+ID, or the known failing sentence.
+
+### Implementation surface
+
+Files changed by `7a0921e`:
+
+- `app/reasoning/query_understanding.py`
+- `app/reasoning/query_validation.py`
+- `tests/test_query_understanding.py`
+- `tests/test_query_validation.py`
+
+No changes to `app/retrieval/`, `app/parsing/`, `app/generation/`,
+`app/reasoning/holding_*`, `app/reasoning/holding_reporter.py`, P1-R, BGE, the
+database schema, the public API schema, the relation artifact, or P0-C.
+
+### Test gate
+
+| | before | after |
+|---|---|---|
+| full suite | **1663 passed · 13 skipped · 1060 subtests** | **1686 passed · 13 skipped · 1139 subtests · 0 failed** |
+
+| focused / regression | result |
+|---|---|
+| `test_query_understanding.py` + `test_query_validation.py` | **80 passed · 99 subtests** |
+| planner · router · orchestrator · periodic | **88 passed** |
+| API · schema · pipeline | **155 passed** |
+
+Two warnings are present and are **not failures**: a Starlette/httpx deprecation
+warning and a pytest cache-directory permission warning.
+
+### Performance
+
+Comparison classification costs approximately **0.214 ms/query** measured over
+the alias table in use. **No retrieval call and no database call was added.**
+
+### Invariants that must remain true
+
+1. `comparison_frame` is derived from question text, canonical companies and
+   textual structure alone.
+2. Comparison operators are resolved by their left operand, not by vocabulary.
+3. Structure outranks comparison vocabulary.
+4. A temporal or metric anchor keeps a comparative question single-subject.
+5. `uncertain` fails closed and stays AMBIGUOUS.
+6. The comparison firewall precedes any issuer/reporter reinterpretation.
+7. Existing `company_comparison` behaviour and all temporal comparison payloads
+   are unchanged.
+
+**Negative invariants — never do any of these:** use relation direction to
+determine comparison semantics · use Gold labels or question IDs · use
+company-specific allowlists · classify every `더` as cross-company · classify
+every `차이` as cross-company · classify every `대비` as company comparison ·
+treat a temporal `보다` as company-to-company automatically · promote every
+`comparison_frame` into executable `company_comparison` · allow `uncertain`
+through a future issuer/reporter reinterpretation · run a future P0-D.2 before
+the comparison firewall · select a pair from 3+ companies · change retrieval or
+ranking as part of this freeze.
+
+### Known residual issues NOT solved
+
+- `uncertain` intentionally produces a clarification rather than a guess.
+- Fixtures are **constructed**; future Korean phrasing may be unseen.
+- The temporal-anchor vocabulary may not cover all future phrases.
+- Unknown alias surfaces degrade to `uncertain`.
+- The **15** newly protected comparison forms remain **AMBIGUOUS rather than
+  answered**.
+- This is a **correctness firewall, not a cross-company comparison execution
+  feature**.
+- **Target B — H01 / HX02 retrieval-ranking residual — remains unresolved and
+  independently blocks P0-D.2 activation.**
+
+### Next target
+
+**P0-D.2 Target B — H01 / HX02 Retrieval-Ranking Residual.**
+
+Required next action: **DIAGNOSIS FIRST.** Determine the exact first-loss stage
+before reopening any frozen retrieval contract. Do **not** assume P1-R, P1-B, a
+`top_k` increase, the reranker, or the holding resolver is the owner before
+measurement.
+
+### Reopen conditions
+
+- a genuine cross-company comparison reaching issuer/reporter reinterpretation;
+- an `uncertain` frame passing a future role resolution;
+- a genuine issuer/reporter question blocked by a comparison frame;
+- comparison classification shown to depend on relation data, route, or task
+  type.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -3379,7 +3801,7 @@ HX04 downstream blocker is cleared and left two unrelated blockers standing.
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
-| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED — SAFETY RECHECK REQUIRED** · Phase 3 recheck complete, **KEEP DEFERRED** — blockers: comparison-intent firewall, H01/HX02 retrieval-ranking residuals | — |
+| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED — TARGET B H01/HX02 RETRIEVAL-RANKING RESIDUAL REMAINS** · Target A comparison-intent firewall **RESOLVED** (`7a0921e`) | — |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
@@ -3394,4 +3816,5 @@ HX04 downstream blocker is cleared and left two unrelated blockers standing.
 | Embedding Identity Hardening | FINAL FREEZE | `f592e9d` |
 | Retrieval Vector-Availability Policy | FINAL FREEZE | `b1e31aa` |
 | HX04 Acquisition Semantics | FINAL FREEZE | `7393842` |
+| Comparison Intent Firewall (P0-D.2 Target A) | FINAL FREEZE | `7a0921e` |
 | Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
