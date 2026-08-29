@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `3f60329`.
+Branch: `taeyoon` · Log current through `da65d23`.
 
 ---
 
@@ -4208,6 +4208,87 @@ by that selected filing. It adds no P0-D.2 production wiring.
 
 ---
 
+## TARGET B.3 — Holding Correction Finality Artifact
+
+**Status: FINAL FREEZE** · Frozen implementation commit:
+`da65d232fb44ecec995119d17b8ae562147f3a59` (`da65d23`).
+
+### Freeze boundary
+
+This freeze is limited to the corpus-bound materialization of P0-A holding
+correction groups and their document-level attachment to the B.2 report index.
+It does not choose among multiple projections inside a final document, provide
+a deictic report context, or activate P0-D.2.
+
+| surface | frozen state |
+|---|---|
+| correction finality artifact groups | **20 resolved / 19 ambiguous groups** |
+| `latest` selection | **179/192 latest-resolvable pairs** |
+| unresolved correction timelines | **12 correction-bearing pairs remain fail-closed** as `correction_ambiguous` |
+| exact reference selection within latest-resolvable pairs | **5 exact-reference points remain projection-ambiguous** |
+| `selected_context` | **unsupported** |
+| P0-D.2 | **inactive**; `PRIMARY_COMPANY_WITH_REPORTER` is not production-active |
+
+The 192-pair latest result partitions into **179 `resolved` + 12
+`correction_ambiguous` + 1 `ambiguous`**. The last pair has a proven final
+document but several projections inside that document; B.3 preserves them all
+and does not invent a projection-level tie-breaker. The five exact-reference
+points are the additional projection-ambiguous points observed within the 179
+latest-resolvable pairs.
+
+### Frozen contract
+
+- P0-A remains the sole authority for correction-group status, final document,
+  resolution rule and confidence. B.3 does not rebuild or reinterpret the
+  correction graph.
+- A `resolved` group may remove only document ids P0-A proved superseded. An
+  `ambiguous` or `unresolved` group supersedes nothing.
+- Collapse is document-level and happens before `latest` or exact-date ordering.
+  Every projection belonging to the proven final document survives collapse.
+- A missing, incomplete, malformed, schema-incompatible or corpus-mismatched
+  finality artifact leaves correction-bearing pairs fail-closed.
+- Correction-free pair results are unchanged. Selector meanings, reference and
+  receipt date axes, and role projections remain B.2 contracts.
+- `selected_context` remains unsupported and this artifact adds no P0-D.2
+  production wiring.
+
+### Implementation surface
+
+Files changed by `da65d23`:
+
+- `app/reasoning/holding_correction_finality.py`
+- `app/reasoning/holding_report_index.py`
+- `data/corpus/holding_correction_finality.json`
+- `scripts/build_holding_correction_finality.py`
+- `tests/test_holding_correction_finality.py`
+
+### Focused test gate
+
+`tests/test_holding_correction_finality.py` plus
+`tests/test_holding_report_index.py`: **123 passed · 696 subtests · 0 failed**.
+The pytest cache-directory permission warning is not a test failure.
+
+### Known residual issues NOT solved
+
+- The **19 ambiguous groups** remain unproven.
+- The **12 correction-bearing pairs** remain `correction_ambiguous` and return
+  no selected report.
+- Projection-level ambiguity remains: one latest pair and five exact-reference
+  points inside otherwise latest-resolvable pairs still decline.
+- `selected_context` is unsupported, and P0-D.2 remains inactive.
+
+### Reopen conditions
+
+- an ambiguous P0-A group is collapsed or made to supersede a document;
+- a finality artifact is attached across a corpus-identity mismatch;
+- a final document's projections are silently reduced by position, value or
+  file order;
+- any of the 12 residual correction-bearing pairs stops failing closed without
+  new P0-A proof;
+- `selected_context` or P0-D.2 activation is inferred from this artifact freeze.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -4234,4 +4315,5 @@ by that selected filing. It adds no P0-D.2 production wiring.
 | HX04 Acquisition Semantics | FINAL FREEZE | `7393842` |
 | Comparison Intent Firewall (P0-D.2 Target A) | FINAL FREEZE | `7a0921e` |
 | TARGET B.2 — Reporter-Aware Deterministic Holding Report Index | FINAL FREEZE | `3f60329` |
+| TARGET B.3 — Holding Correction Finality Artifact | FINAL FREEZE | `da65d23` |
 | Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
