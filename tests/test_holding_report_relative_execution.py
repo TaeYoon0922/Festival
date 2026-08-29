@@ -279,15 +279,17 @@ class GatingTests(unittest.TestCase):
         self.assertIsNone(outcome)
 
     def test_acquisition_plus_latest_uses_the_frozen_field_firewall(self) -> None:
-        question = f"{REPORTER} {COMPANY} 최신 보고 취득 주식수"
-        query_plan = plan(question)
-        outcome = adapter(index_of(OLD, NEW)).adapt(
-            question,
-            query_plan,
-            execution(query_plan, candidate(OLD)),
-            routed_task_type="holding_event",
-        )
-        self.assertIsNone(outcome)
+        for wording in ("최신 보고 취득 주식수", "이번 보고 취득 주식수"):
+            with self.subTest(wording=wording):
+                question = f"{REPORTER} {COMPANY} {wording}"
+                query_plan = plan(question)
+                outcome = adapter(index_of(OLD, NEW)).adapt(
+                    question,
+                    query_plan,
+                    execution(query_plan, candidate(OLD)),
+                    routed_task_type="holding_event",
+                )
+                self.assertIsNone(outcome)
 
     def test_selected_context_is_never_promoted_to_latest(self) -> None:
         for wording in ("이번 보고 보유주식수", "직전보고 보유비율"):
@@ -312,6 +314,73 @@ class GatingTests(unittest.TestCase):
                 self.assertEqual(outcome.chunks, ())
                 self.assertEqual(outcome.results, ())
                 self.assertFalse(outcome.report_execution.executable)
+
+    def test_unbound_deictics_fail_closed_without_a_parsed_reporter(self) -> None:
+        for wording in (
+            "이번 보고 보유주식수",
+            "금번 보고서 보유주식수",
+            "직전보고 보유비율",
+            "이전 보고 보유비율",
+        ):
+            with self.subTest(wording=wording):
+                question = f"홍길동 {COMPANY} {wording}"
+                query_plan = plan(question)
+                intent = query_plan.evidence["holding_report_relative"]
+                self.assertIsNone(query_plan.reporter)
+                self.assertEqual(intent["selector"], "selected_context")
+
+                outcome = adapter(index_of(OLD, NEW)).adapt(
+                    question,
+                    query_plan,
+                    execution(query_plan, candidate(OLD), candidate(NEW)),
+                    routed_task_type="holding_event",
+                )
+
+                self.assertIsNotNone(outcome)
+                self.assertEqual(outcome.status, "unsupported_selector")
+                self.assertFalse(outcome.resolved)
+                self.assertEqual(outcome.chunks, ())
+                self.assertEqual(outcome.results, ())
+
+    def test_non_deictic_report_selectors_keep_the_frozen_contract(self) -> None:
+        cases = (
+            (f"{REPORTER} {COMPANY} 최신 보고 보유주식수", "latest", "current", NEW),
+            (f"{REPORTER} {COMPANY} 현재 기준 보유주식수", "latest", "current", NEW),
+            (
+                f"{REPORTER} {COMPANY} 2024년 5월 9일 보고서의 보유주식수",
+                "exact_reference_date",
+                "current",
+                OLD,
+            ),
+            (
+                f"{REPORTER} {COMPANY} 2024년 7월 2일 접수된 보고서의 보유주식수",
+                "exact_receipt_date",
+                "current",
+                OLD,
+            ),
+            (
+                f"{REPORTER} {COMPANY} 최신 보고의 직전보고 보유비율",
+                "latest",
+                "previous",
+                NEW,
+            ),
+        )
+        for question, selector, role, selected in cases:
+            with self.subTest(question=question):
+                query_plan = plan(question)
+                intent = query_plan.evidence["holding_report_relative"]
+                self.assertEqual(intent["selector"], selector)
+                self.assertEqual(intent["projection_role"], role)
+
+                outcome = adapter(index_of(OLD, NEW)).adapt(
+                    question,
+                    query_plan,
+                    execution(query_plan, candidate(OLD), candidate(NEW)),
+                    routed_task_type="holding_event",
+                )
+
+                self.assertTrue(outcome.resolved)
+                self.assertEqual(outcome.selected_chunk_id, selected.projection_chunk_id)
 
     def test_missing_reporter_and_comparison_firewall_stay_outside_phase_3(self) -> None:
         missing_question = f"{COMPANY} 최신 보고 보유주식수"
@@ -813,6 +882,53 @@ class RepositoryWiringTests(unittest.TestCase):
         )
         self.assertEqual(payload["think_trace"]["selected_evidence_count"], 0)
         self.assertIs(payload["think_trace"]["answerable"], False)
+
+    def test_unparsed_reporter_deictics_never_expose_ranked_evidence(self) -> None:
+        for wording in (
+            "이번 보고 보유주식수",
+            "금번 보고서 보유주식수",
+            "직전보고 보유비율",
+            "이전 보고 보유비율",
+        ):
+            with self.subTest(wording=wording):
+                question = f"홍길동 {COMPANY} {wording}"
+                query_plan = plan(question)
+                old = candidate(OLD)
+                new = candidate(NEW)
+                source = execution(
+                    query_plan,
+                    old,
+                    new,
+                    results=[ranked(old, 1), ranked(new, 2)],
+                )
+
+                class _Understanding:
+                    def understand(self, _question, *, top_k):
+                        return query_plan
+
+                class _Executor:
+                    def execute(self, supplied):
+                        return source
+
+                pipeline = AnswerPipeline(
+                    understanding=_Understanding(),
+                    executor=_Executor(),
+                    orchestrator=AgentOrchestrator(
+                        report_relative_execution=adapter(index_of(OLD, NEW))
+                    ),
+                )
+                payload = AnswerResponse.model_validate(
+                    pipeline.answer("PHASE3-DEICTIC", question)
+                ).model_dump()
+
+                self.assertIsNone(query_plan.reporter)
+                self.assertEqual(payload["retrieved_context"], [])
+                self.assertIn(
+                    "holding_report_relative_execution",
+                    payload["think_trace"]["stages"],
+                )
+                self.assertEqual(payload["think_trace"]["selected_evidence_count"], 0)
+                self.assertIs(payload["think_trace"]["answerable"], False)
 
 
 if __name__ == "__main__":

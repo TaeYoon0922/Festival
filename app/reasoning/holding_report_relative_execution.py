@@ -337,13 +337,22 @@ def _eligible(
         return False
     if not _has_report_relative_wording(question, intent):
         return False
+    if not requested or ACQUISITION_REQUEST_FIELDS.intersection(requested):
+        return False
+    if selector == SELECTOR_SELECTED_CONTEXT:
+        # An unbound deictic selector can be rejected without resolving an
+        # issuer/reporter pair.  Requiring that identity first lets the intent
+        # fall through whenever the reporter parser cannot name an otherwise
+        # explicit holder, after which ordinary retrieval can answer from an
+        # arbitrary report.  Entering the authoritative lane here performs no
+        # selection: ``execute_report_relative`` preserves selected_context as
+        # unsupported and therefore exposes empty evidence.
+        return True
     if not _single_issuer(plan) or not str(getattr(plan, "reporter", "") or "").strip():
         return False
     if _comparison_firewall(plan):
         return False
     if str(getattr(plan, "correction_policy", "") or "") in _EXPLICIT_CORRECTION_FILTERS:
-        return False
-    if not requested or ACQUISITION_REQUEST_FIELDS.intersection(requested):
         return False
     return True
 
