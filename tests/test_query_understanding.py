@@ -1005,6 +1005,268 @@ class QueryRouterTests(unittest.TestCase):
         )
         self.assertEqual(reranked[0].chunk_id, "quarter")
 
+def _and(name: str) -> str:
+    """Attach 와/과 to a company name, picking the form Korean requires."""
+
+    last = name[-1]
+    if "가" <= last <= "힣" and (ord(last) - 0xAC00) % 28:
+        return name + "과"
+    return name + "와"
+
+
+class ComparisonFrameTests(unittest.TestCase):
+    """The cross-company comparison firewall.
+
+    ``comparison_frame`` says whether a question relates several named
+    companies to each other.  It is a firewall signal: it decides whether
+    reading one company as a disclosure issuer and another as its reporter
+    would be unsafe, and says nothing about whether a cross-company comparison
+    can be executed.  Companies appear here only as test data -- the classifier
+    itself carries no company, question, or corpus-relation special case.
+    """
+
+    #: Companies from the corpus universe.  Any pair would do; the rule must
+    #: not depend on which one, nor on any relation between them.
+    A = "한화오션"
+    B = "한화에어로스페이스"
+    C = "에스엠"
+    D = "하이브"
+
+    def understanding(self) -> QueryUnderstanding:
+        return QueryUnderstanding(
+            {name: {name} for name in (self.A, self.B, self.C, self.D)}
+        )
+
+    def frame(self, query: str):
+        return self.understanding().understand(query).evidence["comparison_frame"]
+
+    def comparison(self, query: str):
+        return self.understanding().understand(query).comparison
+
+    # ------------------------------------------------------------------ cross
+    def test_cross_company_frames_are_recognized(self) -> None:
+        for query in (
+            # explicit comparison nouns
+            f"{_and(self.A)} {self.B} 보유 비율 비교",
+            f"{_and(self.A)} {self.B} 보유 주식수를 비교해줘",
+            f"{_and(self.A)} {self.B}의 지분율 차이는 얼마야?",
+            # the operator taking companies as its operands
+            f"{self.A} 대비 {self.B} 지분율",
+            f"{self.A}보다 {self.B}의 보유 비율이 높아?",
+            # choice frames
+            f"{_and(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
+            f"{_and(self.A)} {self.B} 중 누가 보유 비율이 더 높아?",
+            f"{_and(self.A)} {self.B} 중 어느 회사가 보유 비율이 더 적어?",
+            f"{_and(self.A)} {self.B} 어느 쪽이 보유 비율이 더 낮아?",
+            f"{_and(self.A)} {self.B} 중 더 많이 보유한 곳은 어디야?",
+            # per-company enumeration
+            f"{_and(self.A)} {self.B} 각각 보유 주식수 알려줘",
+            f"{self.A}, {self.B}의 보유 비율을 각 회사 별로 알려줘",
+            f"{_and(self.A)} {self.B} 둘 다 보유 주식수 알려줘",
+            f"{_and(self.A)} {self.B} 양사 보유 비율 알려줘",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.frame(query), "cross_company")
+
+    def test_frame_does_not_depend_on_company_order(self) -> None:
+        for template in (
+            "{x} {y} 중 어디가 보유 비율이 높아?",
+            "{x} {y} 중 누가 보유 비율이 높아?",
+            "{x} {y} 각각 보유 비율",
+            "{x} {y}의 지분율 차이",
+        ):
+            with self.subTest(template=template):
+                self.assertEqual(
+                    self.frame(template.format(x=_and(self.A), y=self.B)),
+                    self.frame(template.format(x=_and(self.B), y=self.A)),
+                )
+        for template in ("{x}보다 {y}의 보유 비율이 높아?", "{x} 대비 {y} 보유 비율"):
+            with self.subTest(template=template):
+                self.assertEqual(
+                    self.frame(template.format(x=self.A, y=self.B)),
+                    self.frame(template.format(x=self.B, y=self.A)),
+                )
+
+    def test_frame_ignores_the_route_the_question_takes(self) -> None:
+        """One construction, four routes, one classification."""
+
+        for query in (
+            f"{_and(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
+            f"{_and(self.A)} {self.B} 중 어디가 2023년 매출액이 더 많아?",
+            f"{_and(self.A)} {self.B} 중 어디가 유상증자 규모가 더 커?",
+            f"{_and(self.A)} {self.B} 중 어디가 공급계약 금액이 더 커?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.frame(query), "cross_company")
+
+    def test_three_companies_still_produce_a_frame(self) -> None:
+        self.assertEqual(
+            self.frame(f"{self.A}, {self.B}, {self.C} 중 보유 비율이 가장 높은 회사는?"),
+            "cross_company",
+        )
+
+    def test_a_choice_frame_alone_is_enough(self) -> None:
+        """No comparative predicate, so the choice frame is the only evidence.
+
+        Without this the frame could be recognized purely from ``더 높아``, and
+        losing a choice marker would go unnoticed.
+        """
+
+        for query in (
+            f"{_and(self.A)} {self.B} 중 어디가 보유 비율이 높아?",
+            f"{_and(self.A)} {self.B} 중 누가 보유 비율이 높아?",
+            f"{_and(self.A)} {self.B} 중 어느 회사가 보유 비율이 높아?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.frame(query), "cross_company")
+
+    def test_a_period_reference_alone_resolves_a_comparative_predicate(self) -> None:
+        """Two companies and ``더 많이``, held non-comparative by the period.
+
+        The companies are not coordinated and the operator does not take one as
+        its operand, so the period reference is the only thing establishing
+        that this compares one holding across time rather than two companies.
+        """
+
+        for query in (
+            f"{self.C}에서 {self.D}가 작년보다 더 많이 보유한 주식수",
+            f"{self.C}에서 {self.D}의 보유 주식수가 작년보다 늘었어?",
+            f"{self.C}에서 {self.D}의 지분율이 지난해보다 높아졌어?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.frame(query))
+
+    # -------------------------------------------------------------- uncertain
+    def test_comparative_predicate_without_structure_fails_closed(self) -> None:
+        """Comparative wording between two companies that nothing resolves.
+
+        This reads as temporal, but carries no period reference to prove it and
+        no structure making the two companies operands of one comparison.
+        Neither reading is safe, so the frame declines rather than guessing.
+        """
+
+        self.assertEqual(
+            self.frame(f"{self.D}가 {self.C} 주식을 더 많이 취득한 시점은 언제야?"),
+            "uncertain",
+        )
+
+    # ----------------------------------------------------------------- absent
+    def test_a_single_company_never_produces_a_frame(self) -> None:
+        for query in (
+            f"{self.C} 보유 비율이 더 높아진 이유는?",
+            f"{self.C} 보유 주식수의 전년 대비 차이는?",
+            f"{self.C}의 이전 공시와 비교해줘",
+            f"{self.C} 보유 주식수 추이 비교",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.frame(query))
+
+    def test_period_bound_comparison_is_not_a_company_frame(self) -> None:
+        """A comparison anchored to a period compares one subject over time."""
+
+        for query in (
+            f"{self.C}에서 {self.D}의 보유 비율 전년 대비 차이",
+            f"{self.C}에서 {self.D}가 직전 보고 대비 늘린 주식수",
+            f"{self.C} 공시에서 {self.D}의 직전보고 대비 증감",
+            f"{self.A}에서 {self.B}의 직전 보고 대비 지분율",
+            f"{self.C}의 {self.D} 보유 비율이 이전보다 높아졌어?",
+            f"{self.C}에서 {self.D} 지분 변동 전후 비교",
+            f"{self.C}에서 {self.D}의 지분율 변화가 얼마나 커?",
+            f"{self.C} {self.D} 보유 주식수 추이",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.frame(query))
+
+    def test_issuer_reporter_questions_are_never_framed(self) -> None:
+        """The controls that must survive the firewall untouched."""
+
+        for query in (
+            f"{self.C}에서 {self.D}가 보유한 주식수 알려줘",
+            f"{self.C} 공시에서 {self.D}의 보유 비율 알려줘",
+            f"{self.D}가 {self.C} 주식을 얼마나 보유하고 있어?",
+            f"{self.C}에 대한 {self.D}의 지분 변동 알려줘",
+            f"{self.A}에서 {self.B}가 보유한 주식수 알려줘",
+            f"{self.B}가 {self.A} 주식을 얼마나 보유하고 있어?",
+            f"{self.C} {self.D} 이번 보고 보유 주식수와 비율",
+            f"{self.C} {self.D} 직전보고 보유주식 수 비율",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.frame(query))
+
+    def test_juxtaposed_companies_are_not_coordinated(self) -> None:
+        """Two names side by side name a subject; they do not compare it."""
+
+        self.assertIsNone(self.frame(f"{self.C} {self.D} 보유주식 증가 수량 증가 비율"))
+
+    # ------------------------------------- the operator, resolved structurally
+    def test_the_operator_is_read_from_its_left_operand(self) -> None:
+        """``대비``/``보다`` attach to what precedes them, so that decides."""
+
+        self.assertEqual(self.frame(f"{self.A} 대비 {self.B} 보유 비율"), "cross_company")
+        self.assertIsNone(self.frame(f"{self.A}에서 {self.B}의 직전 보고 대비 지분율"))
+        self.assertEqual(
+            self.frame(f"{self.A}보다 {self.B}가 보유 비율이 높아?"), "cross_company"
+        )
+        self.assertIsNone(self.frame(f"{self.C}의 보유 주식수가 작년보다 얼마나 늘었어?"))
+
+    # -------------------------------------- the frame does not widen execution
+    def test_a_frame_does_not_make_a_question_an_executable_comparison(self) -> None:
+        """Recognizing the frame must not promote it to ``company_comparison``.
+
+        These questions stay exactly as unanswerable as they were.  The firewall
+        records only that they must not be reinterpreted as one company plus a
+        role; it claims no ability to answer them.
+        """
+
+        for query in (
+            f"{_and(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
+            f"{_and(self.A)} {self.B} 중 누가 보유 비율이 더 높아?",
+            f"{_and(self.A)} {self.B} 각각 보유 주식수 알려줘",
+            f"{self.A}보다 {self.B}의 보유 비율이 높아?",
+            f"{_and(self.A)} {self.B}의 지분율 차이는 얼마야?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.frame(query), "cross_company")
+                self.assertIsNone(self.comparison(query))
+
+    def test_explicit_comparison_keeps_its_existing_reach(self) -> None:
+        for query in (
+            f"{_and(self.A)} {self.B} 보유 비율 비교",
+            f"{_and(self.A)} {self.B} 보유 주식수를 비교해줘",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.comparison(query)["type"], "company_comparison")
+
+    def test_period_bound_operator_is_no_longer_a_company_comparison(self) -> None:
+        """The defect this reopen fixes.
+
+        ``직전 보고 대비`` is how the corpus itself words a change against the
+        previous filing.  Reading it as a comparison between the two companies
+        the question names made a holding fact request look like something it
+        is not.
+        """
+
+        for query in (
+            f"{self.C}에서 {self.D}가 직전 보고 대비 늘린 주식수",
+            f"{self.C} 공시에서 {self.D}의 직전보고 대비 증감",
+            f"{self.A}에서 {self.B}의 직전 보고 대비 지분율",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.comparison(query))
+
+    def test_temporal_comparison_payloads_are_unchanged(self) -> None:
+        self.assertEqual(
+            self.comparison(f"{self.C}에서 {self.D} 지분 변동 전후 비교"),
+            {"type": "before_after"},
+        )
+        self.assertEqual(
+            self.comparison(f"{self.C}에서 {self.D}의 보유 비율 전년 대비 차이"),
+            {"type": "year_over_year"},
+        )
+        self.assertEqual(
+            self.comparison(f"{self.C}에서 {self.D}의 지분율 변화가 얼마나 커?"),
+            {"type": "trend"},
+        )
 
 if __name__ == "__main__":
     unittest.main()

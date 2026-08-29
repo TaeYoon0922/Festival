@@ -333,6 +333,129 @@ class UnsupportedAndOutOfScopeTests(unittest.TestCase):
         self.assertIs(result.state, QueryState.OUT_OF_SCOPE)
         self.assertEqual(result.issues, ("period_out_of_corpus",))
 
+def _and_particle(name: str) -> str:
+    """Attach 와/과 to a company name, picking the form Korean requires."""
+
+    last = name[-1]
+    if "가" <= last <= "힣" and (ord(last) - 0xAC00) % 28:
+        return name + "과"
+    return name + "와"
+
+
+class ComparisonFirewallPrecedenceTests(unittest.TestCase):
+    """A comparison frame decides the company slot before any role rule can.
+
+    No issuer/reporter reinterpretation exists yet, so the visible outcome of
+    these questions is the ambiguity they already had.  What is asserted here
+    is the precedence such a rule would have to obey, and the recorded decision
+    it would have to read.
+    """
+
+    #: Corpus companies used as data.  Neither the classifier nor the guard may
+    #: special-case any of them, nor any relation between them.
+    A = "한화오션"
+    B = "한화에어로스페이스"
+    C = "에스엠"
+    D = "하이브"
+
+    def validated(self, query: str):
+        scope = CorpusScope.repository_default()
+        assert scope is not None
+        understanding = QueryUnderstanding(
+            scope.company_aliases(), company_resolver=_resolver
+        )
+        validator = QueryValidator(
+            corpus_scope=scope, multi_document_planner=MultiDocumentPlanner()
+        )
+        return validator.validate(understanding.understand(query))
+
+    def test_a_cross_company_frame_blocks_role_reinterpretation(self) -> None:
+        for query in (
+            f"{_and_particle(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
+            f"{_and_particle(self.A)} {self.B} 중 누가 보유 비율이 더 높아?",
+            f"{_and_particle(self.A)} {self.B} 각각 보유 주식수 알려줘",
+            f"{self.A}보다 {self.B}의 보유 비율이 높아?",
+            f"{_and_particle(self.A)} {self.B}의 지분율 차이는 얼마야?",
+            f"{_and_particle(self.B)} {self.A} 중 어디가 보유 비율이 더 높아?",
+        ):
+            with self.subTest(query=query):
+                result = self.validated(query)
+                self.assertIs(result.state, QueryState.AMBIGUOUS)
+                self.assertTrue(result.plan.evidence["role_reinterpretation_blocked"])
+
+    def test_an_unresolved_comparative_frame_fails_closed(self) -> None:
+        result = self.validated(
+            f"{self.D}가 {self.C} 주식을 더 많이 취득한 시점은 언제야?"
+        )
+
+        self.assertEqual(result.plan.evidence["comparison_frame"], "uncertain")
+        self.assertIs(result.state, QueryState.AMBIGUOUS)
+        self.assertTrue(result.plan.evidence["role_reinterpretation_blocked"])
+
+    def test_issuer_reporter_questions_are_not_blocked(self) -> None:
+        """The firewall must cost the target questions nothing.
+
+        These name two companies in a disclosure-about-a-holder shape.  They
+        stay ambiguous today because nothing resolves the roles yet -- but the
+        firewall must not be the reason.
+        """
+
+        for query in (
+            f"{self.C}에서 {self.D}가 보유한 주식수 알려줘",
+            f"{self.C} 공시에서 {self.D}의 보유 비율 알려줘",
+            f"{self.D}가 {self.C} 주식을 얼마나 보유하고 있어?",
+            f"{self.C}에 대한 {self.D}의 지분 변동 알려줘",
+            f"{self.A}에서 {self.B}가 보유한 주식수 알려줘",
+            f"{self.B}가 {self.A} 주식을 얼마나 보유하고 있어?",
+            f"{self.C} {self.D} 이번 보고 보유 주식수와 비율",
+            f"{self.C}에서 {self.D}가 직전 보고 대비 늘린 주식수",
+        ):
+            with self.subTest(query=query):
+                result = self.validated(query)
+                self.assertIs(result.state, QueryState.AMBIGUOUS)
+                self.assertFalse(result.plan.evidence["role_reinterpretation_blocked"])
+
+    def test_an_explicit_comparison_still_resolves(self) -> None:
+        result = self.validated("삼성전자와 삼성중공업의 2025년 매출액을 비교해줘")
+
+        self.assertIs(result.state, QueryState.RESOLVED)
+        self.assertEqual(len(result.plan.companies), 2)
+        self.assertEqual(len(result.plan.corp_codes), 2)
+
+    def test_a_frame_does_not_make_a_comparison_answerable(self) -> None:
+        """The firewall recognizes these; it does not start executing them."""
+
+        for query in (
+            f"{_and_particle(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
+            f"{_and_particle(self.A)} {self.B} 각각 보유 주식수 알려줘",
+        ):
+            with self.subTest(query=query):
+                result = self.validated(query)
+                self.assertIsNone(result.plan.comparison)
+                self.assertIs(result.state, QueryState.AMBIGUOUS)
+                self.assertFalse(result.retrieval_allowed)
+
+    def test_three_companies_stay_ambiguous_without_pair_selection(self) -> None:
+        result = self.validated(
+            f"{self.A}, {self.B}, {self.C} 중 어디가 보유 주식수가 더 많아?"
+        )
+
+        self.assertIs(result.state, QueryState.AMBIGUOUS)
+        self.assertEqual(len(result.plan.companies), 3)
+        self.assertTrue(result.plan.evidence["role_reinterpretation_blocked"])
+
+    def test_the_guard_reads_the_frame_and_not_the_route(self) -> None:
+        for query in (
+            f"{_and_particle(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
+            f"{_and_particle(self.A)} {self.B} 중 어디가 2023년 매출액이 더 많아?",
+            f"{_and_particle(self.A)} {self.B} 중 어디가 유상증자 규모가 더 커?",
+        ):
+            with self.subTest(query=query):
+                result = self.validated(query)
+                self.assertEqual(
+                    result.plan.evidence["comparison_frame"], "cross_company"
+                )
+                self.assertTrue(result.plan.evidence["role_reinterpretation_blocked"])
 
 if __name__ == "__main__":
     unittest.main()

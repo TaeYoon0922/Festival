@@ -138,6 +138,22 @@ _VAGUE_OPERATION_PATTERNS = (
 )
 _VAGUE_TASK_PATTERNS = ("재무지표", "재무 수치")
 
+#: Comparison frames that forbid reinterpreting a multi-company slot as one
+#: company plus a role.  ``uncertain`` is included deliberately: an unresolved
+#: comparative frame fails closed, because guessing wrong here turns a
+#: clarification into a confident answer about the wrong subject.
+_COMPARISON_FIREWALL_FRAMES = ("cross_company", "uncertain")
+
+
+def _comparison_firewall_engaged(plan: QueryPlan) -> bool:
+    """Whether a comparison frame forbids role reinterpretation of the slot.
+
+    Query understanding owns the semantics; this only reads the signal, so the
+    validator does not grow a second comparison-language parser.
+    """
+
+    return plan.evidence.get("comparison_frame") in _COMPARISON_FIREWALL_FRAMES
+
 
 @dataclass(frozen=True)
 class ClarificationOption:
@@ -655,6 +671,22 @@ class QueryValidator:
                 and plan.comparison.get("type") == "company_comparison"
             ):
                 return _deterministic_slot("company", list(plan.companies)), None, plan
+            # This is the branch a future issuer/reporter rule would extend, by
+            # reinterpreting one of two companies as the reporter of the other.
+            # Decide here, ahead of it, whether it is allowed to: a question
+            # that relates its companies to each other -- or that uses
+            # comparative language no structure resolves -- is not a
+            # single-issuer question, and stealing it would replace a
+            # clarification with a confidently narrower answer. The decision is
+            # recorded rather than acted on because no such rule exists yet;
+            # today the slot is ambiguous either way.
+            plan = replace(
+                plan,
+                evidence={
+                    **plan.evidence,
+                    "role_reinterpretation_blocked": _comparison_firewall_engaged(plan),
+                },
+            )
             return (
                 QuerySlot(
                     "company",
