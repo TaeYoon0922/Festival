@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `7a0921e`.
+Branch: `taeyoon` · Log current through `c3d5929`.
 
 ---
 
@@ -349,13 +349,16 @@ independently proven safe**.
 **Status:** Phase 1 **DIAGNOSIS COMPLETE — REOPEN TARGET EXISTS** ·
 **ACTIVATION DEFERRED — LIVE BGE-M3 SAFETY GATE FAILED (INFRA-E1)** ·
 Phase 3 **SAFETY RECHECK COMPLETE — KEEP DEFERRED** (`e8851d7`) ·
-**ACTIVATION DEFERRED — TARGET B H01/HX02 RETRIEVAL-RANKING RESIDUAL REMAINS**
+Target B **FIRST-LOSS DIAGNOSIS COMPLETE — BENCHMARK TARGET CONTEXT DEPENDENT** ·
+**ACTIVATION DEFERRED**
 
 **Target A — the comparison-intent firewall — is RESOLVED** by *Comparison
 Intent Firewall* (`7a0921e`, FINAL FREEZE), which did **not** activate P0-D.2.
-**Target B — the H01/HX02 retrieval-ranking residual — remains open and is now
-the sole blocker.** See [Safety recheck — Phase 3](#safety-recheck--phase-3)
-below.
+**Target B — historically labelled the H01/HX02 retrieval-ranking residual —
+has completed first-loss diagnosis.** Both questions have measurable ranking
+and final-top-k symptoms, but their frozen 2024 targets depend on report context
+that the standalone questions do not provide. See *Target B — H01 / HX02
+First-Loss Diagnosis* below. This result does **not** activate P0-D.2.
 
 This is **not** a FINAL FREEZE. **No P0-D.2 role resolution runs in
 production** — this entry records a target that was proven to exist, the narrow
@@ -656,6 +659,20 @@ This confirms the HX04 blocker is no longer preventing P0-D.2 activation.
 
 #### 5 · H01 / HX02 retrieval blocker
 
+> ### ⚠ Corrected by the later Target B first-loss diagnosis
+>
+> This subsection is retained as the historical Phase 3 record. Its broad
+> **retrieval blocker** ownership has been superseded: both questions do have
+> ranking/top-k symptoms, but neither standalone question uniquely identifies
+> the frozen 2024 filing.
+>
+> Phase 3 also misstated HX02's intended values. The actual frozen HX02 target
+> is the **previous-report** pair **`2,098,811 / 8.81%`** inside
+> `holding_20240314001102`, table `t0012`. The pair
+> **`2,967,759 / 12.45%`** is the filing's **current** holdings and is **not
+> HX02-equivalent**. The original wording below is preserved rather than
+> silently rewritten.
+
 **H01 and HX02 remain unresolved.** Both intended chunks are **structurally
 present in the retrieval candidate set**. Therefore this is:
 
@@ -914,7 +931,310 @@ Current blockers:
 2. **H01 / HX02 retrieval-ranking residuals** — **STILL OPEN.** This is now the
    sole remaining blocker, and diagnosis must precede any retrieval change.
 
+> **Corrected later by Target B first-loss diagnosis.** Item 2 records the
+> status at Phase 3. Diagnosis is now complete and classifies both frozen 2024
+> targets as **GOLD_TARGET_CONTEXT_DEPENDENT**. No retrieval change is
+> authorized from these questions alone.
+
 **HX04 Acquisition Semantics remains FINAL FREEZE.**
+
+### Target B — H01 / HX02 First-Loss Diagnosis
+
+**Status:** **DIAGNOSIS COMPLETE — BENCHMARK TARGET SEMANTICS REQUIRE
+REDEFINITION.**
+
+**Decision:** **BENCHMARK TARGET CONTEXT DEPENDENT.** This is a diagnosis and
+documentation result, **not** a retrieval fix. P0-D.2 remains production-inactive.
+
+#### Diagnosis baseline
+
+| | |
+|---|---|
+| branch | `taeyoon` |
+| diagnosis HEAD | `c3d59294dca045ba31cf662f99c66183eb9613e2` |
+| full-suite baseline | **1686 passed · 13 skipped · 1139 subtests** |
+| tracked worktree | clean |
+| embedding provider | `bge_m3_local` |
+| model | `BAAI/bge-m3` |
+| revision | `6892b95fed65c899a30896eb40d619ae284d0455` |
+| dimensions / device | 1024 / `cuda` |
+| per-question role-sim vector coverage | **725 / 725 · 1.000** |
+
+#### Correct Phase 3 role simulation and baseline
+
+The corrected harness begins from the validator-normalized two-company plan,
+reconstructs the corpus-supported direction, and rewrites the roles together:
+
+```
+companies  = ("에스엠",)
+corp_codes = ("00260930",)
+reporter   = "하이브"
+```
+
+The singular `company` / `corp_code` fields are recomputed consistently. The
+six controls carry `comparison_frame = None` and
+`role_reinterpretation_blocked = false`; the frozen Comparison Intent Firewall
+does not block them.
+
+The production-faithful simulation reproduces the Phase 3 document ranks
+exactly:
+
+| question | intended document rank |
+|---|---:|
+| H01 | **MISS** |
+| H02 | 1 |
+| HX01 | 2 |
+| HX02 | **MISS** |
+| HX03 | 7 |
+| HX04 | 1 |
+
+There is **no retrieval drift from Comparison Intent Firewall**.
+
+#### HX02 Gold correction
+
+Phase 3 misstated HX02's expected values. The actual frozen definition is:
+
+| | |
+|---|---|
+| query | `에스엠 하이브 직전보고 보유주식 수 비율` |
+| document | `holding_20240314001102` |
+| table | `t0012` |
+| previous shares | **`2,098,811`** |
+| previous ratio | **`8.81%`** |
+
+Those are the **previous-report fields** inside the 2024-03-14 filing.
+`2,967,759 / 12.45%` are its **current holdings** and are not HX02-equivalent.
+Historical text is annotated above rather than erased.
+
+#### H01 semantic finding
+
+H01 asks:
+
+```
+에스엠 하이브 이번 보고 보유 주식수와 비율
+```
+
+The frozen Gold binds this wording to the 2024-03-14 filing and
+`2,967,759 / 12.45%`. Query understanding emits
+`period_type = latest_holding`, but the standalone question contains no report
+date, receipt number, document id or other filing anchor. The frozen holding
+selector does not execute `latest_holding`; labels such as current/latest/first/
+last remain inert for event selection.
+
+The same-reporter timeline contains materially different states:
+
+| reference date | current shares / ratio |
+|---|---|
+| 2023-02-09 | `4,392,368 / 18.45%` |
+| 2023-03-13 | `4,626,185 / 19.43%` |
+| 2023-04-03 | `2,098,811 / 8.81%` |
+| 2024-03-14 | `2,967,759 / 12.45%` |
+| 2024-06-04 | `2,212,237 / 9.38%` |
+| 2025-06-05 | `0 / 0%` |
+
+The public wording therefore does **not** uniquely identify the frozen filing.
+
+> **H01 classification: `GOLD_TARGET_CONTEXT_DEPENDENT`.** If “이번 보고” is
+> defined as the latest same-reporter report in the active corpus, the frozen
+> 2024 target is also stale.
+
+#### HX02 semantic finding
+
+HX02 asks:
+
+```
+에스엠 하이브 직전보고 보유주식 수 비율
+```
+
+Its frozen values are the fields previous to the 2024-03-14 report: previous
+date 2023-04-03, `2,098,811 / 8.81%`. The question does not identify which
+current report “직전보고” is relative to. Relative to the latest HYBE report,
+the applicable previous state would instead be the 2024-06-04 state,
+`2,212,237 / 9.38%`.
+
+> **HX02 classification: `GOLD_TARGET_CONTEXT_DEPENDENT`.** The frozen 2024
+> filing is supplied by benchmark construction, not by the standalone wording.
+
+#### Technical first loss — recorded separately from semantic ownership
+
+Both intended structured projections remain in the scored candidate set and
+fall outside the normal final top 10:
+
+| rank / score field | H01 `holding_report` | HX02 `holding_report` |
+|---|---:|---:|
+| lexical rank | outside top 50 | 13 |
+| vector rank | 12 | 13 |
+| fusion rank | 37 | 15 |
+| production legacy final rank | 37 | 15 |
+| preservation / bounded rank | 23 | 15 |
+| normal top 10 | MISS | MISS |
+
+The measurable pipeline first-loss stage for both is **FINAL TOP-K
+TRUNCATION**. That is a technical symptom, not the primary correctness owner:
+the desired 2024 target is not semantically selected by either question.
+
+#### Query-representation secondary finding
+
+When issuer and reporter are both recognized as companies, both company spans
+are removed from the retrieval text. After role simulation:
+
+```
+H01 lexical_query  = "이번 보고 보유 주식수와 비율"
+HX02 lexical_query = "직전보고 보유주식 수 비율"
+```
+
+The known reporter `하이브` remains only in `plan.reporter`. It is absent from
+the lexical query, vector query, backend filters and deterministic ranking
+score, while the candidate scope contains filings for many SM reporters. HX02
+also asks for a ratio, but its current requested-field representation contains
+share fields rather than an explicit previous-ratio field.
+
+This is a real **QUERY_REPRESENTATION** asymmetry, but it is not implementation
+authorization.
+
+#### Reporter-in-query ablation — diagnostic only
+
+Adding reporter text back to the retrieval query produced:
+
+| question | result |
+|---|---|
+| H01 | intended document MISS → rank 7, but fully answer-equivalent `2,967,759 / 12.45%` evidence was still not recovered |
+| HX02 | intended document MISS → rank 6; `2,098,811 / 8.81%` recovered |
+| HX03 | document rank 7 → 3 |
+| HX01 | remained successful |
+| H02 | remained successful |
+| HX04 | remained successful; `2024-03-07 / 868,948` acquisition semantics preserved |
+
+Reporter representation is materially relevant, especially for HX02, but the
+ablation does not provide the missing report anchor and is **not** an approved
+production fix.
+
+#### Deterministic ranking and P1-R audits
+
+Correct and incorrect `holding_report` projections repeatedly receive the same
+deterministic score, approximately **0.382667**. Current deterministic features
+do not distinguish reporter or execute `latest_holding` chronology, so generic
+holding-state questions depend heavily on lexical/vector relevance.
+
+P1-R behaved according to its FINAL FREEZE contract:
+
+- H01 triggered crowding recovery, which appended the highest-ranked unseen
+  document already in the scored tail; the intended target was much deeper.
+- HX02 had no crowding trigger.
+
+P1-R is **not reopened**: no cap widening, second append, replacement or score
+change is authorized.
+
+Top-k sensitivity remains diagnostic only:
+
+| cutoff | H01 | HX02 |
+|---:|---:|---:|
+| 5 | miss | miss |
+| 10 | miss | miss |
+| 11 | miss | miss |
+| 15 | miss | hit |
+| 20 | miss | hit |
+| 30 | miss | hit |
+| 50 | hit | hit |
+
+No global `top_k` increase is proposed.
+
+#### Real downstream and forced-evidence validation
+
+The production orchestration path — structured holding coverage,
+`EvidenceBuilder`, `HoldingEventResolver`, event selection and composer — was
+used, not an EvidenceBuilder-only approximation. HX04 reproduced the frozen
+control:
+
+| | |
+|---|---|
+| matching event count | **1** |
+| acquisition date | **`2024-03-07`** |
+| acquired shares | **`868,948`** |
+
+Force-including the intended structured projections allowed the real resolver
+to construct H01 `2,967,759 / 12.45%` and HX02 previous fields
+`2,098,811 / 8.81%`. Both events matched the reporter constraint. The queries
+nevertheless remained non-unique because neither supplies an exact report
+selector.
+
+Therefore **EVENT_CONSTRUCTION, REPORTER_MATCHING and COMPOSER are not owners**.
+
+#### Owner taxonomy
+
+| question | primary owner | secondary contributors |
+|---|---|---|
+| H01 | **GOLD_TARGET_CONTEXT_DEPENDENT** | semantic target ambiguity · query representation · lexical/vector/fusion ranking and top-k · P1-R scope |
+| HX02 | **GOLD_TARGET_CONTEXT_DEPENDENT** | semantic target ambiguity · reporter and requested-ratio representation · lexical/vector/fusion ranking and top-k · P1-R scope |
+
+Not owners: candidate generation · metadata exclusion · vector coverage ·
+structured event construction · reporter matching · composer.
+
+#### Historical “ranking blocker” correction
+
+The Phase 3 / Target B label **H01 / HX02 retrieval-ranking residual** was too
+broad. Both questions exhibit measurable ranking and top-k symptoms, but the
+frozen 2024 target itself depends on absent document context. Consequently, no
+ranking change may be authorized from these questions alone. Historical wording
+is retained with correction annotations for comparability.
+
+#### Benchmark redefinition options — design only
+
+**Option A — explicit report anchors.** For example:
+
+```
+H01: 2024년 3월 14일 보고서 기준 에스엠에 대한 하이브의 보유 주식수와 비율
+HX02: 2024년 3월 14일 보고서의 직전 보유주식 수와 비율
+```
+
+**Option B — define a public latest-same-reporter holding-report contract** and
+regenerate expected answers from the active corpus.
+
+**Option C — supply explicit document/report context** through evaluation or
+API context.
+
+No option is selected or implemented here. Historical Gold60 definitions must
+not be silently mutated: a later correction should use a versioned semantic
+validation set or Gold revision so historical retrieval baselines remain
+comparable.
+
+#### Next production design question and reporter target sequencing
+
+The next question is **not** “How do we force H01/HX02 Gold into top 10?” It is:
+
+> What report-relative semantics should the public agent implement for
+> `이번 보고`, `현재`, `직전보고` and `직전 보고 대비` after issuer and
+> reporter are resolved?
+
+A bounded reporter-aware query-representation target may exist because a
+reporter that is itself a recognized company disappears from lexical/vector
+input. It must be evaluated **only after** report-relative semantics are
+defined. Reporter propagation remains unauthorized.
+
+#### Negative invariants after diagnosis
+
+- Never force the 2024 Gold merely because the benchmark expects it.
+- Never treat `latest_holding` as 2024-specific.
+- Never use Gold document ids in ranking.
+- Never increase `top_k` to solve a semantically unanchored query.
+- Never reopen P1-R or P1-B from these cases alone.
+- Never confuse HX02 current and previous holdings.
+- Never treat `2,967,759 / 12.45%` as HX02 evidence.
+- Never implement reporter propagation before report semantics are defined.
+- Never activate P0-D.2 from this diagnosis.
+- Never silently rewrite historical Gold60.
+
+#### Status after Target B diagnosis
+
+| | status |
+|---|---|
+| Target A — Comparison Intent Firewall | **FINAL FREEZE** |
+| Target B — H01/HX02 First-Loss | **DIAGNOSIS COMPLETE — BENCHMARK TARGET CONTEXT DEPENDENT** |
+| decision | **BENCHMARK TARGET SEMANTICS NEED CORRECTION / REDEFINITION** |
+| P0-D.2 | **ACTIVATION DEFERRED** |
+| `PRIMARY_COMPANY_WITH_REPORTER` | **production-inactive** |
+
+This diagnosis does **not** establish that P0-D.2 is safe.
 
 ---
 
@@ -3410,8 +3730,9 @@ HX04 downstream blocker is cleared and left two unrelated blockers standing.
 > ### ⚠ This freeze resolves **P0-D.2 Target A only**
 >
 > It does **not** activate P0-D.2. `PRIMARY_COMPANY_WITH_REPORTER` remains
-> **NOT production-active**, and P0-D.2 remains **ACTIVATION DEFERRED — TARGET B
-> H01/HX02 RETRIEVAL-RANKING RESIDUAL REMAINS**.
+> **NOT production-active**, and P0-D.2 remains **ACTIVATION DEFERRED**. Target B
+> first-loss diagnosis is complete and classifies the frozen H01/HX02 targets as
+> benchmark-context-dependent; no ranking fix is authorized.
 
 ### Reopen justification
 
@@ -3770,17 +4091,17 @@ ranking as part of this freeze.
   answered**.
 - This is a **correctness firewall, not a cross-company comparison execution
   feature**.
-- **Target B — H01 / HX02 retrieval-ranking residual — remains unresolved and
-  independently blocks P0-D.2 activation.**
+- **Target B — H01 / HX02 first-loss diagnosis is complete: the frozen targets
+  are benchmark-context-dependent. P0-D.2 remains deferred pending
+  report-relative semantics.**
 
-### Next target
+### Next production design question
 
-**P0-D.2 Target B — H01 / HX02 Retrieval-Ranking Residual.**
-
-Required next action: **DIAGNOSIS FIRST.** Determine the exact first-loss stage
-before reopening any frozen retrieval contract. Do **not** assume P1-R, P1-B, a
-`top_k` increase, the reranker, or the holding resolver is the owner before
-measurement.
+Define report-relative semantics for `이번 보고`, `현재`, `직전보고`, and
+`직전 보고 대비` before changing reporter retrieval representation. Only after
+those semantics are explicit may a bounded reporter-aware query-representation
+target be considered. Do not reopen P1-R, P1-B, top-k, or broad ranking work from
+the frozen H01/HX02 benchmark targets.
 
 ### Reopen conditions
 
@@ -3801,7 +4122,7 @@ measurement.
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
-| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED — TARGET B H01/HX02 RETRIEVAL-RANKING RESIDUAL REMAINS** · Target A comparison-intent firewall **RESOLVED** (`7a0921e`) | — |
+| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED · TARGET B H01/HX02 FIRST-LOSS DIAGNOSIS COMPLETE — BENCHMARK TARGET CONTEXT DEPENDENT** · Target A comparison-intent firewall **RESOLVED** (`7a0921e`) · no activation work authorized | `c3d5929` |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
