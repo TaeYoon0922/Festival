@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `b1e31aa`.
+Branch: `taeyoon` · Log current through `7393842`.
 
 ---
 
@@ -517,6 +517,17 @@ The gate requires the intended evidence in the final top-10 **for all six**. It
 **FAILED** because H01 and HX02 miss.
 
 **P0-D.2 therefore remains TARGET EXISTS · ACTIVATION DEFERRED.**
+
+> **Update after HX04 Acquisition Semantics FINAL FREEZE (`7393842`).** One
+> downstream blocker recorded against this target has been removed: HX04 failed
+> *after* role resolution, which already produced the correct issuer and
+> reporter, and that failure is now fixed in the holding acquisition lane.
+>
+> **This changes nothing here.** `PRIMARY_COMPANY_WITH_REPORTER` is **not**
+> production-active, and P0-D.2 remains **ACTIVATION DEFERRED — SAFETY RECHECK
+> REQUIRED**. The live ranking safety gate that deferred activation has not been
+> re-measured, and the HX04 result above was obtained through the bounded role
+> *simulation*, not through production P0-D, which still declines the question.
 
 ### Safety-positive findings
 Despite those ranking misses:
@@ -2703,6 +2714,323 @@ recorded as a follow-up only and is neither diagnosed nor changed here.
 
 ---
 
+## HX04 Acquisition Semantics — Same-Row Holding Acquisition Events
+
+**Status:** **FINAL FREEZE**
+
+**Implementation commit:** `7393842`
+
+> ### Scope of this freeze
+>
+> This freeze covers **additive holding acquisition-event semantics only**: two
+> internal event fields, the query language that requests them, a deterministic
+> same-row acquisition classifier, and their rendering.
+>
+> It does **not** activate P0-D.2 globally. **PRIMARY_COMPANY_WITH_REPORTER is
+> not production-active.** It changes none of: retrieval ranking · P1-R ·
+> Embedding Identity Hardening · the Retrieval Vector-Availability Policy ·
+> `QueryValidator` multi-company activation · issuer/reporter role resolution ·
+> reporter normalization · P1-A4 exact-date matching · P1-A5 ambiguity and
+> citation rules · the database schema · the public API schema.
+
+### The original failure
+Question: `에스엠 하이브 풋옵션 행사 주식 취득일과 취득 수량`
+
+Intended evidence — `holding_20240314001102`, table `t0019`, **row 2**:
+
+| field | value |
+|---|---|
+| 변동일 | `2024-03-07` |
+| 취득/처분방법 | `풋옵션권리행사배정에따른주식취득(+)` |
+| 변동전 | `2,098,811` |
+| 증감 | `868,948` |
+| 변동후 | `2,967,759` |
+| 취득/처분단가 | `120,000` |
+
+Before this change the intended disclosure was retrieved at **rank 1** and the
+`holding_detail_row` projection existed, yet `requested_fields = ()`, so P1-A3
+coverage stopped at `no_requested_fields`, the projection was never promoted, the
+raw `t0019` chunk remained standalone evidence, holding-event groups were `0`,
+constructed and matching events were `0 / 0`, and the answer was
+`insufficient_evidence`.
+
+**Retrieval was not the failure.**
+
+### Root cause
+The holding-event ontology had no representation for an acquisition date or an
+acquired quantity, and requested-field extraction did not recognize `취득일` or
+`취득 수량`.
+
+The obvious repair — globally aliasing `취득일 → reference_date` and
+`취득 수량 → change_shares` — was **rejected as unsafe**. `reference_date` is
+projection-specific: on a detail row it carries the transaction date, on a
+`holding_report` projection it carries the report or base date. HX04 makes the
+difference concrete — the acquisition happened on `2024-03-07` while the filing's
+report and receipt date is `2024-03-14`. Acquisition semantics therefore require
+**same-row transaction proof**, not an alias.
+
+### Frozen acquisition contract
+Additive internal fields: **`acquisition_date`**, **`acquired_shares`**.
+
+Existing fields keep their exact prior meaning and are **not** reinterpreted:
+`reference_date`, `report_date`, `receipt_date`, `before_shares`,
+`change_shares`, `after_shares`, `before_ratio`, `after_ratio`, `change_ratio`.
+
+A holding detail row may supply acquisition-specific fields **only** when all of
+the following hold together:
+
+1. it is a compatible holding detail/change row;
+2. the **same row's** transaction method explicitly proves acquisition;
+3. the **same row's** share delta is positive;
+4. the **same row's** required date and quantity exist;
+5. direct provenance exists.
+
+**Transaction semantics and numeric sign must agree.** Neither alone is proof.
+
+### Query language
+Implemented acquisition-specific recognition:
+
+| field | recognized wording |
+|---|---|
+| `acquisition_date` | `취득일`; `취득 일자` as matched by the implemented pattern |
+| `acquired_shares` | `취득 수량` · `취득수량` · `취득 주식수` · `취득주식수` |
+
+Existing phrases retain their prior canonical meaning: `변동일 → reference_date`,
+`기준일 →` existing reference-date semantics, `보유주식수 → after_shares`,
+`증감 주식수 → change_shares`, `보유비율 → after_ratio`.
+
+**Generic date and quantity language did not become acquisition-specific.**
+Wording without the acquisition noun reaches neither field.
+
+### Acquisition classification
+Deterministic and vocabulary-driven rather than a list of known strings. A row is
+acquisition-compatible only when acquisition semantics such as `취득` / `매수` are
+explicitly present, buy-**right** wording alone is not treated as acquisition,
+disposal semantics (`처분` · `매도` · `양도` and similar) are absent, the source
+direction marker is positive, and the same-row share delta is positive.
+
+| representative accepted | representative rejected traps |
+|---|---|
+| `풋옵션권리행사배정에따른주식취득(+)` · `무상신주취득(+)` · `유상신주취득(+)` · `신규상장(무상취득)(+)` · `신규상장(유상취득)(+)` · `신규선임(유상취득)(+)` · `장내매수(+)` · `장외매수(+)` · `공개매수(+)` | `기타(+)` · `신규보고(+)` · `주식배당(+)` · `주식매수선택권부여(+)` · `합병(+)` · `상속(+)` · `장내매도(-)` |
+
+**Positive share movement alone is not acquisition proof.** `기타(+)` is an
+increase that explains nothing and can never satisfy an acquisition field.
+
+### Acquisition date
+`acquisition_date` comes **only** from the same acquisition detail row's 변동일.
+
+HX04: **`2024-03-07`**.
+
+Never derived from the report/base date `2024-03-14`, the receipt date
+`2024-03-14`, a prior contract or grant date such as `2023-02-09`, or another
+row's date. There is no fallback from a `holding_report` projection.
+
+### Acquired shares
+`acquired_shares` comes **only** from the same acquisition row's positive
+증감 / 증감주식수.
+
+HX04: **`868,948`**.
+
+Never derived from `after_shares` `2,967,759`, `before_shares` `2,098,811`, the
+unit price `120,000`, a negative disposal delta, `abs()` of a negative delta, a
+missing quantity, or a fabricated zero.
+
+### Same-row provenance
+The transaction method, the acquisition date and the acquired quantity must all
+originate from the **same detail row**. No cross-row reconciliation, even when
+reporter, document and dates agree.
+
+HX04 provenance: `holding_20240314001102` · table `t0019` · **row 2**. Both the
+date and quantity citations trace to that row.
+
+### Storage and identity design — CODE ONLY
+No corpus backfill · no rechunk · no re-embedding · no database write · no
+database schema change.
+
+The implementation reads metadata the projection chunk **already stores**:
+`column_headers`, `table_rows` and `source_refs`. **`app/parsing/` remained
+unchanged**, so **`chunk_id` and stored vector identity are unchanged**.
+
+The same-row guarantee is structural rather than reconciled: across all **6,705**
+holding detail-row projections, each stores exactly one `table_rows` entry with
+`row_start == row_end` and exactly one unambiguous method, date and change
+column.
+
+### Latent parsing finding — NOT resolved
+The existing normalized-key projection path does not correctly map
+`취득/처분방법` to the intended `변동 사유` projection field, because key
+normalization collapses whitespace without removing the separator. Measured
+across the corpus, **0 of 6,705** holding detail-row projections carry that
+projected field.
+
+This was **intentionally not fixed**: changing projection content could alter
+deterministic chunk identity and force re-embedding. The acquisition
+implementation instead reads already-persisted table metadata.
+
+**This parser issue remains unresolved.**
+
+### Event model
+`HoldingEvent` is extended additively with `acquisition_date`,
+`acquired_shares` and the transaction-method discriminator, appended with
+defaults and serialized only when an acquisition was proven.
+
+Acquisition fields are held **outside the frozen legacy field denominator**, so
+legacy completeness and confidence denominators are unchanged and historical
+event scoring does not drift. Existing non-acquisition event semantics are
+unchanged.
+
+### Coverage
+No broad P1-A3 rewrite. For recognized acquisition questions the existing
+structured rescue may expose compatible holding detail evidence. Unrelated
+behaviour is retained: `requested_fields == ()` still yields
+`no_requested_fields`. **No generic raw-table rescue was added.**
+
+### Matching
+Existing frozen matching remains authoritative — reporter normalization, reporter
+matching, explicit date constraints, event filtering, deduplication, semantic
+uniqueness and ambiguity. **Acquisition semantics bypass none of these**; they
+add requested-field compatibility and event facts only.
+
+### Ambiguity
+Multiple compatible acquisition events are not arbitrarily selected. Selection by
+latest, largest, first or nearest is not performed unless an existing frozen
+selector authorizes it. **P1-A5 ambiguity behaviour remains authoritative.**
+
+### Composer
+Matched acquisition facts may render as `취득일` and `취득 수량`. No generic
+raw-table composer fallback was added, and acquisition facts are never rendered
+from a non-matching event. Existing P1-A5 citation behaviour is intact.
+
+### HX04 end-to-end result
+Measured under the **bounded P0-D.2 role simulation** — issuer `에스엠`, reporter
+`하이브` — with production P0-D still declining the question.
+
+| | before | after |
+|---|---|---|
+| `requested_fields` | `[]` | **`acquisition_date`, `acquired_shares`** |
+| intended document rank | 1 | **1** |
+| holding_event groups | 0 | **1** |
+| constructed / matching events | 0 / 0 | **1 / 1** |
+| warnings | `no_holding_event_groups` | **none** |
+| answerability | unsupported | **supported** |
+| `acquisition_date` | — | **`2024-03-07`** |
+| `acquired_shares` | — | **`868,948`** |
+| citations | 0 | **2** |
+
+`2024-03-14` remains report/receipt-date information and is **not**
+`acquisition_date`. `2,967,759` remains resulting holdings and is **not**
+`acquired_shares`. `120,000` remains the unit price and is **not**
+`acquired_shares`.
+
+### Disposal safety control
+Real-corpus control `holding_20231013000452` · table `t0026` carries the same
+reporter and date with both an acquisition of **`+3,314,990`**
+(`신규상장(유상취득)(+)`) and a disposal of **`-2,320,493`** (`장내매도(-)`).
+
+The implementation admits the acquisition row and excludes the disposal row, and
+does **not** `abs()` negative disposal quantities. **No document- or
+table-specific production logic exists.**
+
+### Corpus validation
+Read-only validation covered **6,705** holding detail rows across **40** distinct
+transaction methods, with **no database write**. Same-row acquisition and
+disposal controls produced **zero observed safety violations**; **3,126** rows
+classified as acquisitions. One row whose method claimed a purchase while the
+signed change did not agree was excluded rather than defaulted — the conjunction
+holding, with no fabricated quantity.
+
+The classifier is **intentionally conservative**.
+
+### Frozen control regression
+Controls **HX05 · HX09 · HX13 · HX17**, compared before and after on
+`requested_fields`, evidence group types and counts, constructed and matching
+event counts, the selected event, all fact values, field provenance,
+`selection_mode`, `semantic_unique`, ambiguity flags, warnings, citations,
+citation source references and the rendered answer:
+
+> **All four UNCHANGED.**
+
+Both sides were measured with the **identical harness** against the
+pre-implementation tree, so the comparison reflects behaviour rather than a
+change in measurement.
+
+### Test gate
+Local reproduced pytest gate — Python **3.13.2**, pytest **9.1.1**, **1676**
+collected:
+
+> **1663 passed · 13 skipped · 0 failed**
+
+Two warnings are present and are **not failures**: a Starlette/httpx deprecation
+warning and a pytest cache-directory permission warning.
+
+The implementation diagnosis additionally recorded **1060 subtests passed**;
+local pytest did not report subtests separately because the current local plugin
+set does not include `pytest-subtests`. **The authoritative local regression gate
+is 1663 passed · 13 skipped · 0 failed.**
+
+### Invariants that must remain true
+1. Acquisition fields are additive; existing field semantics are unchanged.
+2. The same-row transaction method proves acquisition; the sign must agree.
+3. `acquisition_date` comes only from the proving row's 변동일.
+4. `acquired_shares` comes only from the proving row's positive 증감.
+5. Method, date and quantity share one row.
+6. Direct same-row provenance is required for every acquisition fact.
+7. Legacy completeness and confidence denominators are unchanged.
+8. Frozen matching and P1-A5 ambiguity remain authoritative.
+9. Acquisition behaviour is derived from disclosure structure alone.
+
+**Negative invariants — never do any of these:** globally alias `취득일` to
+`reference_date` · globally alias `취득 수량` to `change_shares` · infer
+acquisition from a positive delta alone · infer acquisition from a `+` marker
+alone · use a report or receipt date as the acquisition date · use resulting
+holdings as the acquired quantity · use a unit price as the acquired quantity ·
+`abs()` a disposal quantity into an acquisition · combine method, date and
+quantity across rows · bypass reporter or date matching · fabricate missing
+acquisition facts · drop same-row provenance · add a generic raw holding-table
+composer fallback · special-case acquisition behaviour by Gold question,
+company, document or table identifier.
+
+### Known residual issues NOT solved
+- The classifier **intentionally under-reports** unsupported increase types
+  rather than guessing acquisition semantics.
+- `기타(+)` cannot answer acquisition-specific questions.
+- The latent `변동 사유` projection-normalization bug remains unresolved.
+- Generated wording may redundantly repeat the acquisition date.
+- Future ambiguous table header shapes fail closed.
+- **HX04 is still production-declined because P0-D.2 is not activated.**
+
+### Implementation surface
+Files changed by `7393842`:
+
+- `app/reasoning/holding_acquisition.py` *(new)*
+- `app/reasoning/holding_event_resolver.py`
+- `app/reasoning/evidence_builder.py`
+- `app/reasoning/answer_composer.py`
+- `app/generation/answer_generator.py`
+- `tests/test_holding_acquisition.py`
+
+No changes to `app/retrieval/hybrid.py`, `app/retrieval/bge_m3.py`,
+`app/parsing/`, `app/reasoning/query_validation.py`,
+`app/reasoning/holding_reporter.py`, the database schema, or the public API
+schema.
+
+### P0-D.2 status after this freeze
+**DOWNSTREAM HX04 BLOCKER RESOLVED** — the failure was downstream of role
+resolution, which already produced the correct issuer and reporter.
+
+**P0-D.2 STILL ACTIVATION-DEFERRED PENDING SAFETY RECHECK.**
+`PRIMARY_COMPANY_WITH_REPORTER` is **not** production-active. These statuses are
+recorded separately and must not be merged.
+
+### Reopen conditions
+- an acquisition fact demonstrably drawn from a row other than the one whose
+  method proved the acquisition;
+- a disposal, a report projection, or an unexplained increase satisfying an
+  acquisition field;
+- a later architecture that cannot preserve the same-row contract additively.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -2712,7 +3040,7 @@ recorded as a follow-up only and is neither diagnosed nor changed here.
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
-| P0-D.2 Issuer / Reporter Role Resolution | **TARGET EXISTS / ACTIVATION DEFERRED — live ranking safety gate** | — |
+| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED — SAFETY RECHECK REQUIRED** (downstream HX04 blocker resolved) | — |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
@@ -2726,4 +3054,5 @@ recorded as a follow-up only and is neither diagnosed nor changed here.
 | INFRA-E1 Reproducible BGE-M3 Evaluation Environment | **PHASE 2 COMPLETE — P1-R UNBLOCKED** | — |
 | Embedding Identity Hardening | FINAL FREEZE | `f592e9d` |
 | Retrieval Vector-Availability Policy | FINAL FREEZE | `b1e31aa` |
+| HX04 Acquisition Semantics | FINAL FREEZE | `7393842` |
 | Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
