@@ -415,6 +415,42 @@ class ComparisonFirewallPrecedenceTests(unittest.TestCase):
                 self.assertIs(result.state, QueryState.AMBIGUOUS)
                 self.assertFalse(result.plan.evidence["role_reinterpretation_blocked"])
 
+    def test_bounded_ownership_intent_still_waits_for_role_resolution(self) -> None:
+        cases = (
+            (
+                f"{self.D}가 보유한 {self.C} 주식은 "
+                "2024년 2월 3일 기준 몇 주야?",
+                "holding_shares",
+            ),
+            (
+                f"{self.D}가 {self.C} 주식을 "
+                "2024년 2월 3일 기준 얼마나 들고 있어?",
+                None,
+            ),
+            (
+                f"{self.D}의 {self.C} 지분은 "
+                "2024년 2월 3일 보고 기준 얼마나 되나?",
+                None,
+            ),
+        )
+        for query, metric in cases:
+            with self.subTest(query=query):
+                result = self.validated(query)
+                self.assertEqual(result.plan.task_type, "holding_change")
+                self.assertEqual(result.plan.metric, metric)
+                self.assertEqual(result.plan.disclosure_route, ("holding",))
+                self.assertEqual(
+                    result.plan.period.period_type, "holding_reference_date"
+                )
+                self.assertIs(result.state, QueryState.AMBIGUOUS)
+                self.assertFalse(result.retrieval_allowed)
+                self.assertEqual(len(result.plan.companies), 2)
+                self.assertIsNone(result.plan.company)
+                self.assertIsNone(result.plan.reporter)
+                self.assertFalse(
+                    result.plan.evidence["role_reinterpretation_blocked"]
+                )
+
     def test_an_explicit_comparison_still_resolves(self) -> None:
         result = self.validated("삼성전자와 삼성중공업의 2025년 매출액을 비교해줘")
 

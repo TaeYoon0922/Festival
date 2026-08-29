@@ -549,6 +549,235 @@ class QueryUnderstandingTests(unittest.TestCase):
         self.assertIsNone(plan.doc_subtype)
 
 
+class BoundedOwnershipIntentTests(unittest.TestCase):
+    HOLDER = "가상투자사"
+    ISSUER = "가상발행사"
+    THIRD = "가상제삼사"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {
+                name: {name}
+                for name in (self.HOLDER, self.ISSUER, self.THIRD)
+            }
+        )
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def assert_bounded_holding(
+        self,
+        query: str,
+        *,
+        metric: str | None,
+        family: str,
+    ) -> QueryPlan:
+        plan = self.plan(query)
+        self.assertEqual(plan.task_type, "holding_change")
+        self.assertEqual(plan.metric, metric)
+        self.assertEqual(plan.disclosure_route, ("holding",))
+        self.assertEqual(len(plan.companies), 2)
+        self.assertIsNone(plan.company)
+        self.assertEqual(plan.evidence["holding_ownership_intent"], family)
+        return plan
+
+    def test_closed_two_company_ownership_families_activate(self) -> None:
+        cases = (
+            (
+                f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 몇 주인가?",
+                "holding_shares",
+                "company_holds_company_shares",
+            ),
+            (
+                f"{self.HOLDER}가 {self.ISSUER} 주식을 얼마나 들고 있어?",
+                None,
+                "company_has_company_shares",
+            ),
+            (
+                f"{self.HOLDER}의 {self.ISSUER} 지분은 얼마나 되나?",
+                None,
+                "company_ownership_interest",
+            ),
+        )
+        for query, metric, family in cases:
+            with self.subTest(query=query):
+                self.assert_bounded_holding(query, metric=metric, family=family)
+
+    def test_existing_strong_holding_forms_keep_their_metrics(self) -> None:
+        cases = (
+            (f"{self.ISSUER} {self.HOLDER} 보유주식수", "holding_shares"),
+            (f"{self.ISSUER} {self.HOLDER} 보유비율", "holding_ratio"),
+            (
+                f"{self.ISSUER} {self.HOLDER} 대량보유상황보고서 내용",
+                "holding_shares",
+            ),
+        )
+        for query, metric in cases:
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertEqual(plan.task_type, "holding_change")
+                self.assertEqual(plan.metric, metric)
+                self.assertEqual(plan.disclosure_route, ("holding",))
+                self.assertIsNone(plan.evidence["holding_ownership_intent"])
+
+    def test_new_rule_assigns_only_explicit_metrics(self) -> None:
+        shares = self.assert_bounded_holding(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 몇 주야?",
+            metric="holding_shares",
+            family="company_holds_company_shares",
+        )
+        ratio = self.assert_bounded_holding(
+            f"{self.HOLDER}의 {self.ISSUER} 지분 비율은 몇 %야?",
+            metric="holding_ratio",
+            family="company_ownership_interest",
+        )
+        ambiguous = self.assert_bounded_holding(
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 얼마나 들고 있어?",
+            metric=None,
+            family="company_has_company_shares",
+        )
+
+        self.assertEqual(shares.evidence["metric"], "몇 주")
+        self.assertEqual(ratio.evidence["metric"], "지분 비율")
+        self.assertIsNone(ambiguous.evidence["metric"])
+
+    def test_new_ownership_reference_date_keeps_the_exact_holding_axis(self) -> None:
+        plan = self.assert_bounded_holding(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 "
+            "2024년 2월 3일 기준 몇 주인가?",
+            metric="holding_shares",
+            family="company_holds_company_shares",
+        )
+
+        self.assertEqual(plan.period.period_type, "holding_reference_date")
+        self.assertEqual(plan.period.from_date, "2024-02-03")
+        self.assertEqual(plan.period.to_date, "2024-02-03")
+        self.assertEqual(plan.evidence["date_semantics"]["role"], "holding_reference")
+        self.assertEqual(
+            plan.evidence["holding_report_relative"]["selector"],
+            "exact_reference_date",
+        )
+        self.assertIsNone(plan.backend_filters()["year"])
+
+    def test_new_ownership_receipt_date_keeps_the_exact_receipt_axis(self) -> None:
+        plan = self.assert_bounded_holding(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식을 "
+            "2024년 2월 3일 접수된 보고서 기준 몇 주인가?",
+            metric="holding_shares",
+            family="company_holds_company_shares",
+        )
+
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2024-02-03")
+        self.assertEqual(plan.period.to_date, "2024-02-03")
+        self.assertEqual(plan.evidence["date_semantics"]["role"], "receipt")
+        self.assertEqual(
+            plan.evidence["holding_report_relative"]["selector"],
+            "exact_receipt_date",
+        )
+
+    def test_bare_and_non_security_language_does_not_activate(self) -> None:
+        queries = (
+            f"{self.ISSUER} 지분은 얼마야?",
+            f"{self.ISSUER} 현재 보유 현황 알려줘",
+            f"{self.HOLDER}가 {self.ISSUER} 계약서를 들고 있어?",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertEqual(plan.task_type, "disclosure_lookup")
+                self.assertIsNone(plan.evidence["holding_ownership_intent"])
+
+    def test_comparison_firewall_blocks_the_new_ownership_rule(self) -> None:
+        cross_company = self.plan(
+            f"{self.HOLDER}와 {self.ISSUER} 중 누가 주식을 더 많이 들고 있어?"
+        )
+        uncertain = self.plan(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식을 "
+            "더 많이 취득한 시점은 언제야?"
+        )
+
+        self.assertEqual(
+            cross_company.evidence["comparison_frame"], "cross_company"
+        )
+        self.assertIsNone(cross_company.evidence["holding_ownership_intent"])
+        self.assertEqual(uncertain.evidence["comparison_frame"], "uncertain")
+        self.assertEqual(uncertain.task_type, "disclosure_lookup")
+        self.assertIsNone(uncertain.evidence["holding_ownership_intent"])
+
+    def test_explicit_holding_comparison_keeps_existing_comparison_semantics(self) -> None:
+        plan = self.plan(f"{self.HOLDER}와 {self.ISSUER} 보유비율 비교")
+
+        self.assertEqual(plan.task_type, "holding_change")
+        self.assertEqual(plan.metric, "holding_ratio")
+        self.assertEqual(plan.evidence["comparison_frame"], "cross_company")
+        self.assertEqual(plan.comparison["type"], "company_comparison")
+        self.assertIsNone(plan.evidence["holding_ownership_intent"])
+
+    def test_three_companies_do_not_activate_the_new_rule(self) -> None:
+        plan = self.plan(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 몇 주이고 "
+            f"{self.THIRD}도 알려줘"
+        )
+
+        self.assertEqual(len(plan.companies), 3)
+        self.assertEqual(plan.task_type, "disclosure_lookup")
+        self.assertIsNone(plan.evidence["holding_ownership_intent"])
+
+    def test_explicit_non_holding_disclosure_or_event_blocks_the_new_rule(self) -> None:
+        event = self.plan(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식 관련 "
+            "신규시설투자 금액 알려줘"
+        )
+        disclosure = self.plan(
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식 관련 "
+            "사업보고서 내용 알려줘"
+        )
+
+        self.assertEqual(event.task_type, "corporate_event")
+        self.assertEqual(event.event_type, "facility_investment")
+        self.assertEqual(event.disclosure_route, ("exchange",))
+        self.assertIsNone(event.evidence["holding_ownership_intent"])
+        self.assertEqual(disclosure.task_type, "disclosure_lookup")
+        self.assertEqual(disclosure.disclosure_route, ("periodic",))
+        self.assertIsNone(disclosure.evidence["holding_ownership_intent"])
+
+    def test_existing_two_company_holding_classes_remain_unchanged(self) -> None:
+        cases = (
+            (
+                f"{self.ISSUER} 대량보유보고에서 {self.HOLDER}가 신고한 "
+                "보유주식수는?",
+                "holding_shares",
+            ),
+            (
+                f"{self.ISSUER}에 대한 {self.HOLDER}의 보유비율은?",
+                "holding_ratio",
+            ),
+        )
+        for query, metric in cases:
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertEqual(plan.task_type, "holding_change")
+                self.assertEqual(plan.metric, metric)
+                self.assertEqual(plan.disclosure_route, ("holding",))
+                self.assertIsNone(plan.evidence["holding_ownership_intent"])
+
+    def test_existing_holding_period_selectors_are_unchanged(self) -> None:
+        cases = (
+            ("최신 보고 보유주식수", "latest_holding", "latest"),
+            ("현재 기준 보유비율", "holding_reference", "latest"),
+            ("이번 보고 보유주식수", "latest_holding", "selected_context"),
+        )
+        for wording, period_type, selector in cases:
+            with self.subTest(wording=wording):
+                plan = self.plan(f"{self.ISSUER} {wording}")
+                self.assertEqual(plan.period.period_type, period_type)
+                self.assertEqual(
+                    plan.evidence["holding_report_relative"]["selector"], selector
+                )
+                self.assertIsNone(plan.evidence["holding_ownership_intent"])
+
+
 class QueryRouterTests(unittest.TestCase):
     def test_explicit_corporate_event_filters_other_major_event_documents(self) -> None:
         plan = QueryUnderstanding({"삼성전자": {"삼성전자"}}).understand(

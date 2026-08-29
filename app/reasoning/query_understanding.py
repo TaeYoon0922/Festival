@@ -250,14 +250,42 @@ class QueryUnderstanding:
             if inferred:
                 companies = (inferred,)
 
+        # The bounded two-company ownership rule must read the comparison
+        # firewall before it can classify the task.  Report comparison payloads
+        # still wait for period parsing below; the firewall itself depends only
+        # on the question and canonical company mentions.
+        company_mentions = _company_mentions(raw_query, companies, aliases)
+        comparison_frame = _comparison_frame(raw_query, companies, company_mentions)
+
         financial_metric, metric_evidence = _find_financial_metric(raw_query)
         event_type, event_evidence, event_route = _find_event(raw_query)
         holding_metric, holding_evidence = _find_holding_metric(raw_query)
+        ownership_intent = False
+        ownership_metric: str | None = None
+        ownership_evidence: str | None = None
+        ownership_metric_evidence: str | None = None
+        if holding_metric is None:
+            (
+                ownership_intent,
+                ownership_metric,
+                ownership_evidence,
+                ownership_metric_evidence,
+            ) = _find_bounded_ownership_intent(
+                raw_query,
+                companies,
+                company_mentions,
+                comparison_frame=comparison_frame,
+                conflicting_intent=bool(
+                    event_type
+                    or financial_metric
+                    or extracted.get("doc_group") not in {None, "holding"}
+                ),
+            )
         reporter = _find_reporter(raw_query)
 
-        if holding_metric:
+        if holding_metric or ownership_intent:
             task_type = "holding_change"
-            metric = holding_metric
+            metric = holding_metric or ownership_metric
         elif event_type:
             task_type = "corporate_event"
             metric = None
@@ -313,11 +341,9 @@ class QueryUnderstanding:
             parsed_correction = correction_policy
             correction_confidence = 1.0
             correction_evidence = "caller_override"
-        company_mentions = _company_mentions(raw_query, companies, aliases)
         comparison = _comparison_from_query(
             raw_query, companies, mentioned_years, company_mentions
         )
-        comparison_frame = _comparison_frame(raw_query, companies, company_mentions)
 
         subtype = extracted["doc_subtype"]
         if not subtype:
@@ -356,7 +382,9 @@ class QueryUnderstanding:
             raw_query,
             structured_spans,
             metric=metric,
-            metric_evidence=metric_evidence or holding_evidence,
+            metric_evidence=(
+                metric_evidence or holding_evidence or ownership_metric_evidence
+            ),
             event_type=event_type,
             event_evidence=event_evidence,
         )
@@ -396,9 +424,12 @@ class QueryUnderstanding:
                 "report_preference": "annual" if annual_preferred else None,
                 "company_resolved": bool(resolved),
                 "company_resolution_attempted": self._company_resolver is not None,
-                "metric": metric_evidence or holding_evidence,
+                "metric": (
+                    metric_evidence or holding_evidence or ownership_metric_evidence
+                ),
                 "event_type": event_evidence,
                 "operation": operation,
+                "holding_ownership_intent": ownership_evidence,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
                 "correction_intent": correction_intent,
@@ -468,6 +499,61 @@ def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
     ):
         return "holding_shares", "특수관계자"
     return None, None
+
+
+def _find_bounded_ownership_intent(
+    query: str,
+    companies: tuple[str, ...],
+    mentions: tuple[tuple[int, int, str], ...],
+    *,
+    comparison_frame: str | None,
+    conflicting_intent: bool,
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Recognize closed two-company securities-ownership constructions.
+
+    This classifier determines only the holding task family and, when the
+    wording is explicit, its metric.  The canonical company tuple remains
+    untouched: issuer/reporter direction belongs to validation and cannot be
+    inferred from mention order here.
+    """
+
+    if (
+        len(companies) != 2
+        or len(mentions) != 2
+        or comparison_frame in {"cross_company", "uncertain"}
+        or conflicting_intent
+    ):
+        return False, None, None, None
+
+    (_first_start, first_end, _first), (second_start, second_end, _second) = mentions
+    gap = re.sub(r"\s+", "", query[first_end:second_start])
+    tail = re.sub(r"\s+", "", query[second_end:])
+
+    family: str | None = None
+    if re.fullmatch(r"[이가]보유한", gap) and re.match(
+        r"^주식(?:은|는|이|가|을|를)?", tail
+    ):
+        family = "company_holds_company_shares"
+    elif re.fullmatch(r"[이가]", gap) and re.match(
+        r"^주식(?:은|는|이|가|을|를)?.*들고(?:있|계)", tail
+    ):
+        family = "company_has_company_shares"
+    elif gap == "의" and re.match(r"^지분(?:은|는|이|가|을|를|율|비율)?", tail):
+        family = "company_ownership_interest"
+
+    if family is None:
+        return False, None, None, None
+
+    # Generic "얼마나" does not select an answer unit.  Only explicit count or
+    # ratio vocabulary promotes the otherwise valid ownership intent to a
+    # concrete holding metric.
+    ratio = re.search(r"지분\s*비율|보유\s*비율|지분율|퍼센트|%", query)
+    if ratio:
+        return True, "holding_ratio", family, ratio.group(0)
+    shares = re.search(r"몇\s*주|주식\s*수(?:량)?|보유\s*수량", query)
+    if shares:
+        return True, "holding_shares", family, shares.group(0)
+    return True, None, family, None
 
 
 def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
