@@ -4289,6 +4289,168 @@ The pytest cache-directory permission warning is not a test failure.
 
 ---
 
+## Phase 3 — Report-Relative Holding Execution
+
+**Status: FINAL FREEZE** · Frozen production commit:
+`b8799e9299a5f795d2bec8ce0fad121b6c67c8db` (`b8799e9`).
+
+### Freeze decision
+
+Phase 3 connects the frozen report-relative representation and the B.2/B.3
+deterministic selection stack to the existing production evidence path. The
+selected projection is still resolved through `EvidenceBuilder` →
+`HoldingEventResolver` → `AnswerComposer`; Phase 3 does not create a second
+answer engine.
+
+The final safety commit closes the unbound-context fallback hole. A
+`selected_context` question is now owned authoritatively by Phase 3, but an
+already-selected report context is still not supplied. Therefore
+`execute_report_relative()` returns `unsupported_selector`, the Phase 3
+evidence execution is empty, and ordinary ranked retrieval cannot substitute
+an arbitrary report.
+
+This is **not** an activation of `selected_context` as an executable selector:
+`SELECTOR_SELECTED_CONTEXT` was not added to `_EXECUTABLE_SELECTORS`, and it is
+never promoted to `latest`.
+
+### Frozen semantic contract
+
+| surface | frozen behavior |
+|---|---|
+| `latest` | B.2 selects the unique latest eligible report by issuer, canonical reporter, and reference date |
+| exact reference date | `exact_reference_date` remains a distinct deterministic selector |
+| exact receipt date | `exact_receipt_date` remains a distinct deterministic selector |
+| `이번 보고` / `selected_context` | Phase 3 owns the question; without an already-selected report, it returns `unsupported_selector` with empty authoritative evidence |
+| standalone `직전보고` | remains bound to an unavailable selected report context; no current report is inferred |
+| acquisition fields | `acquisition_date` and `acquired_shares` remain owned by the existing acquisition resolver and are not converted from report-state fields |
+| resolved correction | B.3 collapses the correction chain before selection and permits only the proven final document as evidence |
+| ambiguous correction | remains authoritative fail-closed; ordinary retrieval cannot supply another holding report |
+| P0-D.2 | remains production-inactive; no issuer/reporter role activation is implied by this freeze |
+
+### Production scope
+
+The final production safety commit changed only:
+
+- `app/reasoning/holding_report_relative_execution.py`
+- `tests/test_holding_report_relative_execution.py`
+
+### Server database parity and hydration
+
+The final live verification used the real `festival` PostgreSQL 16.14 database.
+Its frozen corpus and derived-state counts were:
+
+| relation | rows |
+|---|---:|
+| `companies` | 70 |
+| `disclosures` | 4,204 |
+| `sections` | 147,399 |
+| `disclosure_tables` | 1,216,982 |
+| `chunks` | 1,363,336 |
+| `chunk_source_refs` | 1,385,444 |
+| `chunk_embeddings` | 76,438 |
+| `correction_relations` | 1,004 |
+| `correction_group_members` | 1,312 |
+| `corporate_events` | 941 |
+| `corporate_event_members` | 990 |
+| `corporate_event_relations` | 63 |
+
+The tracked B.2 artifact contains **1,116 records**, **1,116 unique projection
+chunk ids**, and **1,083 unique document ids**. Server hydration verified:
+
+| hydration check | result |
+|---|---:|
+| projection chunks present | **1,116 / 1,116 (100.00%)** |
+| B.2 documents present in `disclosures` | **1,083 / 1,083 (100.00%)** |
+| B.2 documents with chunks | **1,083 / 1,083 (100.00%)** |
+| missing projections | **0** |
+
+**ALL B.2 PROJECTIONS HYDRATABLE.** The verified server state requires no
+additional Phase 3 database import or correction backfill.
+
+### Final server live smoke
+
+The final commit was archived into an isolated `/tmp` tree and exercised on a
+separate port against the real project database. The existing server checkout
+and its untracked `local-test/` directory were not changed.
+
+| case | frozen result |
+|---|---|
+| `selected_context` fail-closed | **PASS** · Phase 3 stage present, selected evidence `0`, public context empty, `answerable=false`, missing `after_shares`; no ranked fallback |
+| normal `latest` / current | **PASS** · one deterministic projection, `holding_20230913000324:ch_82a557795a859211d171`, answerable with no missing field and preserved public `source_refs` |
+| B.3 resolved correction | **PASS** · root/superseded `holding_20260105000450` removed; final `holding_20260106000551:ch_ee25ac7c4d28906cf74b` selected and exposed |
+| B.3 ambiguous correction | **PASS** · ordinary retrieval produced 10 candidates, but selected evidence and public context remained empty and no conflicting fact was answered |
+| acquisition control | **PASS** · report-relative stage absent, `answerable=false`, missing `acquired_shares`; Phase 3 did not reinterpret report-state fields as acquisition facts |
+
+Any separate answer-presentation behavior observed in the acquisition control
+does not change the measured Phase 3 invariant: the report-relative lane did
+not own or answer the acquisition field.
+
+### Local verification
+
+| gate | result |
+|---|---|
+| targeted selected-context safety | **3 passed · 22 deselected · 2 subtests passed** |
+| B.2/B.3/parser regression | **142 passed · 724 subtests passed** |
+| Phase 3 execution file | **25 passed · 8 subtests passed** |
+| full pytest | **1,853 passed · 13 skipped · 1,871 subtests passed** |
+| full unittest discovery | **1,817 OK · 13 skipped** |
+
+### Explicit non-changes
+
+- `QueryUnderstanding` and the frozen `holding_report_relative` parser were not
+  changed.
+- B.2 `holding_report_index` and the B.3 correction-finality contract and
+  artifact were not changed.
+- Acquisition resolution and reporter normalization were not changed.
+- Retrieval ranking, BM25, BGE, RRF, top-k, and P1-R were not changed.
+- P0-D.2 remains inactive.
+- No database row, migration, backfill, embedding, corpus artifact, or public
+  response schema was changed by the final safety fix.
+
+### Invariants that must remain true
+
+1. `selected_context` enters the authoritative Phase 3 lane but, without an
+   already-selected report context, fails closed as `unsupported_selector`.
+2. `selected_context` and standalone `직전보고` must never be promoted to
+   `latest` or answered from ordinary retrieval rank 1.
+3. Deterministic B.2/B.3 failure must keep selected evidence and public
+   `retrieved_context` empty.
+4. Acquisition fields remain under the existing acquisition resolver; a report
+   reference date is never presented as an acquisition date.
+5. Correction collapse precedes report selection, and an ambiguous correction
+   cannot be answered from a superseded or unrelated report.
+6. Exact hydration preserves the selected projection's original document,
+   chunk, metadata, and source references.
+7. This freeze authorizes no P0-D.2 activation or retrieval/ranking change.
+
+### Known residual issue NOT solved
+
+An older isolated server `/tmp` run at the pre-final Phase 3 commit exposed an
+answer-text assertion drift: an end-to-end assertion expected the selected
+`projection_chunk_id` to appear literally in rendered answer text. The same
+test passes in the canonical local environment before and after the
+selected-context safety fix. This is recorded as an unrelated,
+environment-specific answer-generation/rendering residual; it has no causal
+connection to the selected-context fix and does not block this freeze.
+
+### Reopen conditions
+
+- any unbound `selected_context` question falls back to ordinary ranked
+  retrieval;
+- `selected_context` is added to executable selectors or silently treated as
+  `latest`;
+- an acquisition field is populated from report-state projection fields;
+- an ambiguous correction produces non-empty selected evidence;
+- a deterministic selection, hydrated projection, citation, and public context
+  disagree on document or chunk identity;
+- server B.2 projection hydration falls below **1,116 / 1,116** for the frozen
+  corpus identity;
+- P0-D.2 or retrieval/ranking behavior is changed under this freeze.
+
+**Phase 3 Report-Relative Holding Execution remains FINAL FREEZE.**
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -4316,4 +4478,5 @@ The pytest cache-directory permission warning is not a test failure.
 | Comparison Intent Firewall (P0-D.2 Target A) | FINAL FREEZE | `7a0921e` |
 | TARGET B.2 — Reporter-Aware Deterministic Holding Report Index | FINAL FREEZE | `3f60329` |
 | TARGET B.3 — Holding Correction Finality Artifact | FINAL FREEZE | `da65d23` |
+| Phase 3 — Report-Relative Holding Execution | FINAL FREEZE | `b8799e9` |
 | Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
