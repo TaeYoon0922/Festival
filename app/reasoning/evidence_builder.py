@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
+from app.reasoning.holding_acquisition import acquisition_facts
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
@@ -659,6 +660,11 @@ def _holding_metadata(chunk: Mapping[str, Any]) -> dict[str, Any]:
         "projection_field_refs": copy.deepcopy(
             dict(chunk.get("projection_field_refs") or {})
         ),
+        # Present only when this one row proves an acquisition on its own.  The
+        # facts are carried together because the transaction method is what
+        # makes the date and the quantity mean "acquired", and that only holds
+        # for the row they were read from.
+        "acquisition": acquisition_facts(chunk),
     }
 
 

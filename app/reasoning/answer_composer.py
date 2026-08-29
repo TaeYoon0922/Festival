@@ -323,6 +323,17 @@ def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:
         "completeness": copy.deepcopy(dict(event.completeness)),
         "confidence": copy.deepcopy(dict(event.confidence)),
         "evidence_chunk_ids": list(event.evidence_chunk_ids),
+        # Only for an event whose own row proved an acquisition, so every other
+        # event's content keeps exactly the keys it had.
+        **(
+            {
+                "acquisition_date": getattr(event, "acquisition_date", None),
+                "acquired_shares": serialized.get("acquired_shares"),
+                "transaction_method": getattr(event, "transaction_method", None),
+            }
+            if getattr(event, "transaction_method", None) is not None
+            else {}
+        ),
     }
 
 

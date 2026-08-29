@@ -593,6 +593,10 @@ def _holding_lead_fields(
     """Requested fields lead; otherwise the holding as of the reference date."""
 
     preference = (
+        # What the question asked for leads; an acquisition is reported by its
+        # own date and quantity, never by the filing's base date.
+        "acquisition_date",
+        "acquired_shares",
         "after_ratio",
         "after_shares",
         "change_shares",
@@ -625,6 +629,18 @@ def _holding_lead_clause(
         "change_shares": ("직전 보고 대비 {value} {verb}", _SHARE_UNIT, _SHARES),
         "change_ratio": ("보유 비율은 {value} {verb}", _RATIO_CHANGE_UNIT, _RATIO),
     }
+    if field == "acquisition_date":
+        value = _text(event.get("acquisition_date"))
+        if not value:
+            return None
+        stated.add(value)
+        return f"취득일은 {value}입니다"
+    if field == "acquired_shares":
+        value = _numeric_text(event.get("acquired_shares"), _SHARE_UNIT)
+        if not value:
+            return None
+        stated.add(value)
+        return f"취득 수량은 {value}입니다"
     entry = templates.get(field)
     if entry is None:
         return None
