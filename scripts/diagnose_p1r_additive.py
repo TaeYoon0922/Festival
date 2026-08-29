@@ -27,7 +27,7 @@ from app.reasoning.query_understanding import QueryUnderstanding
 from app.retrieval.embeddings import EmbeddingConfig, create_embedding_provider
 from app.retrieval.hybrid import HybridQueryExecutor, HybridRetrievalConfig, RRFConfig
 from app.retrieval.postgres_backend import PostgresBackend
-from scripts.bge_eval_preflight import assert_embedding_identity, pinned_encoder_factory
+from scripts.bge_eval_preflight import strict_vector_executor, assert_embedding_identity, pinned_encoder_factory
 from scripts.diagnose_p1r_live import MISSES, holding_questions
 
 #: Production defaults. `legacy` is the shipped rerank mode; `bounded` remains an
@@ -51,7 +51,8 @@ def build():
         deterministic_weight=RETRIEVAL["deterministic_weight"],
         rerank_mode=RETRIEVAL["rerank_mode"],
         rrf=RRFConfig(k=RETRIEVAL["rrf_k"]))
-    return (HybridQueryExecutor(backend, embedder, config, config=hybrid),
+    return (strict_vector_executor(
+        HybridQueryExecutor(backend, embedder, config, config=hybrid)),
             QueryUnderstanding(company_resolver=backend.resolve_company))
 
 

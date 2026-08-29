@@ -60,6 +60,11 @@ from app.retrieval.corporate_event_repository import (
     PostgresCorporateEventRepository,
 )
 from app.retrieval.correction_repository import PostgresCorrectionRepository
+from app.reasoning.vector_coverage_policy import (
+    HEALTHY as _VECTOR_HEALTHY,
+    classify as _classify_vector_availability,
+    warning_for as _vector_warning_for,
+)
 from app.retrieval.embeddings import (
     EmbeddingConfig,
     EmbeddingHttpError,
@@ -581,6 +586,34 @@ def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
+def _vector_degradation_warning(execution: Any) -> str | None:
+    """Make a degraded retrieval lane visible without changing what is served.
+
+    Serving policy is untouched: a degraded request still answers.  What changes
+    is that partial coverage can no longer look identical to a healthy hybrid
+    run -- a corpus with 53.6% of candidates embedded still reported
+    ``vector_status == "ok"`` while 91.2% of the chunks it served came from the
+    embedded subset, because only embedded chunks can compete in both lanes.
+    """
+
+    status = getattr(execution, "vector_status", None)
+    if status is None:
+        return None
+    coverage = getattr(execution, "vector_coverage", None) or {}
+    degradation = _classify_vector_availability(status, coverage)
+    if degradation == _VECTOR_HEALTHY:
+        return None
+    hybrid = (getattr(execution, "routing", None) or {}).get("hybrid") or {}
+    return _vector_warning_for(
+        degradation,
+        coverage,
+        # Carried from the configured identity, so an intentional hash
+        # diagnostic is never reported as a degraded BGE run.
+        provider=(hybrid.get("embedding") or {}).get("provider"),
+        error=getattr(execution, "vector_error", None) or coverage.get("error"),
+    )
+
+
 def think_trace(
     result: Any,
     generated: GeneratedAnswer,
@@ -610,6 +643,9 @@ def think_trace(
         "warnings": list(generated.warnings),
         "hcx_status": outcome.status,
     }
+    degradation = _vector_degradation_warning(execution)
+    if degradation:
+        trace["warnings"] = [*trace["warnings"], degradation]
     correction = getattr(execution, "correction_expansion", None)
     if isinstance(correction, Mapping) and correction.get("correction_expanded"):
         # Which documents the graph added and which chain they came from. This

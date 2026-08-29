@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app.reasoning.answer_composer as composer
 import app.retrieval.hybrid as hybrid
-from scripts.bge_eval_preflight import pinned_encoder_factory
+from scripts.bge_eval_preflight import pinned_encoder_factory, strict_vector_executor
 from scripts.diagnose_p1r_live import holding_questions
 
 
@@ -64,7 +64,8 @@ def main() -> int:
     finally:
         pipeline_module.create_embedding_provider = original
 
-    executor = pipeline.executor
+    # A real-vector validation must not be satisfiable by lexical fallback.
+    executor = strict_vector_executor(pipeline.executor)
     understanding = pipeline
     orch = pipeline.orchestrator
     # The limit is a default argument bound at definition time, so rebinding the

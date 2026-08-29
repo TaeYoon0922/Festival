@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app.reasoning.answer_composer as composer
 import app.retrieval.hybrid as hybrid
 from app.parsing.final_validation import GOLD_QUESTIONS, HOLDING_ADDITIONAL_QUESTIONS
-from scripts.bge_eval_preflight import pinned_encoder_factory
+from scripts.bge_eval_preflight import pinned_encoder_factory, strict_vector_executor
 
 P0D_DECLINED = {"H01", "H02", "HX01", "HX02", "HX03", "HX04"}
 
@@ -100,7 +100,8 @@ def main() -> int:
     finally:
         pipeline_module.create_embedding_provider = original
 
-    executor, orch = pipeline.executor, pipeline.orchestrator
+    # A real-vector validation must not be satisfiable by lexical fallback.
+    executor, orch = strict_vector_executor(pipeline.executor), pipeline.orchestrator
     shipped = hybrid._additive_document_rescue
 
     def disabled(results, tail, **kwargs):

@@ -16,6 +16,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from app.reasoning.vector_coverage_policy import (
+    VectorCoverageError,
+    assert_complete_coverage,
+    claims_real_vectors,
+)
+
 #: The identity this evaluation is defined against.  Anything else is a different
 #: experiment and must not be reported under the same name.
 PINNED_MODEL = "BAAI/bge-m3"
@@ -90,26 +96,69 @@ def assert_vector_coverage(coverage: Mapping[str, Mapping[str, int]]) -> None:
     ``coverage`` maps question_id -> {"eligible": n, "embedded": n}.  A question
     with eligible candidates but no matching BGE rows would still return a
     lexical-only answer, and that answer must never be labelled BGE-M3.
+
+    The rule itself lives in ``app.reasoning.vector_coverage_policy`` so serving
+    and evaluation cannot drift apart about what "covered" means; this keeps
+    raising ``PreflightError`` for existing callers.
     """
 
-    starved = sorted(
-        qid for qid, counts in coverage.items()
-        if int(counts.get("eligible", 0)) > 0 and int(counts.get("embedded", 0)) == 0
-    )
-    if starved:
-        raise PreflightError(
-            "questions have vector-eligible candidates but zero BGE-M3 rows, "
-            f"which would silently degrade to lexical-only: {starved}"
+    try:
+        assert_complete_coverage(
+            {
+                qid: {
+                    "available": True,
+                    "candidate_count": int(counts.get("eligible", 0)),
+                    "embedded_count": int(counts.get("embedded", 0)),
+                }
+                for qid, counts in coverage.items()
+            }
         )
-    incomplete = {
-        qid: (int(c.get("eligible", 0)), int(c.get("embedded", 0)))
-        for qid, c in coverage.items()
-        if int(c.get("embedded", 0)) < int(c.get("eligible", 0))
-    }
-    if incomplete:
-        raise PreflightError(
-            f"incomplete BGE-M3 coverage (question: eligible/embedded): {incomplete}"
+    except VectorCoverageError as error:
+        raise PreflightError(str(error)) from error
+
+
+class StrictVectorExecutor:
+    """An executor that cannot hand a degraded execution to a metric.
+
+    ``assert_vector_coverage`` already expressed this rule, but every evaluator
+    was free to skip it -- and all of them did.  Wrapping the executor moves the
+    check from something a caller remembers to something a caller cannot avoid:
+    each question's coverage is verified as it is retrieved, so a run whose
+    corpus is incompletely embedded fails at the first affected question instead
+    of publishing a number derived from lexical fallback.
+    """
+
+    def __init__(self, executor: Any) -> None:
+        self._executor = executor
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._executor, name)
+
+    def execute(self, plan: Any) -> Any:
+        execution = self._executor.execute(plan)
+        config = getattr(self._executor, "embedding_config", None)
+        if config is None or not claims_real_vectors(getattr(config, "provider", None)):
+            return execution
+        assert_complete_coverage(
+            {
+                str(getattr(plan, "lexical_query", None) or "question"): dict(
+                    getattr(execution, "vector_coverage", None) or {}
+                )
+            },
+            identity={
+                "provider": getattr(config, "provider", None),
+                "model": getattr(config, "model", None),
+                "version": getattr(config, "version", None),
+                "dimensions": getattr(config, "dimensions", None),
+            },
         )
+        return execution
+
+
+def strict_vector_executor(executor: Any) -> StrictVectorExecutor:
+    """Wrap an executor so a real-vector run fails closed on missing coverage."""
+
+    return StrictVectorExecutor(executor)
 
 
 def assert_manifest_current(manifest: Mapping[str, Any],
