@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from app.retrieval.embeddings import (
@@ -19,6 +22,38 @@ from app.retrieval.embeddings import (
 BGE_M3_MODEL = "BAAI/bge-m3"
 BGE_M3_DIMENSIONS = 1024
 BGE_M3_MAX_LENGTH = 8192
+
+#: A commit SHA is the only revision that cannot move.  Every vector is stored
+#: under ``embedding_version``, and retrieval compares vectors by that column, so
+#: a branch or tag name would let one label describe two different models.
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+
+#: What a dense BGE-M3 load actually consumes, established by loading the pinned
+#: snapshot with files withheld one at a time.  README, ``.gitattributes`` and
+#: the sparse/ColBERT heads are absent from a working load and are not required.
+_REQUIRED_SNAPSHOT_FILES = ("config.json", "model.safetensors")
+
+#: Any one of these is enough for the tokenizer.  One is still required: a
+#: snapshot without them loads, but only by sourcing a tokenizer from elsewhere,
+#: which is the identity drift this module exists to prevent.
+_TOKENIZER_SNAPSHOT_FILES = ("tokenizer.json", "sentencepiece.bpe.model")
+
+#: Fetch only what dense inference needs.  Asking for the whole repository would
+#: reject a cache that is complete for our purposes but partial for the repo.
+_SNAPSHOT_ALLOW_PATTERNS = ("*.json", "*.model", "model.safetensors", "1_Pooling/*")
+
+
+class BgeM3IdentityError(RuntimeError):
+    """The model that loaded is not provably the model that was configured."""
+
+
+@dataclass(frozen=True)
+class ResolvedSnapshot:
+    """A local checkout proven to be the configured commit."""
+
+    model: str
+    revision: str
+    local_path: str
 
 
 class BgeM3Encoder(Protocol):
@@ -50,9 +85,32 @@ class BgeM3LocalEmbeddingProvider:
         self.load_time_seconds = 0.0
         self.effective_batch_size = config.batch_size
         self.oom_retries = 0
+        #: Set once an encoder is built. ``None`` until then, and for injected
+        #: encoders whose provenance this provider cannot vouch for.
+        self.resolved_snapshot: ResolvedSnapshot | None = getattr(
+            encoder, "festival_resolved_snapshot", None)
 
     def load(self) -> None:
         self._ensure_encoder()
+
+    def identity(self) -> dict[str, Any]:
+        """What was configured beside what actually loaded.
+
+        The two are reported separately on purpose: a diagnostic that echoed the
+        configured revision back as the resolved one would have hidden the very
+        defect this module was written for.
+        """
+
+        snapshot = self.resolved_snapshot
+        return {
+            "configured_model": self.config.model,
+            "configured_revision": self.config.version,
+            "resolved_model": snapshot.model if snapshot else None,
+            "resolved_revision": snapshot.revision if snapshot else None,
+            "resolved_snapshot_path": snapshot.local_path if snapshot else None,
+            "requested_device": self.config.device,
+            "verified": bool(snapshot and snapshot.revision == self.config.version),
+        }
 
     def embed_query(self, text: str) -> list[float]:
         return self._encode([text])[0]
@@ -65,6 +123,8 @@ class BgeM3LocalEmbeddingProvider:
             started = self._clock()
             self._encoder = self._encoder_factory(self.config)
             self.load_time_seconds = self._clock() - started
+            self.resolved_snapshot = getattr(
+                self._encoder, "festival_resolved_snapshot", None)
         return self._encoder
 
     def _encode(self, texts: Sequence[str]) -> list[list[float]]:
@@ -157,6 +217,70 @@ class BgeM3HttpEmbeddingProvider:
         return _normalized_dense_vectors(response, self.config.dimensions, len(texts))
 
 
+def _resolve_verified_bge_snapshot(
+    config: EmbeddingConfig,
+    *,
+    downloader: Callable[..., str] | None = None,
+) -> ResolvedSnapshot:
+    """Resolve the configured commit ourselves and prove what we got.
+
+    ``FlagEmbedding`` accepts a ``revision`` argument and does not honour it: asked
+    for a pinned commit it resolved ``main`` instead.  Nothing downstream noticed,
+    because every stored row is stamped with the *configured* revision.  So the
+    revision is resolved here, the resolved commit is checked against the one that
+    was asked for, and only the verified local directory is handed onward.
+
+    The cache is consulted before the network, so a warm, already-verified pin
+    loads offline; the network is used only when the pin is genuinely absent.
+    """
+
+    model = str(config.model or "").strip()
+    revision = str(config.version or "").strip()
+    if not _COMMIT_SHA.fullmatch(revision):
+        raise BgeM3IdentityError(
+            f"bge_m3_local requires an immutable 40-character commit SHA as the "
+            f"embedding version; got {revision!r}. A branch or tag name would let "
+            f"one stored embedding_version describe two different models."
+        )
+
+    download = downloader or _snapshot_downloader()
+    patterns = list(_SNAPSHOT_ALLOW_PATTERNS)
+    try:
+        path = download(repo_id=model, revision=revision, allow_patterns=patterns,
+                        local_files_only=True)
+    except Exception:  # noqa: BLE001 - absent or partial cache; try the network
+        path = download(repo_id=model, revision=revision, allow_patterns=patterns)
+
+    local = Path(str(path))
+    resolved = local.name
+    if resolved != revision:
+        raise BgeM3IdentityError(
+            f"resolved snapshot does not match the configured revision: "
+            f"model={model!r} configured={revision!r} resolved={resolved!r}"
+        )
+
+    missing = [name for name in _REQUIRED_SNAPSHOT_FILES
+               if not (local / name).is_file()]
+    if not any((local / name).is_file() for name in _TOKENIZER_SNAPSHOT_FILES):
+        missing.append(" or ".join(_TOKENIZER_SNAPSHOT_FILES))
+    if missing:
+        raise BgeM3IdentityError(
+            f"snapshot {resolved!r} of {model!r} is missing files required for "
+            f"dense inference: {', '.join(missing)}"
+        )
+    return ResolvedSnapshot(model=model, revision=resolved, local_path=str(local))
+
+
+def _snapshot_downloader() -> Callable[..., str]:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as error:
+        raise RuntimeError(
+            "bge_m3_local requires the optional requirements-embedding.txt dependencies"
+        ) from error
+    return snapshot_download
+
+
 def _load_flag_embedding_encoder(config: EmbeddingConfig) -> BgeM3Encoder:
     try:
         from FlagEmbedding import BGEM3FlagModel
@@ -164,13 +288,23 @@ def _load_flag_embedding_encoder(config: EmbeddingConfig) -> BgeM3Encoder:
         raise RuntimeError(
             "bge_m3_local requires the optional requirements-embedding.txt dependencies"
         ) from error
-    return BGEM3FlagModel(
-        config.model,
+    snapshot = _resolve_verified_bge_snapshot(config)
+    # The verified directory, never the repository id: given a path there is no
+    # second resolution for FlagEmbedding to perform, so ``main`` cannot be
+    # substituted. Passing ``revision`` here would be meaningless and misleading.
+    encoder = BGEM3FlagModel(
+        snapshot.local_path,
         normalize_embeddings=True,
         use_fp16=config.device.casefold().startswith("cuda"),
         devices=config.device,
-        revision=config.version,
     )
+    # Carried on the encoder so the provider can report what actually loaded
+    # rather than echoing what was requested.
+    try:
+        encoder.festival_resolved_snapshot = snapshot
+    except AttributeError:  # pragma: no cover - exotic encoder objects
+        pass
+    return encoder
 
 
 def _is_cuda_out_of_memory(error: BaseException) -> bool:
