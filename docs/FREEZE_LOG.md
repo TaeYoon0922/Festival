@@ -1790,8 +1790,8 @@ Not fixed by P1-R; a separate **Embedding Identity Hardening** follow-up.
 
 ## P1-C — Table Sibling / Evidence Neighborhood Expansion
 
-**Status:** Phase 1 **DIAGNOSIS COMPLETE — TARGET EXISTS** ·
-**IMPLEMENTATION DEFERRED PENDING PERIODIC VALIDATION**
+**Status:** **DIAGNOSIS COMPLETE — IMPLEMENTATION DEFERRED · LIVE PERIODIC
+TARGET NOT ESTABLISHED**
 
 This is not a freeze. **No production implementation exists**, so there is no
 contract to protect — only a measured target, a design that has not been built,
@@ -1885,7 +1885,7 @@ Bounds are not optional: the one recoverable case offered **8** candidate
 siblings for a single needed fact, and one table in the corpus emits 1,843
 chunks.
 
-### Why implementation is deferred
+### Why implementation was deferred pending live periodic validation
 - periodic is the only meaningful target domain;
 - **periodic Gold questions were not evaluated** — their companies are outside
   the seeded corpus;
@@ -1895,9 +1895,21 @@ chunks.
 - only **1 of 15** probes demonstrated end-to-end recoverable evidence;
 - the gain on real evaluation therefore remains unknown.
 
-### Reopen implementation only after
-1. periodic evaluation questions are available in the test corpus;
-2. same-table sibling misses are measured on **real questions**;
+### Live periodic validation decision
+The required validation has now been run on all 14 periodic Gold60 questions
+under the pinned live BGE-M3 identity. Gold answers requiring multiple sibling
+chunks measured **0/14** overall and **0/7** among table questions. Offline
+same-table sibling expansion recovered **0 questions**. The single exploratory
+hash-based probe therefore did not establish a production target on real
+periodic evaluation questions.
+
+**P1-C REMAINS DEFERRED.** No `TABLE_SIBLING_GAP` target is established.
+
+### Reopen implementation only if
+1. real evaluation questions demonstrate that an anchor is retrieved while
+   required same-table sibling evidence is absent;
+2. one generic bounded rule recovers at least two genuine answer failures
+   without removing or replacing existing answer evidence;
 3. frozen P0 / P1-A controls are verified against the expansion.
 
 ### Ownership firewall
@@ -2508,6 +2520,189 @@ case the availability policy.
 
 ---
 
+## Periodic Retrieval — Live BGE Diagnosis
+
+**Status:** **DIAGNOSIS COMPLETE — KEEP DEFERRED**
+
+This is **not** a FINAL FREEZE feature implementation. No production code,
+ranking rule, frozen contract, schema, evaluation policy, or database content
+was changed. This entry records why the weakest exact-Gold domain does not
+currently justify a production retrieval target.
+
+### Live baseline
+Evaluation used the pinned real-vector identity:
+
+| field | value |
+|---|---|
+| model | `BAAI/bge-m3` |
+| revision | `6892b95fed65c899a30896eb40d619ae284d0455` |
+| periodic questions | **14** |
+| exact-identity vector coverage | **complete for all 14** |
+
+Periodic Gold60 exact-Gold chunk metrics:
+
+| metric | value |
+|---|---:|
+| R@1 | **0.2857** |
+| R@3 | **0.3571** |
+| R@5 | **0.5000** |
+| R@10 | **0.6429** |
+| MRR | **0.3661** |
+
+### Structural inclusion
+
+| check | result |
+|---|---:|
+| Gold document in metadata candidate set | **14/14** |
+| Gold mapped chunk in retrieval candidate set | **14/14** |
+| required answer fact structurally present | **14/14** |
+| filing-period metadata present | **14/14** |
+
+The measured weakness is therefore **not** document candidate exclusion, chunk
+candidate exclusion, corpus omission, or filter exclusion.
+
+### Decisive answer-level result
+Under the current production pipeline:
+
+| check | result |
+|---|---:|
+| required answer terms present | **14/14** |
+| answerable | **14/14** |
+| unresolved required facts | **0** |
+| citations retained | **14/14** |
+
+No wrong requested period, unit loss, calculation loss, or citation loss was
+observed. The weak exact-Gold metric therefore does **not** currently represent
+14 answer-level failures.
+
+### Exact-Gold misses
+Primary exact-target owners were:
+
+| owner | count | questions |
+|---|---:|---|
+| `COMPLETE` | **9** | P02, P03, P04, P05, P07, P08, P09, P12, P14 |
+| `VECTOR_RANKING` | **1** | P01 |
+| `FUSION_RANKING` | **3** | P06, P11, P13 |
+| deterministic rerank / `OTHER` | **1** | P10 |
+
+All five exact-target misses nevertheless have answer-equivalent evidence in
+the final evidence set:
+
+- **P01:** equivalent disclosure text already supplies the DX product evidence.
+- **P06:** the HUBO / bipedal-robot description repeats across periodic filings.
+- **P10:** higher-ranked evidence already contains the requested KOSPI listing
+  date; only the exact Gold table is demoted.
+- **P11:** later periodic filings repeat the TableOne merger date.
+- **P13:** later periodic filings repeat the TC BONDER business description.
+
+Forcing the historical Gold filing or chunk in these cases would be
+evaluation-label tuning rather than a demonstrated answer-correctness fix.
+
+### Offline ablations
+
+| ablation | result |
+|---|---|
+| lexical-only | regressed overall |
+| vector-only | regressed overall |
+| remove deterministic rerank | recovered P10, lost P02, worsened aggregate ranking |
+| stronger existing period relevance | no effect |
+| table-representation dedup | no effect |
+| same-table sibling expansion | no recovery |
+| corrected-version preference | no effect |
+| additive table diversity | no recovery |
+
+No deterministic ablation recovered at least two genuine answer failures
+without regression.
+
+### P1-C decision
+**P1-C REMAINS DEFERRED.** Gold answers requiring multiple sibling chunks
+measured **0/14** overall and **0/7** among table questions. Same-table sibling
+expansion recovered **0 questions**. No `TABLE_SIBLING_GAP` target is
+established.
+
+### P1-B decision
+**P1-B REMAINS DEFERRED.** Gold documents and Gold chunks were both present in
+their candidate sets **14/14**. Filter relaxation is not responsible for the
+periodic metric.
+
+### Period and metric findings
+No shared period-aware target and no shared metric/account-alias target were
+found. Only P07 is a normalized financial-metric case, and it already ranks
+first. The set is heterogeneous: products, sanctions, credit ratings, revenue,
+capacity, technology, listing and merger events, audit matters, and business
+descriptions. A generic financial-account normalizer is not justified for this
+set.
+
+### Correction and version finding
+All Gold periodic documents involved in this diagnosis are non-corrections, and
+no relevant correction group controls the misses. The answer-equivalent facts
+come from ordinary recurring periodic disclosures, not original/corrected
+document chains. **P0-A remains unchanged.**
+
+### Latency finding — separate from retrieval correctness
+Periodic warm latency measured approximately:
+
+| measurement | value |
+|---|---:|
+| mean | **2.614 s** |
+| median | **2.010 s** |
+| p95 / max | **6.829 s** |
+
+Approximate mean stage costs:
+
+| stage | mean |
+|---|---:|
+| candidate chunk hydration | **2.115 s** |
+| query embedding | **184 ms** |
+| vector search | **88 ms** |
+| existing-vector lookup | **83 ms** |
+| chunk preparation | **58 ms** |
+| lexical retrieval | **36 ms** |
+| hybrid rerank | **7 ms** |
+
+Candidate chunk hydration is a separate performance target. Some periodic
+questions have candidate pools around 19,000 chunks, but exact misses were not
+systematically associated with larger pools than successful questions. Large
+pools explain latency variance better than correctness; this diagnosis does
+**not** authorize tighter retrieval filters.
+
+### Decision
+**Periodic Retrieval: NO PRODUCTION TARGET — KEEP DEFERRED.**
+
+Reasons:
+
+- all 14 questions are answerable;
+- supporting evidence remains cited;
+- exact misses mostly contain answer-equivalent recurring-disclosure evidence;
+- no shared deterministic failure family recovers at least two genuine
+  failures;
+- tested interventions either do nothing or regress existing evidence.
+
+### Evaluation-only follow-up
+Exact document/chunk metrics appear to understate periodic answer quality when
+another valid filing or chunk repeats the same stable fact. A potential future
+**semantic-equivalence evidence audit** must be period-sensitive,
+value-sensitive, company-sensitive, and citation-sensitive. It must not accept
+generic keyword overlap. It is not implemented by this documentation phase.
+
+### Negative invariants
+- Do not tune retrieval to force a historical Gold filing when equivalent
+  evidence is already served.
+- Do not reopen P1-C without an actual sibling-evidence failure.
+- Do not reopen P1-B without candidate or filter exclusion.
+- Do not remove deterministic reranking merely to recover P10.
+- Do not broadly increase `top_k`.
+- Do not replace existing answer evidence for diversity.
+- Do not optimize exact-Gold metrics at the expense of answer evidence.
+
+### Separate next priority
+**P0-D.2 HX04 correctness remains unresolved.** Its intended disclosure ranks
+first, but holding event construction is `0` and `matching_event_count = 0`.
+This is a downstream correctness issue separate from periodic retrieval. It is
+recorded as a follow-up only and is neither diagnosed nor changed here.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -2527,7 +2722,8 @@ case the availability policy.
 | P1-A5-A.1 Lossless Semantic Notice Preservation | FINAL FREEZE | `39574f9` |
 | P1-B Filter Relaxation / Retrieval Recovery | **IMPLEMENTATION DEFERRED — strengthened by live BGE evidence** | — |
 | P1-R Bounded Additive Document Recovery | FINAL FREEZE | `6503c77` |
-| P1-C Table Sibling / Evidence Neighborhood | **TARGET EXISTS / IMPLEMENTATION DEFERRED** | — |
+| P1-C Table Sibling / Evidence Neighborhood | **DIAGNOSIS COMPLETE — IMPLEMENTATION DEFERRED · LIVE PERIODIC TARGET NOT ESTABLISHED** | — |
 | INFRA-E1 Reproducible BGE-M3 Evaluation Environment | **PHASE 2 COMPLETE — P1-R UNBLOCKED** | — |
 | Embedding Identity Hardening | FINAL FREEZE | `f592e9d` |
 | Retrieval Vector-Availability Policy | FINAL FREEZE | `b1e31aa` |
+| Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
