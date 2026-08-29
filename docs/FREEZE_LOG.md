@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `c3d5929`.
+Branch: `taeyoon` · Log current through `3f60329`.
 
 ---
 
@@ -4113,6 +4113,101 @@ the frozen H01/HX02 benchmark targets.
 
 ---
 
+## TARGET B.2 — Reporter-Aware Deterministic Holding Report Index
+
+**Status: FINAL FREEZE** · Frozen implementation commit:
+`3f603299b395d11901bb4dbfcde1fb033cc374e6` (`3f60329`).
+
+### Freeze boundary
+
+This freeze covers the deterministic holding-report index and its bounded
+selection/execution surface only. It does **not** claim end-to-end
+report-relative execution, and it does **not** activate P0-D.2.
+
+| surface | frozen state |
+|---|---|
+| Target B.2 index | **FINAL FREEZE** |
+| `latest` / exact selection engine | **implemented** (`latest`, exact reference date, exact receipt date) |
+| correction-free issuer/reporter pair | **executable**, subject to unique selection and an available requested projection |
+| correction-bearing issuer/reporter pair | **fail-closed** as `correction_ambiguous` |
+| `selected_context` | **intentionally unsupported**; B.2 will not invent a prior report selection |
+| P0-D.2 | **still inactive**; `PRIMARY_COMPANY_WITH_REPORTER` is not production-active |
+
+### Frozen corpus and index evidence
+
+| measure | frozen result |
+|---|---|
+| source completeness | **1,083 / 1,083 holding documents source-complete** |
+| report-relative projections | **1,118** |
+| indexed records | **1,116** |
+| issuer/reporter pairs | **192** |
+| correction-bearing pairs | **22 / 192** → `correction_ambiguous` |
+| reference date ≠ receipt date | **697 / 1,116** |
+| distinct-document latest-date tied pairs | **7** |
+| `data/corpus/holding_report_index.json` | **880.1 KiB** |
+| artifact load | **≈ 13 ms** |
+| indexed lookup | **≈ 1.86 μs** |
+
+The artifact declares the corpus complete and preserves the two date axes.
+`latest` is ordered by **reference date**, not receipt date. A same-date tie is
+never broken with receipt number, document id, file order, or another technical
+field.
+
+### Implementation surface
+
+Files introduced by `3f60329`:
+
+- `app/reasoning/holding_report_index.py`
+- `data/corpus/holding_report_index.json`
+- `scripts/build_holding_report_index.py`
+- `tests/test_holding_report_index.py`
+
+The implementation enumerates records by issuer and the frozen canonical
+reporter key, validates corpus identity and completeness, selects one report
+deterministically when the contract permits it, and projects only fields stated
+by that selected filing. It adds no P0-D.2 production wiring.
+
+### Test gate
+
+| runner | frozen result |
+|---|---|
+| pytest | **1,775 passed / 13 skipped** |
+| unittest | **1,739 OK / 13 skipped** |
+
+### Invariants that must remain true
+
+1. An incomplete, stale, malformed, or schema-incompatible artifact fails
+   closed; it cannot answer `latest` from a partial corpus.
+2. `latest` uses reference date. Exact reference-date and receipt-date
+   selection remain separate operations.
+3. Correction finality is checked before any date comparison. With no frozen
+   finality source, every correction-bearing pair returns
+   `correction_ambiguous` and no selected record.
+4. Ties remain ambiguous; technical fields are serialization aids, never
+   semantic tie-breakers.
+5. `selected_context` remains unsupported until a separate, explicit contract
+   supplies the already-selected report.
+6. This index freeze does not authorize P0-D.2 activation, retrieval/ranking
+   changes, reporter propagation, or benchmark-specific report selection.
+
+### Known residual issues NOT solved
+
+- Correction finality is not available for this corpus.
+- A standalone `selected_context` phrase does not identify a report.
+- P0-D.2 role resolution and production integration remain inactive.
+- The frozen H01/HX02 benchmark targets remain context-dependent; B.2 does not
+  manufacture their missing report anchor.
+
+### Reopen conditions
+
+- corpus identity or completeness changes without a regenerated artifact;
+- a correction-bearing pair returns a selected report without proven finality;
+- a latest-date tie is resolved by a technical tie-breaker;
+- `selected_context` is silently promoted to `latest`;
+- P0-D.2 activation is inferred from this index freeze alone.
+
+---
+
 ## Summary
 
 | Phase | Status | Commit |
@@ -4138,4 +4233,5 @@ the frozen H01/HX02 benchmark targets.
 | Retrieval Vector-Availability Policy | FINAL FREEZE | `b1e31aa` |
 | HX04 Acquisition Semantics | FINAL FREEZE | `7393842` |
 | Comparison Intent Firewall (P0-D.2 Target A) | FINAL FREEZE | `7a0921e` |
+| TARGET B.2 — Reporter-Aware Deterministic Holding Report Index | FINAL FREEZE | `3f60329` |
 | Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
