@@ -4,7 +4,7 @@ Authoritative record of components that have passed implementation, regression,
 and live-server verification. A component listed here is **closed**. It is not
 reopened for cleanup, restructuring, or performance work.
 
-Branch: `taeyoon` · Log current through `7393842`.
+Branch: `taeyoon` · Log current through `e8851d7`.
 
 ---
 
@@ -347,7 +347,12 @@ independently proven safe**.
 ## P0-D.2 — Issuer / Reporter Role Resolution
 
 **Status:** Phase 1 **DIAGNOSIS COMPLETE — REOPEN TARGET EXISTS** ·
-**ACTIVATION DEFERRED — LIVE BGE-M3 SAFETY GATE FAILED (INFRA-E1)**
+**ACTIVATION DEFERRED — LIVE BGE-M3 SAFETY GATE FAILED (INFRA-E1)** ·
+Phase 3 **SAFETY RECHECK COMPLETE — KEEP DEFERRED** (`e8851d7`)
+
+**Two independent blockers remain: the comparison-intent firewall and the
+H01/HX02 retrieval-ranking residuals.** See
+[Safety recheck — Phase 3](#safety-recheck--phase-3) below.
 
 This is **not** a FINAL FREEZE. The **P0-D FINAL FREEZE above remains active**
 and **no production behavior has changed**. This entry records a target that was
@@ -550,6 +555,335 @@ wrong ones.
 | remaining retrieval ranking loss | **P1-R** |
 | undated multi-event safety | **P1-A5-A** |
 | the observed misses | **not P1-B** |
+
+### Safety recheck — Phase 3
+
+**Result: P0-D.2 SAFETY RECHECK COMPLETE — KEEP DEFERRED.**
+
+This recheck is **documentation only**. It is **not** a FINAL FREEZE activation.
+`PRIMARY_COMPANY_WITH_REPORTER` remains **NOT production-active**, and
+**two independent blockers remain**.
+
+#### 1 · Recheck baseline
+
+| | |
+|---|---|
+| branch | `taeyoon` |
+| safety recheck HEAD | `e8851d7` |
+| full suite | **1663 passed · 13 skipped · 1060 subtests** |
+
+Frozen dependencies confirmed at recheck time:
+
+| dependency | status | commit |
+|---|---|---|
+| HX04 Acquisition Semantics | FINAL FREEZE | `7393842` |
+| Embedding Identity Hardening | FINAL FREEZE | `f592e9d` |
+| Retrieval Vector-Availability Policy | FINAL FREEZE | `b1e31aa` |
+| P1-R Bounded Additive Document Recovery | FINAL FREEZE | `6503c77` |
+
+#### 2 · Frozen role contract under recheck
+
+The activation candidate contract is unchanged. It is eligible **only** when all
+of these hold:
+
+- the current result would otherwise be **AMBIGUOUS** because of a multi-company
+  company slot;
+- exactly **two** distinct canonical companies;
+- `company_comparison == false`;
+- `disclosure_route == ["holding"]`;
+- corpus relation support has **exactly one** eligible directed
+  issuer → reporter relationship;
+- that direction is supported by **≥2 distinct holding documents**.
+
+Then, and only then:
+
+```
+companies  = (issuer,)
+corp_codes = (issuer_code,)
+reporter   = counterparty
+```
+
+Otherwise **AMBIGUOUS is retained**. Queries naming **3+ companies remain
+AMBIGUOUS**. Non-holding routes are **unchanged**. Reporter canonicalization
+uses **frozen P1-A4.1 behaviour**.
+
+#### 3 · Six target controls
+
+Role resolution is **6/6 correct**. For all six: issuer **에스엠**, reporter
+**하이브**, forward relation support **10**, reverse relation support **0**,
+exact vector coverage **1.000**.
+
+**Downstream safety is NOT 6/6.**
+
+| question | intended document | note |
+|---|---|---|
+| H01 | **MISS** | |
+| H02 | rank 1 | |
+| HX01 | rank 2 | exact / `semantic_unique` |
+| HX02 | **MISS** | |
+| HX03 | rank 7 | |
+| HX04 | rank 1 | acquisition blocker resolved |
+
+#### 4 · HX04 status
+
+**HX04 downstream correctness is resolved.** Under generic bounded P0-D.2
+simulation:
+
+| | |
+|---|---|
+| `requested_fields` | `acquisition_date`, `acquired_shares` |
+| matching event count | **1** |
+| `acquisition_date` | **`2024-03-07`** |
+| `acquired_shares` | **`868,948`** |
+| same-row provenance | valid |
+| answerable | **true** |
+| citations | valid |
+
+`2024-03-14` is **not** `acquisition_date`. `2,967,759` is **not**
+`acquired_shares`.
+
+This confirms the HX04 blocker is no longer preventing P0-D.2 activation.
+
+> **Do NOT infer that P0-D.2 itself is safe.** One blocker being cleared is not
+> an activation signal.
+
+#### 5 · H01 / HX02 retrieval blocker
+
+**H01 and HX02 remain unresolved.** Both intended chunks are **structurally
+present in the retrieval candidate set**. Therefore this is:
+
+- **NOT** filter exclusion;
+- **NOT** candidate omission;
+- **NOT** vector-coverage failure.
+
+They are **ranking / final-selection losses**.
+
+**H01** — intended evidence is not emitted. Selected events instead include
+different dates such as `2023-02-09`, `2023-02-22`, `2023-03-13`, and values
+such as `4,392,368 / 18.45%` and `4,626,185 / 19.43%`. The requested intended
+values **`2,967,759 / 12.45%` are absent**.
+
+**HX02** — same core failure. Selected evidence carries unrelated/different
+event values, and the intended `2,967,759 / 12.45%` evidence **is absent**.
+
+> **These are NOT answer-equivalent exact-Gold misses.** They are genuine
+> downstream evidence failures. Current answers are hedged and under-specified
+> rather than confidently false — but **activation would replace today's
+> clarification with answerable output that does not contain the requested
+> event**.
+
+#### 6 · Comparison firewall blocker
+
+An **independent** validator / query-understanding blocker.
+
+Example query:
+
+```
+한화오션과 한화에어로스페이스 중 어디가 보유 주식수가 더 많아?
+```
+
+Current parsing yields `company_comparison = false`. Because the two-company
+holding relation satisfies the proposed role rule, the query **would be
+role-resolved as issuer/reporter**.
+
+**This is WRONG.** The query is a company comparison. Activation would
+**steal a legitimate comparison query and convert it into a single-issuer
+holding lookup**.
+
+Other tested comparison phrasings remained ambiguous, which demonstrates the
+issue is an **incomplete comparison detector**, not a desired role-resolution
+behaviour. **This blocker is independent of the H01/HX02 retrieval blocker.**
+
+#### 7 · False-positive sweep
+
+**93 questions tested** — Gold60, both orderings of the corpus relation pairs,
+and an unrelated pair control.
+
+| | |
+|---|---|
+| trigger-eligible | **39** |
+| role-resolved | **26** |
+| left ambiguous | **67** |
+| Gold60 resolved | **6** — exactly the six P0-D.2 target controls |
+| corpus pair queries | 20 resolved · 12 ambiguous |
+| unrelated pair | ambiguous |
+| **false role resolution** | **1** |
+
+The single false resolution is the **company-comparison case** above.
+
+**Word-order independence: PASS.** Issuer/reporter direction did not depend on
+mention order.
+
+#### 8 · Corpus relation inventory
+
+Derived from the processed holding corpus. **No Gold information was used to
+construct these relationships.**
+
+| | |
+|---|---|
+| holding documents | **1,083** |
+| reporter occurrences | **51,730** |
+| distinct master-linked directed pairs | **16** |
+| ≥2-document directed pairs | **10** |
+| one-document pairs | **6** |
+| bidirectional pairs | **0** |
+
+Representative directed support:
+
+| directed pair | support |
+|---|---|
+| 한화오션 → 한화에어로스페이스 | 15 |
+| 현대제철 → 기아 | 11 |
+| 에스엠 → 하이브 | 10 |
+| 현대자동차 → 현대모비스 | 10 |
+| 현대모비스 → 기아 | 8 |
+| 레인보우로보틱스 → 삼성전자 | 7 |
+| 현대오토에버 → 현대자동차 | 5 |
+| 두산퓨얼셀 → 두산에너빌리티 | 4 |
+| 삼성바이오로직스 → 삼성전자 | 2 |
+| 하이브 → 미래에셋증권 | 2 |
+
+#### 9 · Support threshold
+
+| threshold | eligible pairs | effect |
+|---|---|---|
+| ≥1 | 16 | admits all six one-document relations |
+| **≥2** | **10** | **rejects all six one-document relations** |
+| ≥3 | 8 | |
+
+Keep the conservative **≥2 distinct supporting documents** threshold as the best
+current corpus-derived candidate — but **do NOT mark it production-active**. The
+relation inventory is still small, and the absence of bidirectional relations in
+the current corpus **is not a domain guarantee**.
+
+#### 10 · Partial evaluation DB limitation
+
+> **`festival-verify` is not a complete corpus ingest.**
+
+| | |
+|---|---|
+| total disclosures | **4,204** |
+| with zero chunks in the evaluation DB | **3,022** |
+| holding disclosures | **1,083** |
+| with no reporter projection in the evaluation DB | **703** |
+| linked issuer/reporter pairs with no issuer holding documents available | **10 of 16** |
+
+The target **에스엠** pair is complete — **16 / 16** issuer holding documents
+available.
+
+Therefore the relation inventory **can** be reconstructed from the processed
+corpus artifact, but **full downstream safety across all 16 pairs cannot
+currently be demonstrated from `festival-verify`**.
+
+**Do NOT claim all relation pairs were retrieval-tested.**
+
+#### 11 · Route / cardinality firewalls
+
+**Non-holding route firewall: PASS** — `exchange`, `major`, `periodic` and
+correction/general lookup are all **not eligible**.
+
+**3+ company firewall: PASS** — no best-pair selection, no company discarded.
+
+#### 12 · Comparison precedence
+
+**FAIL.** The proposed contract depends on `company_comparison == false`, but
+current comparison detection is **not complete enough to be a safe firewall**.
+
+P0-D.2 must **not** activate until the comparison-intent gap is repaired and
+**independently regression-tested**.
+
+#### 13 · Relation performance
+
+| operation | measured cost |
+|---|---|
+| per-process DB relation `GROUP BY` construction | **~2,018.8 ms** |
+| per-query role lookup once constructed | **~0.013 ms** mean |
+
+Building the relation from SQL per request is **NOT acceptable**. A future
+activation should use a small **precomputed corpus-versioned relation artifact**
+or an equivalent cached deterministic representation.
+
+#### 14 · Future relation artifact — design finding only
+
+**Do NOT mark implemented.**
+
+```
+(issuer_corp_code, reporter_key) -> support
+                                 -> supporting document ids
+```
+
+Approximate current size: **~16 rows / ~3.2 KB**. It **must** carry
+corpus/version identity, with a **fail-closed stale policy**:
+
+> artifact corpus identity != active corpus identity
+> → issuer/reporter role resolution unavailable
+> → the query remains **AMBIGUOUS**
+
+**Never silently use stale role relationships.**
+
+#### 15 · Activation gate result
+
+| gate | result |
+|---|---|
+| retrieval residuals have sufficient requested-event evidence | **FAIL** |
+| comparison precedence preserved | **FAIL** |
+| false-positive sweep clean | **FAIL** |
+| downstream event matching fully correct | **FAIL** |
+| activation requires no further retrieval/ranking work | **FAIL** |
+
+Other major firewalls passed.
+
+> **P0-D.2 activation is NOT authorized.**
+
+#### 16 · Two independent next targets
+
+**TARGET A — COMPARISON INTENT FIREWALL** · owner: query understanding /
+validation. Ensure genuine two-company comparison questions are recognized as
+comparison **before** issuer/reporter role resolution can run. This target must
+be **generic**, not relation- or company-specific.
+
+**TARGET B — H01 / HX02 RETRIEVAL-RANKING RESIDUAL** · owner: retrieval / final
+evidence selection. The facts are structurally present but lost before the
+emitted context. This requires a **separate diagnosis**.
+
+> **Do NOT reopen P1-R or P1-B automatically.** Determine the exact first-loss
+> stage before changing any frozen retrieval contract.
+
+#### 17 · Next priority
+
+1. Comparison Intent Firewall
+2. H01 / HX02 ranking diagnosis
+3. P0-D.2 safety recheck again
+4. only then, if all gates pass, role-relation artifact implementation /
+   activation work
+
+**Do NOT implement the relation artifact while activation remains blocked.**
+
+#### 18 · Negative invariants
+
+Until activation is authorized:
+
+- `PRIMARY_COMPANY_WITH_REPORTER` remains **production-inactive**;
+- the two-company ambiguity rule remains **unchanged**;
+- **no** relation artifact is used for production role resolution;
+- **no** Gold / company / question special cases;
+- **no** retrieval change as part of this documentation;
+- **no** comparison query may be converted into an issuer/reporter lookup;
+- **no** exact-Gold miss may be called answer-equivalent when the requested
+  values differ;
+- the **HX04 acquisition freeze remains intact**.
+
+#### 19 · Status after this recheck
+
+**P0-D.2 Issuer / Reporter Role Resolution: ACTIVATION DEFERRED — SAFETY
+RECHECK REQUIRED.**
+
+Current blockers:
+
+1. **comparison-intent firewall**
+2. **H01 / HX02 retrieval-ranking residuals**
+
+**HX04 Acquisition Semantics remains FINAL FREEZE.**
 
 ---
 
@@ -3022,6 +3356,11 @@ resolution, which already produced the correct issuer and reporter.
 `PRIMARY_COMPANY_WITH_REPORTER` is **not** production-active. These statuses are
 recorded separately and must not be merged.
 
+That safety recheck has since been performed at `e8851d7` and returned
+**KEEP DEFERRED** — see P0-D.2 · *Safety recheck — Phase 3*. It confirmed the
+HX04 downstream blocker is cleared and left two unrelated blockers standing.
+**HX04 Acquisition Semantics remains FINAL FREEZE.**
+
 ### Reopen conditions
 - an acquisition fact demonstrably drawn from a row other than the one whose
   method proved the acquisition;
@@ -3040,7 +3379,7 @@ recorded separately and must not be merged.
 | P0-C Multi-Document Planner | FINAL FREEZE | `ba6a7c3` (from `d04c587`) |
 | P0-D Query Understanding & Verification | FINAL FREEZE | `7a7da17` |
 | P0-D.1 Multi-company Query Understanding | **DIAGNOSIS COMPLETE — KEEP P0-D FROZEN** | — |
-| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED — SAFETY RECHECK REQUIRED** (downstream HX04 blocker resolved) | — |
+| P0-D.2 Issuer / Reporter Role Resolution | **ACTIVATION DEFERRED — SAFETY RECHECK REQUIRED** · Phase 3 recheck complete, **KEEP DEFERRED** — blockers: comparison-intent firewall, H01/HX02 retrieval-ranking residuals | — |
 | P1-A2 Holding Evidence Routing Consistency | FINAL FREEZE | `1b8d08f` |
 | P1-A3 Holding Structured Evidence Coverage Rescue | FINAL FREEZE | `53e480f` |
 | P1-A4 Exact Holding Event Resolution | FINAL FREEZE | `d39a1b1` |
