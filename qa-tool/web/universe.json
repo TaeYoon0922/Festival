@@ -1,0 +1,632 @@
+[
+  {
+    "corp_name": "삼성전자",
+    "listed_name": "삼성전자",
+    "sector": "반도체·전자부품",
+    "n_periodic": 13,
+    "n_major": 19,
+    "n_exchange": 2,
+    "n_holding": 66
+  },
+  {
+    "corp_name": "SK하이닉스",
+    "listed_name": "SK하이닉스",
+    "sector": "반도체·전자부품",
+    "n_periodic": 13,
+    "n_major": 19,
+    "n_exchange": 4,
+    "n_holding": 14
+  },
+  {
+    "corp_name": "삼성전기",
+    "listed_name": "삼성전기",
+    "sector": "반도체·전자부품",
+    "n_periodic": 14,
+    "n_major": 0,
+    "n_exchange": 0,
+    "n_holding": 6
+  },
+  {
+    "corp_name": "한미반도체",
+    "listed_name": "한미반도체",
+    "sector": "반도체·전자부품",
+    "n_periodic": 13,
+    "n_major": 14,
+    "n_exchange": 16,
+    "n_holding": 17
+  },
+  {
+    "corp_name": "LG이노텍",
+    "listed_name": "LG이노텍",
+    "sector": "반도체·전자부품",
+    "n_periodic": 17,
+    "n_major": 0,
+    "n_exchange": 3,
+    "n_holding": 15
+  },
+  {
+    "corp_name": "현대자동차",
+    "listed_name": "현대차",
+    "sector": "자동차·모빌리티",
+    "n_periodic": 13,
+    "n_major": 12,
+    "n_exchange": 0,
+    "n_holding": 12
+  },
+  {
+    "corp_name": "기아",
+    "listed_name": "기아",
+    "sector": "자동차·모빌리티",
+    "n_periodic": 15,
+    "n_major": 11,
+    "n_exchange": 0,
+    "n_holding": 4
+  },
+  {
+    "corp_name": "현대모비스",
+    "listed_name": "현대모비스",
+    "sector": "자동차·모빌리티",
+    "n_periodic": 14,
+    "n_major": 11,
+    "n_exchange": 0,
+    "n_holding": 9
+  },
+  {
+    "corp_name": "현대오토에버",
+    "listed_name": "현대오토에버",
+    "sector": "자동차·모빌리티",
+    "n_periodic": 14,
+    "n_major": 2,
+    "n_exchange": 4,
+    "n_holding": 9
+  },
+  {
+    "corp_name": "레인보우로보틱스",
+    "listed_name": "레인보우로보틱스",
+    "sector": "로봇",
+    "n_periodic": 14,
+    "n_major": 1,
+    "n_exchange": 13,
+    "n_holding": 10
+  },
+  {
+    "corp_name": "두산로보틱스",
+    "listed_name": "두산로보틱스",
+    "sector": "로봇",
+    "n_periodic": 11,
+    "n_major": 14,
+    "n_exchange": 1,
+    "n_holding": 8
+  },
+  {
+    "corp_name": "LG에너지솔루션",
+    "listed_name": "LG에너지솔루션",
+    "sector": "2차전지",
+    "n_periodic": 13,
+    "n_major": 0,
+    "n_exchange": 21,
+    "n_holding": 6
+  },
+  {
+    "corp_name": "삼성SDI",
+    "listed_name": "삼성SDI",
+    "sector": "2차전지",
+    "n_periodic": 13,
+    "n_major": 5,
+    "n_exchange": 4,
+    "n_holding": 3
+  },
+  {
+    "corp_name": "에코프로비엠",
+    "listed_name": "에코프로비엠",
+    "sector": "2차전지",
+    "n_periodic": 15,
+    "n_major": 9,
+    "n_exchange": 3,
+    "n_holding": 79
+  },
+  {
+    "corp_name": "POSCO홀딩스",
+    "listed_name": "POSCO홀딩스",
+    "sector": "철강",
+    "n_periodic": 14,
+    "n_major": 2,
+    "n_exchange": 0,
+    "n_holding": 4
+  },
+  {
+    "corp_name": "현대제철",
+    "listed_name": "현대제철",
+    "sector": "철강",
+    "n_periodic": 13,
+    "n_major": 0,
+    "n_exchange": 1,
+    "n_holding": 16
+  },
+  {
+    "corp_name": "세아베스틸지주",
+    "listed_name": "세아베스틸지주",
+    "sector": "철강",
+    "n_periodic": 13,
+    "n_major": 0,
+    "n_exchange": 0,
+    "n_holding": 5
+  },
+  {
+    "corp_name": "고려아연",
+    "listed_name": "고려아연",
+    "sector": "비철금속",
+    "n_periodic": 18,
+    "n_major": 29,
+    "n_exchange": 1,
+    "n_holding": 50
+  },
+  {
+    "corp_name": "삼성생명",
+    "listed_name": "삼성생명",
+    "sector": "금융·보험",
+    "n_periodic": 25,
+    "n_major": 0,
+    "n_exchange": 0,
+    "n_holding": 15
+  },
+  {
+    "corp_name": "KB금융",
+    "listed_name": "KB금융",
+    "sector": "금융·보험",
+    "n_periodic": 25,
+    "n_major": 25,
+    "n_exchange": 0,
+    "n_holding": 9
+  },
+  {
+    "corp_name": "신한지주",
+    "listed_name": "신한지주",
+    "sector": "금융·보험",
+    "n_periodic": 14,
+    "n_major": 35,
+    "n_exchange": 0,
+    "n_holding": 2
+  },
+  {
+    "corp_name": "하나금융지주",
+    "listed_name": "하나금융지주",
+    "sector": "금융·보험",
+    "n_periodic": 18,
+    "n_major": 32,
+    "n_exchange": 0,
+    "n_holding": 22
+  },
+  {
+    "corp_name": "삼성화재해상보험",
+    "listed_name": "삼성화재",
+    "sector": "금융·보험",
+    "n_periodic": 21,
+    "n_major": 0,
+    "n_exchange": 0,
+    "n_holding": 5
+  },
+  {
+    "corp_name": "우리금융지주",
+    "listed_name": "우리금융지주",
+    "sector": "금융·보험",
+    "n_periodic": 15,
+    "n_major": 33,
+    "n_exchange": 3,
+    "n_holding": 8
+  },
+  {
+    "corp_name": "미래에셋증권",
+    "listed_name": "미래에셋증권",
+    "sector": "금융·보험",
+    "n_periodic": 19,
+    "n_major": 8,
+    "n_exchange": 0,
+    "n_holding": 11
+  },
+  {
+    "corp_name": "메리츠금융지주",
+    "listed_name": "메리츠금융지주",
+    "sector": "금융·보험",
+    "n_periodic": 33,
+    "n_major": 18,
+    "n_exchange": 2,
+    "n_holding": 22
+  },
+  {
+    "corp_name": "NAVER",
+    "listed_name": "NAVER",
+    "sector": "AI소프트웨어·플랫폼",
+    "n_periodic": 13,
+    "n_major": 17,
+    "n_exchange": 3,
+    "n_holding": 5
+  },
+  {
+    "corp_name": "카카오",
+    "listed_name": "카카오",
+    "sector": "AI소프트웨어·플랫폼",
+    "n_periodic": 24,
+    "n_major": 33,
+    "n_exchange": 0,
+    "n_holding": 7
+  },
+  {
+    "corp_name": "LG씨엔에스",
+    "listed_name": "LG씨엔에스",
+    "sector": "AI소프트웨어·플랫폼",
+    "n_periodic": 13,
+    "n_major": 2,
+    "n_exchange": 7,
+    "n_holding": 6
+  },
+  {
+    "corp_name": "SK텔레콤",
+    "listed_name": "SK텔레콤",
+    "sector": "통신",
+    "n_periodic": 13,
+    "n_major": 14,
+    "n_exchange": 0,
+    "n_holding": 6
+  },
+  {
+    "corp_name": "케이티",
+    "listed_name": "KT",
+    "sector": "통신",
+    "n_periodic": 14,
+    "n_major": 14,
+    "n_exchange": 1,
+    "n_holding": 26
+  },
+  {
+    "corp_name": "LG유플러스",
+    "listed_name": "LG유플러스",
+    "sector": "통신",
+    "n_periodic": 14,
+    "n_major": 2,
+    "n_exchange": 1,
+    "n_holding": 7
+  },
+  {
+    "corp_name": "크래프톤",
+    "listed_name": "크래프톤",
+    "sector": "게임",
+    "n_periodic": 14,
+    "n_major": 12,
+    "n_exchange": 2,
+    "n_holding": 43
+  },
+  {
+    "corp_name": "NC",
+    "listed_name": "엔씨소프트",
+    "sector": "게임",
+    "n_periodic": 15,
+    "n_major": 6,
+    "n_exchange": 3,
+    "n_holding": 12
+  },
+  {
+    "corp_name": "시프트업",
+    "listed_name": "시프트업",
+    "sector": "게임",
+    "n_periodic": 7,
+    "n_major": 4,
+    "n_exchange": 0,
+    "n_holding": 8
+  },
+  {
+    "corp_name": "삼성바이오로직스",
+    "listed_name": "삼성바이오로직스",
+    "sector": "바이오·제약",
+    "n_periodic": 15,
+    "n_major": 2,
+    "n_exchange": 97,
+    "n_holding": 3
+  },
+  {
+    "corp_name": "셀트리온",
+    "listed_name": "셀트리온",
+    "sector": "바이오·제약",
+    "n_periodic": 13,
+    "n_major": 29,
+    "n_exchange": 107,
+    "n_holding": 51
+  },
+  {
+    "corp_name": "알테오젠",
+    "listed_name": "알테오젠",
+    "sector": "바이오·제약",
+    "n_periodic": 13,
+    "n_major": 1,
+    "n_exchange": 17,
+    "n_holding": 5
+  },
+  {
+    "corp_name": "한미약품",
+    "listed_name": "한미약품",
+    "sector": "바이오·제약",
+    "n_periodic": 14,
+    "n_major": 2,
+    "n_exchange": 17,
+    "n_holding": 11
+  },
+  {
+    "corp_name": "파마리서치",
+    "listed_name": "파마리서치",
+    "sector": "바이오·제약",
+    "n_periodic": 14,
+    "n_major": 4,
+    "n_exchange": 1,
+    "n_holding": 19
+  },
+  {
+    "corp_name": "디앤디파마텍",
+    "listed_name": "디앤디파마텍",
+    "sector": "바이오·제약",
+    "n_periodic": 8,
+    "n_major": 4,
+    "n_exchange": 4,
+    "n_holding": 16
+  },
+  {
+    "corp_name": "HD현대중공업",
+    "listed_name": "HD현대중공업",
+    "sector": "조선",
+    "n_periodic": 13,
+    "n_major": 2,
+    "n_exchange": 61,
+    "n_holding": 8
+  },
+  {
+    "corp_name": "한화오션",
+    "listed_name": "한화오션",
+    "sector": "조선",
+    "n_periodic": 18,
+    "n_major": 18,
+    "n_exchange": 90,
+    "n_holding": 24
+  },
+  {
+    "corp_name": "삼성중공업",
+    "listed_name": "삼성중공업",
+    "sector": "조선",
+    "n_periodic": 16,
+    "n_major": 0,
+    "n_exchange": 75,
+    "n_holding": 9
+  },
+  {
+    "corp_name": "두산에너빌리티",
+    "listed_name": "두산에너빌리티",
+    "sector": "원전",
+    "n_periodic": 16,
+    "n_major": 8,
+    "n_exchange": 24,
+    "n_holding": 16
+  },
+  {
+    "corp_name": "한전기술",
+    "listed_name": "한전기술",
+    "sector": "원전",
+    "n_periodic": 15,
+    "n_major": 2,
+    "n_exchange": 42,
+    "n_holding": 9
+  },
+  {
+    "corp_name": "우리기술",
+    "listed_name": "우리기술",
+    "sector": "원전",
+    "n_periodic": 13,
+    "n_major": 9,
+    "n_exchange": 18,
+    "n_holding": 7
+  },
+  {
+    "corp_name": "한화에어로스페이스",
+    "listed_name": "한화에어로스페이스",
+    "sector": "방산·항공우주",
+    "n_periodic": 14,
+    "n_major": 15,
+    "n_exchange": 50,
+    "n_holding": 19
+  },
+  {
+    "corp_name": "현대로템",
+    "listed_name": "현대로템",
+    "sector": "방산·항공우주",
+    "n_periodic": 14,
+    "n_major": 0,
+    "n_exchange": 70,
+    "n_holding": 10
+  },
+  {
+    "corp_name": "LIG디펜스앤에어로스페이스",
+    "listed_name": "LIG넥스원",
+    "sector": "방산·항공우주",
+    "n_periodic": 14,
+    "n_major": 1,
+    "n_exchange": 71,
+    "n_holding": 30
+  },
+  {
+    "corp_name": "한국항공우주",
+    "listed_name": "한국항공우주",
+    "sector": "방산·항공우주",
+    "n_periodic": 14,
+    "n_major": 1,
+    "n_exchange": 55,
+    "n_holding": 30
+  },
+  {
+    "corp_name": "아모레퍼시픽",
+    "listed_name": "아모레퍼시픽",
+    "sector": "소비재·유통",
+    "n_periodic": 13,
+    "n_major": 19,
+    "n_exchange": 1,
+    "n_holding": 17
+  },
+  {
+    "corp_name": "LG생활건강",
+    "listed_name": "LG생활건강",
+    "sector": "소비재·유통",
+    "n_periodic": 13,
+    "n_major": 1,
+    "n_exchange": 0,
+    "n_holding": 11
+  },
+  {
+    "corp_name": "CJ제일제당",
+    "listed_name": "CJ제일제당",
+    "sector": "소비재·유통",
+    "n_periodic": 14,
+    "n_major": 0,
+    "n_exchange": 0,
+    "n_holding": 7
+  },
+  {
+    "corp_name": "이마트",
+    "listed_name": "이마트",
+    "sector": "소비재·유통",
+    "n_periodic": 13,
+    "n_major": 16,
+    "n_exchange": 3,
+    "n_holding": 13
+  },
+  {
+    "corp_name": "현대건설",
+    "listed_name": "현대건설",
+    "sector": "건설",
+    "n_periodic": 16,
+    "n_major": 0,
+    "n_exchange": 113,
+    "n_holding": 6
+  },
+  {
+    "corp_name": "삼성E&A",
+    "listed_name": "삼성E&A",
+    "sector": "건설",
+    "n_periodic": 16,
+    "n_major": 0,
+    "n_exchange": 110,
+    "n_holding": 15
+  },
+  {
+    "corp_name": "대우건설",
+    "listed_name": "대우건설",
+    "sector": "건설",
+    "n_periodic": 15,
+    "n_major": 1,
+    "n_exchange": 133,
+    "n_holding": 1
+  },
+  {
+    "corp_name": "HMM",
+    "listed_name": "HMM",
+    "sector": "운송·물류",
+    "n_periodic": 15,
+    "n_major": 1,
+    "n_exchange": 14,
+    "n_holding": 20
+  },
+  {
+    "corp_name": "현대글로비스",
+    "listed_name": "현대글로비스",
+    "sector": "운송·물류",
+    "n_periodic": 15,
+    "n_major": 1,
+    "n_exchange": 9,
+    "n_holding": 15
+  },
+  {
+    "corp_name": "엘에스일렉트릭",
+    "listed_name": "LS ELECTRIC",
+    "sector": "전력기기",
+    "n_periodic": 14,
+    "n_major": 6,
+    "n_exchange": 24,
+    "n_holding": 13
+  },
+  {
+    "corp_name": "HD현대일렉트릭",
+    "listed_name": "HD현대일렉트릭",
+    "sector": "전력기기",
+    "n_periodic": 14,
+    "n_major": 0,
+    "n_exchange": 26,
+    "n_holding": 8
+  },
+  {
+    "corp_name": "효성중공업",
+    "listed_name": "효성중공업",
+    "sector": "전력기기",
+    "n_periodic": 18,
+    "n_major": 0,
+    "n_exchange": 38,
+    "n_holding": 16
+  },
+  {
+    "corp_name": "한화솔루션",
+    "listed_name": "한화솔루션",
+    "sector": "신재생에너지",
+    "n_periodic": 17,
+    "n_major": 9,
+    "n_exchange": 4,
+    "n_holding": 27
+  },
+  {
+    "corp_name": "OCI홀딩스",
+    "listed_name": "OCI홀딩스",
+    "sector": "신재생에너지",
+    "n_periodic": 15,
+    "n_major": 14,
+    "n_exchange": 14,
+    "n_holding": 16
+  },
+  {
+    "corp_name": "두산퓨얼셀",
+    "listed_name": "두산퓨얼셀",
+    "sector": "신재생에너지",
+    "n_periodic": 13,
+    "n_major": 2,
+    "n_exchange": 83,
+    "n_holding": 5
+  },
+  {
+    "corp_name": "하이브",
+    "listed_name": "하이브",
+    "sector": "엔터테인먼트",
+    "n_periodic": 18,
+    "n_major": 14,
+    "n_exchange": 1,
+    "n_holding": 21
+  },
+  {
+    "corp_name": "에스엠",
+    "listed_name": "에스엠",
+    "sector": "엔터테인먼트",
+    "n_periodic": 16,
+    "n_major": 10,
+    "n_exchange": 0,
+    "n_holding": 16
+  },
+  {
+    "corp_name": "JYP Ent",
+    "listed_name": "JYP Ent",
+    "sector": "엔터테인먼트",
+    "n_periodic": 13,
+    "n_major": 3,
+    "n_exchange": 1,
+    "n_holding": 9
+  },
+  {
+    "corp_name": "와이지엔터테인먼트",
+    "listed_name": "와이지엔터테인먼트",
+    "sector": "엔터테인먼트",
+    "n_periodic": 15,
+    "n_major": 0,
+    "n_exchange": 1,
+    "n_holding": 33
+  }
+]

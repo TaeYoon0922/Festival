@@ -1,0 +1,19 @@
+question_id: HY01
+question: 2025 현대자동차 사업보고서에서 매출액의 구성
+listed_name: 현대차
+corp_name: 현대자동차
+doc_group: periodic
+report_nm · period: 사업보고서 (연말 결산)
+basis: (질문에 연결/별도 명시 권장)
+task_type (기대): periodic_fact · metric_view=breakdown
+must_include_in_answer:
+  - 섹션: 고객과의 계약에서 생기는 수익의 구분 (또는 동의 표)
+  - 행: 재화·용역·로열티·금융·건설·기타 (공시에 있는 줄만)
+  - 숫자 단위 (백만원/주/% 등 공시 그대로)
+must_NOT_invent: 코퍼스 밖 공시·뉴스, 전년 대비·성장성 해석, 표에 없는 재분류, 질문과 다른 과목(매출원가·EPS 등) 혼입
+evidence:
+  doc_id: periodic_(rcept_no)
+  section_path: 수익 구분 표
+  manifest: data/corpus/manifest.jsonl에서 corp_name·rcept_dt 검색
+negative_example: 손익계산서 매출액 총액 한 줄(186,254,472)만 답함
+notes: (공시 열람 후 doc_id·기대답 숫자 보완) · 연결/별도 명시 권장
