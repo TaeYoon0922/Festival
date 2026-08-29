@@ -30,11 +30,16 @@ from app.reasoning.holding_date_intent import (
 )
 from app.reasoning.holding_event_fusion import fuse as fuse_holding_events
 from app.reasoning.holding_event_selection import (
+    EXACT,
     classify_holding_event_selection,
 )
 from app.reasoning.holding_evidence_coverage import (
     CoverageAssessment,
     assess as assess_holding_coverage,
+)
+from app.reasoning.holding_report_relative_execution import (
+    HoldingReportRelativeExecution,
+    ReportRelativeEvidenceExecution,
 )
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 
@@ -78,6 +83,16 @@ class AgentResult:
     #: public response renders this list, so what the resolver used and what the
     #: caller is shown stay the same evidence.
     evidence_results: tuple[Any, ...] = ()
+    #: Candidate chunks paired with ``evidence_results``.  Usually this is the
+    #: frozen retrieval pool; exact deterministic hydration can instead supply
+    #: a selected chunk that retrieval never fetched.
+    evidence_chunks: tuple[Any, ...] = ()
+    #: Distinguishes an intentional empty deterministic failure from an older
+    #: caller that simply did not populate the two internal evidence fields.
+    evidence_overridden: bool = False
+    #: Internal Phase 3 diagnostic; deliberately absent from ``to_dict`` and
+    #: therefore from the public API schema.
+    report_relative_execution: ReportRelativeEvidenceExecution | None = None
 
     def to_dict(self) -> dict[str, Any]:
         resolution = self.resolution
@@ -104,6 +119,7 @@ class AgentOrchestrator:
         periodic_resolver: PeriodicFactResolver | None = None,
         periodic_evidence_selector: PeriodicEvidenceSelector | None = None,
         answer_composer: AnswerComposer | None = None,
+        report_relative_execution: HoldingReportRelativeExecution | None = None,
     ) -> None:
         self.task_router = task_router or TaskRouter()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
@@ -113,6 +129,7 @@ class AgentOrchestrator:
             periodic_evidence_selector or PeriodicEvidenceSelector()
         )
         self.answer_composer = answer_composer or AnswerComposer()
+        self.report_relative_execution = report_relative_execution
 
     def run(
         self,
@@ -133,27 +150,51 @@ class AgentOrchestrator:
         trace = ["task_router"]
         decision = self.task_router.route(question, query_plan)
 
+        # Phase 3.  The report index, never ranked retrieval, decides which
+        # filing report-relative wording names.  A returned execution is
+        # authoritative even when empty: empty means the deterministic source
+        # declined and ordinary retrieval must not answer from another report.
+        report_relative = (
+            self.report_relative_execution.adapt(
+                question,
+                query_plan,
+                execution,
+                routed_task_type=decision.task_type,
+            )
+            if self.report_relative_execution is not None
+            else None
+        )
+
         # A holding execution can be served plenty of evidence and still be
         # unable to answer: the structured projections carrying the fields may
         # have missed the cutoff, or the served ones may be the wrong projection
         # type for what was asked. Top the gap up from the pool retrieval
         # already fetched -- no query is issued here -- and leave the original
         # execution untouched so the read-only invariants still hold.
-        coverage = assess_holding_coverage(
-            question,
-            query_plan,
-            execution.chunks,
-            execution.results,
-            routed_task_type=decision.task_type,
-        )
-        evidence_input = execution
-        if coverage.rescued:
-            trace.append("holding_evidence_coverage")
+        if report_relative is not None:
+            trace.append("holding_report_relative_execution")
             evidence_input = SimpleNamespace(
                 plan=execution.plan,
-                chunks=execution.chunks,
-                results=list(coverage.results),
+                chunks=report_relative.chunks,
+                results=report_relative.results,
             )
+            coverage = CoverageAssessment(results=report_relative.results)
+        else:
+            coverage = assess_holding_coverage(
+                question,
+                query_plan,
+                execution.chunks,
+                execution.results,
+                routed_task_type=decision.task_type,
+            )
+            evidence_input = execution
+            if coverage.rescued:
+                trace.append("holding_evidence_coverage")
+                evidence_input = SimpleNamespace(
+                    plan=execution.plan,
+                    chunks=execution.chunks,
+                    results=list(coverage.results),
+                )
 
         # P1-A4 D1. A question naming one calendar day is asking about one
         # event, but the plan only carries that day when its own task type was
@@ -207,8 +248,12 @@ class AgentOrchestrator:
             draft = self.answer_composer.compose(
                 evidence,
                 holding_resolution=resolution,
-                selection_mode=classify_holding_event_selection(
-                    holding_plan, routed_task_type=decision.task_type
+                selection_mode=(
+                    EXACT
+                    if report_relative is not None and report_relative.resolved
+                    else classify_holding_event_selection(
+                        holding_plan, routed_task_type=decision.task_type
+                    )
                 ),
             )
         elif decision.task_type == "periodic_fact":
@@ -249,6 +294,12 @@ class AgentOrchestrator:
             dict.fromkeys(
                 [
                     *decision.warnings,
+                    *(
+                        (f"holding_report_relative:{report_relative.status}",)
+                        if report_relative is not None
+                        and not report_relative.resolved
+                        else ()
+                    ),
                     *evidence.warnings,
                     *(
                         resolution.warnings
@@ -269,6 +320,9 @@ class AgentOrchestrator:
             execution_trace=tuple(trace),
             holding_coverage=coverage,
             evidence_results=tuple(evidence_input.results),
+            evidence_chunks=tuple(evidence_input.chunks),
+            evidence_overridden=bool(report_relative is not None or coverage.rescued),
+            report_relative_execution=report_relative,
         )
 
 

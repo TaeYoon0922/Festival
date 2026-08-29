@@ -41,6 +41,9 @@ from app.reasoning.multi_document_evidence import (
 from app.reasoning.multi_document_executor import MultiDocumentExecutor
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
 from app.reasoning.multi_document_semantics import check_answer
+from app.reasoning.holding_report_relative_execution import (
+    HoldingReportRelativeExecution,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import (
     CorpusScope,
@@ -212,6 +215,14 @@ class AnswerPipeline:
                     event_repository, backend, backend, backend
                 ),
                 config=settings.retrieval_config(),
+            ),
+            orchestrator=AgentOrchestrator(
+                report_relative_execution=(
+                    HoldingReportRelativeExecution.from_repository(
+                        document_backend=backend,
+                        chunk_backend=backend,
+                    )
+                )
             ),
             # P0-C: a deterministic completeness layer on top of the frozen
             # ranking. It engages only for questions that name a company, an
@@ -530,10 +541,16 @@ class _FinalEvidence:
     reports what the agent actually answered from.
     """
 
-    __slots__ = ("_execution", "results")
+    __slots__ = ("_execution", "chunks", "results")
 
-    def __init__(self, execution: Any, results: Sequence[Any]) -> None:
+    def __init__(
+        self,
+        execution: Any,
+        chunks: Sequence[Any],
+        results: Sequence[Any],
+    ) -> None:
         self._execution = execution
+        self.chunks = chunks
         self.results = tuple(results)
 
     def __getattr__(self, name: str) -> Any:
@@ -547,10 +564,23 @@ def final_evidence(execution: Any, result: Any) -> Any:
     question keeps rendering the exact object it always did.
     """
 
+    overridden = bool(getattr(result, "evidence_overridden", False))
     results = tuple(getattr(result, "evidence_results", ()) or ())
-    if not results or list(results) == list(execution.results):
+    chunks = tuple(getattr(result, "evidence_chunks", ()) or ())
+    if overridden:
+        return _FinalEvidence(execution, chunks, results)
+    if not results:
         return execution
-    return _FinalEvidence(execution, results)
+    if list(results) == list(execution.results) and not chunks:
+        return execution
+    if not chunks:
+        chunks = getattr(execution, "chunks", ())
+    if (
+        list(results) == list(execution.results)
+        and list(chunks) == list(execution.chunks)
+    ):
+        return execution
+    return _FinalEvidence(execution, chunks, results)
 
 
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
