@@ -45,6 +45,7 @@ from app.reasoning.holding_report_relative_execution import (
     HoldingReportRelativeExecution,
     ReportRelativeEvidenceExecution,
 )
+from app.reasoning.holding_report_index import HoldingReportIndex
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 from app.retrieval.interfaces import RetrievalResult
 
@@ -126,6 +127,8 @@ class AgentOrchestrator:
         answer_composer: AnswerComposer | None = None,
         report_relative_execution: HoldingReportRelativeExecution | None = None,
         holding_company_role_resolver: HoldingCompanyRoleResolver | None = None,
+        holding_report_index: HoldingReportIndex | None = None,
+        active_corpus_identity: Mapping[str, Any] | None = None,
     ) -> None:
         self.task_router = task_router or TaskRouter()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
@@ -137,6 +140,21 @@ class AgentOrchestrator:
         self.answer_composer = answer_composer or AnswerComposer()
         self.report_relative_execution = report_relative_execution
         self.holding_company_role_resolver = holding_company_role_resolver
+        self.holding_report_index = (
+            holding_report_index
+            if holding_report_index is not None
+            else getattr(report_relative_execution, "index", None)
+        )
+        inherited_identity = getattr(
+            report_relative_execution, "active_corpus_identity", None
+        )
+        self.active_corpus_identity = (
+            dict(active_corpus_identity)
+            if active_corpus_identity is not None
+            else dict(inherited_identity)
+            if inherited_identity is not None
+            else None
+        )
 
     def run(
         self,
@@ -156,6 +174,9 @@ class AgentOrchestrator:
         plan_before = _plan_snapshot(query_plan)
         trace = ["task_router"]
         decision = self.task_router.route(question, query_plan)
+        holding_plan = holding_execution_plan(
+            question, query_plan, routed_task_type=decision.task_type
+        )
 
         # Phase 3.  The report index, never ranked retrieval, decides which
         # filing report-relative wording names.  A returned execution is
@@ -200,10 +221,16 @@ class AgentOrchestrator:
                 trace.append("holding_reporter_scope")
             coverage = assess_holding_coverage(
                 question,
-                query_plan,
+                holding_plan,
                 ordinary_execution.chunks,
                 ordinary_execution.results,
                 routed_task_type=decision.task_type,
+                report_index=self.holding_report_index,
+                active_corpus_identity=self.active_corpus_identity,
+                # The production stack always has the Phase-3 adapter.  Its
+                # declining this question is what proves ordinary ownership;
+                # without that boundary component the fallback stays closed.
+                ordinary_lane=self.report_relative_execution is not None,
             )
             evidence_input = ordinary_execution
             if coverage.rescued:
@@ -220,9 +247,6 @@ class AgentOrchestrator:
         # Re-read the date with the routed semantics and carry it on a copy, so
         # the frozen plan (and the understanding trace) stay exactly as P0-D
         # left them.
-        holding_plan = holding_execution_plan(
-            question, query_plan, routed_task_type=decision.task_type
-        )
         if holding_plan is not query_plan:
             trace.append("holding_date_intent")
 

@@ -37,6 +37,13 @@ from app.reasoning.holding_event_resolver import (
     _normalize_text,
     _requested_fields,
 )
+from app.reasoning.holding_date_intent import exact_reference_date
+from app.reasoning.holding_report_index import (
+    SELECTOR_EXACT_REFERENCE_DATE,
+    HoldingReportIndex,
+    HoldingReportRecord,
+)
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
@@ -52,6 +59,10 @@ STATUS_NO_SAFE_DISPLACEMENT = "no_safe_displacement"
 STATUS_NO_ANCHOR = "no_anchored_candidate"
 STATUS_RESCUED = "rescued"
 STATUS_PARTIAL = "rescued_partial_coverage"
+
+#: Internal diagnostic identifying which existing coverage path promoted rows.
+RESCUE_MODE_SERVED_ANCHOR = "served_anchor"
+RESCUE_MODE_CONTRACT_D = "contract_d"
 
 #: How firmly a candidate is tied to evidence retrieval already served.
 ANCHOR_STRONG = "strong"
@@ -92,6 +103,7 @@ class CoverageAssessment:
     results: tuple[RetrievalResult, ...] = ()
     evaluated: bool = False
     anchored_candidate_count: int = 0
+    rescue_mode: str | None = None
     #: (chunk_id, anchor tier, served rank of the item it completes)
     anchors: tuple[tuple[str, str, int], ...] = ()
 
@@ -112,6 +124,7 @@ class CoverageAssessment:
             "displaced_chunk_ids": list(self.displaced),
             "remaining_unresolved_fields": list(self.remaining_unresolved),
             "anchored_candidate_count": self.anchored_candidate_count,
+            "rescue_mode": self.rescue_mode,
             "anchors": [
                 {"chunk_id": chunk_id, "tier": tier, "served_rank": rank}
                 for chunk_id, tier, rank in self.anchors
@@ -362,6 +375,161 @@ def _eligible(
     )
 
 
+def _projection_reporter_key(chunk: Mapping[str, Any]) -> str:
+    fields = dict(chunk.get("projection_fields") or {})
+    for label in _FIELD_LABELS.get("reporter", ()):
+        value = fields.get(label)
+        if str(value or "").strip():
+            return canonical_reporter_key(value)
+    return canonical_reporter_key(chunk.get("reporter"))
+
+
+def _projection_event_matches(
+    candidate: CandidateChunk,
+    record: HoldingReportRecord,
+) -> bool:
+    """Whether this projection states the event identity selected by the index."""
+
+    chunk = candidate.chunk
+    reference_date = _reference_date(chunk)
+    return (
+        candidate.doc_id == record.doc_id
+        and str(chunk.get("doc_id") or candidate.doc_id) == record.doc_id
+        and str(chunk.get("projection_type") or "") == "holding_report"
+        and str(chunk.get("corp_code") or "") == record.issuer_corp_code
+        and _projection_reporter_key(chunk) == record.reporter_key
+        and str(reference_date or "").replace("-", "") == record.reference_date
+        and is_citable(chunk)
+    )
+
+
+def _record_projection_matches(
+    candidate: CandidateChunk,
+    record: HoldingReportRecord,
+) -> bool:
+    """Whether this is the frozen projection named by an index record."""
+
+    return (
+        candidate.chunk_id == record.projection_chunk_id
+        and _projection_event_matches(candidate, record)
+    )
+
+
+def _contract_d_candidate(
+    plan: Any,
+    chunks: Sequence[CandidateChunk],
+    results: Sequence[RetrievalResult],
+    requested: Sequence[str],
+    *,
+    report_index: HoldingReportIndex | None,
+    active_corpus_identity: Mapping[str, Any] | None,
+    ordinary_lane: bool,
+) -> tuple[CandidateChunk, int] | None:
+    """The one projection authorised by the Contract-D evidence relation.
+
+    Retrieval proves document relevance, the shared report index proves event
+    identity, and an exact raw-row bridge in the already-fetched pool proves
+    source identity.  None of the three is allowed to stand in for another.
+    """
+
+    approved_requests = frozenset(
+        {
+            ("after_shares",),
+            ("after_ratio",),
+            tuple(CURRENT_HOLDING_STATE_FIELDS),
+        }
+    )
+    if (
+        not ordinary_lane
+        or report_index is None
+        or not active_corpus_identity
+        or not report_index.identity
+        or not requested
+        or tuple(requested) not in approved_requests
+        or bool(getattr(plan, "comparison", None))
+    ):
+        return None
+
+    corp_code = str(getattr(plan, "corp_code", "") or "").strip()
+    corp_codes = tuple(getattr(plan, "corp_codes", ()) or ())
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    reference_date = exact_reference_date(plan)
+    if (
+        not corp_code
+        or (corp_codes and len(corp_codes) != 1)
+        or not canonical_reporter_key(reporter)
+        or not reference_date
+    ):
+        return None
+
+    try:
+        selection = report_index.select_report(
+            corp_code,
+            reporter,
+            SELECTOR_EXACT_REFERENCE_DATE,
+            reference_date=reference_date,
+            active_corpus_identity=active_corpus_identity,
+        )
+    except Exception:  # noqa: BLE001 - a deterministic guard fails closed
+        return None
+    if not selection.resolved or selection.selected is None:
+        return None
+    record = selection.selected
+
+    served = [result for result in results if result.doc_id == record.doc_id]
+    if not served:
+        return None
+
+    projections = [
+        candidate
+        for candidate in chunks
+        if candidate.chunk_id == record.projection_chunk_id
+    ]
+    if len(projections) != 1:
+        return None
+    projection = projections[0]
+    if (
+        projection.chunk_id in {result.chunk_id for result in results}
+        or not _record_projection_matches(projection, record)
+    ):
+        return None
+    event_matches = [
+        candidate
+        for candidate in chunks
+        if _projection_event_matches(candidate, record)
+    ]
+    if len(event_matches) != 1 or event_matches[0].chunk_id != projection.chunk_id:
+        return None
+
+    raw_matches = [
+        candidate
+        for candidate in chunks
+        if candidate.doc_id == record.doc_id
+        and str(candidate.chunk.get("chunk_type") or "") == "table"
+        and not candidate.chunk.get("projection_type")
+        and bool(candidate.chunk.get("is_indexable", True))
+        and _same_source_rows(projection.chunk, candidate.chunk)
+        and anchor_tier(projection.chunk, candidate.chunk, reporter) == ANCHOR_STRONG
+    ]
+    if len(raw_matches) != 1:
+        return None
+    raw = raw_matches[0]
+
+    # The raw rows must identify only the index-selected report projection.
+    # Otherwise the bridge merely proves that several projections copied the
+    # same evidence and cannot decide which event the question names.
+    bridged = [
+        candidate
+        for candidate in chunks
+        if candidate.doc_id == record.doc_id
+        and str(candidate.chunk.get("projection_type") or "") == "holding_report"
+        and _same_source_rows(candidate.chunk, raw.chunk)
+    ]
+    if len(bridged) != 1 or bridged[0].chunk_id != projection.chunk_id:
+        return None
+    return projection, min(result.rank for result in served)
+
+
 #: Marker written onto a promoted row so coverage-derived evidence stays
 #: distinguishable from what retrieval itself ranked.
 PROVENANCE_KEY = "holding_evidence_coverage"
@@ -386,6 +554,9 @@ def assess(
     results: Sequence[RetrievalResult],
     *,
     routed_task_type: str | None = None,
+    report_index: HoldingReportIndex | None = None,
+    active_corpus_identity: Mapping[str, Any] | None = None,
+    ordinary_lane: bool = False,
 ) -> CoverageAssessment:
     """Decide whether the served results can answer the requested fields.
 
@@ -455,6 +626,7 @@ def assess(
     remaining = list(unresolved)
     selected: list[RetrievalResult] = []
     picked: dict[str, tuple[str, int]] = {}
+    rescue_mode: str | None = None
     for result in results:                       # served rank order
         served_chunk = by_id.get(result.chunk_id)
         if served_chunk is None:
@@ -486,7 +658,41 @@ def assess(
                 seen.add(candidate.chunk_id)
                 contribution[candidate.chunk_id] = gained
                 picked[candidate.chunk_id] = (tier, result.rank)
+                rescue_mode = RESCUE_MODE_SERVED_ANCHOR
                 remaining = [n for n in remaining if n not in gained]
+
+    # A raw counterpart in the full pool is not relevance evidence: almost
+    # every report projection has one.  Contract D opens one narrower path only
+    # after ranked retrieval served the selected document and the shared index
+    # independently selected one active issuer/reporter/reference-date event.
+    # The exact raw bridge then proves that the selected projection renders the
+    # same physical rows.  No query, hydration, reranking or rescore occurs.
+    if remaining:
+        guarded = _contract_d_candidate(
+            plan,
+            chunks,
+            results,
+            requested,
+            report_index=report_index,
+            active_corpus_identity=active_corpus_identity,
+            ordinary_lane=ordinary_lane,
+        )
+        if guarded is not None:
+            candidate, served_rank = guarded
+            promoted = _synthetic(
+                candidate, len(results) + len(selected) + 1
+            )
+            all_covered = covered_fields(candidate, promoted, requested)
+            if set(requested).issubset(all_covered):
+                gained = all_covered.intersection(remaining)
+                if gained:
+                    selected.append(promoted)
+                    seen.add(candidate.chunk_id)
+                    contribution[candidate.chunk_id] = gained
+                    picked[candidate.chunk_id] = (ANCHOR_STRONG, served_rank)
+                    anchored_count += 1
+                    rescue_mode = RESCUE_MODE_CONTRACT_D
+                    remaining = [name for name in remaining if name not in gained]
 
     if not selected:
         # Policy: anchored only. A candidate that closes the gap but completes
@@ -513,6 +719,7 @@ def assess(
             "results": tuple(merged),
             "status": STATUS_RESCUED if not remaining else STATUS_PARTIAL,
             "anchored_candidate_count": anchored_count,
+            "rescue_mode": rescue_mode,
             "anchors": tuple(
                 (result.chunk_id, *picked[result.chunk_id]) for result in selected
             ),

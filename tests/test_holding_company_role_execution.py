@@ -175,6 +175,7 @@ class HoldingCompanyRoleExecutionTests(unittest.TestCase):
     def test_pipeline_uses_one_shared_index_dependency(self) -> None:
         self.assertIs(self.orchestrator.report_relative_execution.index, self.index)
         self.assertIs(self.orchestrator.holding_company_role_resolver.index, self.index)
+        self.assertIs(self.orchestrator.holding_report_index, self.index)
         self.assertIs(self.validator.holding_company_role_resolver.index, self.index)
 
     def test_resolved_role_records_bounded_provenance_and_scopes(self) -> None:

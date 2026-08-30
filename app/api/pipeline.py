@@ -230,6 +230,10 @@ class AnswerPipeline:
             orchestrator=AgentOrchestrator(
                 report_relative_execution=report_relative_execution,
                 holding_company_role_resolver=holding_company_role_resolver,
+                holding_report_index=report_relative_execution.index,
+                active_corpus_identity=(
+                    report_relative_execution.active_corpus_identity
+                ),
             ),
             # P0-C: a deterministic completeness layer on top of the frozen
             # ranking. It engages only for questions that name a company, an
