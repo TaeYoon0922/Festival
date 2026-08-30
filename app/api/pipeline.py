@@ -44,6 +44,9 @@ from app.reasoning.multi_document_semantics import check_answer
 from app.reasoning.holding_report_relative_execution import (
     HoldingReportRelativeExecution,
 )
+from app.reasoning.holding_company_role_resolution import (
+    HoldingCompanyRoleResolver,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import (
     CorpusScope,
@@ -185,6 +188,14 @@ class AnswerPipeline:
         multi_document_planner = MultiDocumentPlanner()
         hcx_settings = HcxSettings.from_env()
         corpus_scope = CorpusScope.repository_default()
+        report_relative_execution = HoldingReportRelativeExecution.from_repository(
+            document_backend=backend,
+            chunk_backend=backend,
+        )
+        holding_company_role_resolver = HoldingCompanyRoleResolver(
+            report_relative_execution.index,
+            active_corpus_identity=report_relative_execution.active_corpus_identity,
+        )
         return cls(
             settings=settings,
             understanding=QueryUnderstanding(
@@ -217,12 +228,8 @@ class AnswerPipeline:
                 config=settings.retrieval_config(),
             ),
             orchestrator=AgentOrchestrator(
-                report_relative_execution=(
-                    HoldingReportRelativeExecution.from_repository(
-                        document_backend=backend,
-                        chunk_backend=backend,
-                    )
-                )
+                report_relative_execution=report_relative_execution,
+                holding_company_role_resolver=holding_company_role_resolver,
             ),
             # P0-C: a deterministic completeness layer on top of the frozen
             # ranking. It engages only for questions that name a company, an
@@ -245,6 +252,7 @@ class AnswerPipeline:
                 corpus_scope=corpus_scope,
                 multi_document_planner=multi_document_planner,
                 event_scope_provider=PostgresEventScopeProvider(backend),
+                holding_company_role_resolver=holding_company_role_resolver,
             ),
             semantic_fallback=HcxSemanticQueryFallback(hcx_settings),
             answerability_guard=AnswerabilityGuard(),

@@ -6,13 +6,18 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from app.reasoning.holding_company_role_resolution import HoldingCompanyRoleResolver
+from app.reasoning.holding_report_index import HoldingReportIndex, HoldingReportRecord
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
+from app.reasoning.query_plan import QueryPlan
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import (
     CorpusScope,
     QuerySlotSource,
     QueryState,
     QueryValidator,
+    _holding_company_role_resolution_allowed,
 )
 
 
@@ -492,6 +497,217 @@ class ComparisonFirewallPrecedenceTests(unittest.TestCase):
                     result.plan.evidence["comparison_frame"], "cross_company"
                 )
                 self.assertTrue(result.plan.evidence["role_reinterpretation_blocked"])
+
+
+class HoldingCompanyRoleValidationTests(unittest.TestCase):
+    A = "가상발행사"
+    B = "가상투자사"
+    C = "가상제삼사"
+    A_CODE = "00000001"
+    B_CODE = "00000002"
+    C_CODE = "00000003"
+
+    def setUp(self) -> None:
+        self.scope = CorpusScope(
+            companies={
+                self.A: (self.A, self.A_CODE),
+                self.B: (self.B, self.B_CODE),
+                self.C: (self.C, self.C_CODE),
+            },
+            receipt_from="2020-01-01",
+            receipt_to="2030-12-31",
+        )
+        self.understanding = QueryUnderstanding(self.scope.company_aliases())
+
+    def record(
+        self,
+        issuer: str,
+        reporter: str,
+        suffix: str,
+    ) -> HoldingReportRecord:
+        return HoldingReportRecord(
+            issuer_corp_code=issuer,
+            reporter_key=canonical_reporter_key(reporter),
+            raw_reporter=reporter,
+            doc_id=f"holding_{suffix}",
+            projection_chunk_id=f"holding_{suffix}:projection",
+            reference_date="20240203",
+            receipt_date="20240205",
+            after_shares="100",
+            after_ratio="1.00",
+        )
+
+    def role_resolver(self, *records: HoldingReportRecord):
+        return HoldingCompanyRoleResolver(
+            HoldingReportIndex(
+                records,
+                complete=True,
+                correction_finality_available=True,
+            )
+        )
+
+    def validated(self, query: str, *records: HoldingReportRecord):
+        return QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=self.role_resolver(*records),
+        ).validate(self.understanding.understand(query))
+
+    def _holding_plan(self, **overrides) -> QueryPlan:
+        base = dict(
+            query="보유주식수",
+            raw_query=f"{self.B} {self.A} 보유주식수",
+            companies=(self.A, self.B),
+            corp_codes=(self.A_CODE, self.B_CODE),
+            task_type="holding_change",
+            disclosure_route=("holding",),
+        )
+        base.update(overrides)
+        return QueryPlan(**base)
+
+    def test_comparison_frames_block_role_resolution_directly(self) -> None:
+        for frame in ("cross_company", "uncertain"):
+            with self.subTest(frame=frame):
+                plan = self._holding_plan(evidence={"comparison_frame": frame})
+                self.assertFalse(_holding_company_role_resolution_allowed(plan))
+
+    def test_neutral_frame_leaves_role_resolution_available(self) -> None:
+        for frame in (None, "same_company"):
+            with self.subTest(frame=frame):
+                plan = self._holding_plan(evidence={"comparison_frame": frame})
+                self.assertTrue(_holding_company_role_resolution_allowed(plan))
+
+    def test_unique_direction_sets_issuer_filter_and_reporter_constraint(self) -> None:
+        result = self.validated(
+            f"{self.B}가 보유한 {self.A} 주식은 "
+            "2024년 2월 3일 기준 몇 주야?",
+            self.record(self.A_CODE, self.B, "a_b"),
+        )
+
+        self.assertIs(result.state, QueryState.RESOLVED)
+        self.assertTrue(result.retrieval_allowed)
+        self.assertEqual(result.plan.companies, (self.A,))
+        self.assertEqual(result.plan.company, self.A)
+        self.assertEqual(result.plan.corp_codes, (self.A_CODE,))
+        self.assertEqual(result.plan.corp_code, self.A_CODE)
+        self.assertEqual(result.plan.reporter, self.B)
+        self.assertEqual(result.plan.backend_filters()["company"], [self.A])
+        self.assertEqual(result.plan.backend_filters()["corp_code"], [self.A_CODE])
+
+    def test_reverse_mention_order_resolves_the_same_roles(self) -> None:
+        relation = self.record(self.A_CODE, self.B, "a_b")
+        first = self.validated(
+            f"{self.B}가 보유한 {self.A} 주식은 몇 주야?", relation
+        )
+        second = self.validated(
+            f"{self.A}에서 {self.B}가 보유한 보유주식수 알려줘", relation
+        )
+
+        self.assertEqual(first.plan.company, second.plan.company)
+        self.assertEqual(first.plan.corp_code, second.plan.corp_code)
+        self.assertEqual(first.plan.reporter, second.plan.reporter)
+
+    def test_reference_and_receipt_axes_survive_role_resolution(self) -> None:
+        relation = self.record(self.A_CODE, self.B, "a_b")
+        reference = self.validated(
+            f"{self.B}가 보유한 {self.A} 주식은 "
+            "2024년 2월 3일 기준 몇 주야?",
+            relation,
+        )
+        receipt = self.validated(
+            f"{self.B}가 보유한 {self.A} 주식을 "
+            "2024년 2월 5일 접수된 보고서 기준 몇 주야?",
+            relation,
+        )
+
+        self.assertEqual(reference.plan.period.period_type, "holding_reference_date")
+        self.assertEqual(reference.plan.period.from_date, "2024-02-03")
+        self.assertEqual(
+            reference.plan.evidence["date_semantics"]["role"],
+            "holding_reference",
+        )
+        self.assertEqual(receipt.plan.period.period_type, "receipt_date")
+        self.assertEqual(receipt.plan.period.from_date, "2024-02-05")
+        self.assertEqual(receipt.plan.evidence["date_semantics"]["role"], "receipt")
+
+    def test_metric_none_is_the_next_independent_blocker(self) -> None:
+        result = self.validated(
+            f"{self.B}가 {self.A} 주식을 "
+            "2024년 2월 3일 기준 얼마나 들고 있어?",
+            self.record(self.A_CODE, self.B, "a_b"),
+        )
+
+        self.assertEqual(result.plan.company, self.A)
+        self.assertEqual(result.plan.reporter, self.B)
+        self.assertIsNone(result.plan.metric)
+        self.assertIs(result.state, QueryState.INCOMPLETE)
+        self.assertFalse(result.retrieval_allowed)
+        self.assertEqual(result.slots["metric"].status.value, "missing")
+
+    def test_zero_and_bidirectional_relations_remain_ambiguous(self) -> None:
+        query = f"{self.B}가 보유한 {self.A} 주식은 몇 주야?"
+        zero = self.validated(query)
+        bidirectional = self.validated(
+            query,
+            self.record(self.A_CODE, self.B, "a_b"),
+            self.record(self.B_CODE, self.A, "b_a"),
+        )
+
+        for result in (zero, bidirectional):
+            self.assertIs(result.state, QueryState.AMBIGUOUS)
+            self.assertFalse(result.retrieval_allowed)
+            self.assertEqual(len(result.plan.companies), 2)
+            self.assertIsNone(result.plan.company)
+            self.assertIsNone(result.plan.reporter)
+
+    def test_unknown_company_fails_closed_before_relation_lookup(self) -> None:
+        plan = QueryPlan(
+            query="보유주식수",
+            raw_query="가상투자사가 미등록회사 주식을 몇 주 보유했어?",
+            companies=(self.B, "미등록회사"),
+            task_type="holding_change",
+            metric="holding_shares",
+            disclosure_route=("holding",),
+            evidence={"operation": "lookup_holding", "comparison_frame": None},
+        )
+        result = QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=self.role_resolver(
+                self.record(self.A_CODE, self.B, "a_b")
+            ),
+        ).validate(plan)
+
+        self.assertIs(result.state, QueryState.OUT_OF_SCOPE)
+        self.assertFalse(result.retrieval_allowed)
+        self.assertEqual(result.issues, ("company_out_of_corpus",))
+
+    def test_safety_predicates_do_not_invoke_the_role_resolver(self) -> None:
+        class RecordingResolver:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def resolve(self, *args):
+                self.calls += 1
+                raise AssertionError(f"role resolver must not run: {args!r}")
+
+        cases = (
+            f"{self.A}와 {self.B} 보유비율 비교",
+            f"{self.A}와 {self.B} 중 누가 보유 주식수가 더 많아?",
+            f"{self.B}가 {self.A} 주식을 더 많이 취득한 시점은 언제야?",
+            f"{self.A}, {self.B}, {self.C} 중 보유비율이 가장 높아?",
+            f"{self.A} 보유주식수는?",
+            f"{self.A} {self.B} 사업보고서 내용 알려줘",
+            f"{self.A} {self.B} 풋옵션 행사 주식 취득일과 취득 수량",
+        )
+        for query in cases:
+            with self.subTest(query=query):
+                recording = RecordingResolver()
+                result = QueryValidator(
+                    corpus_scope=self.scope,
+                    holding_company_role_resolver=recording,
+                ).validate(self.understanding.understand(query))
+                self.assertEqual(recording.calls, 0)
+                self.assertIsNotNone(result.state)
+
 
 if __name__ == "__main__":
     unittest.main()

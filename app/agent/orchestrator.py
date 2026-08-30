@@ -20,6 +20,10 @@ from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
     HoldingResolution,
 )
+from app.reasoning.holding_company_role_resolution import (
+    HoldingCompanyRoleResolver,
+    has_role_provenance,
+)
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactResolver,
@@ -42,6 +46,7 @@ from app.reasoning.holding_report_relative_execution import (
     ReportRelativeEvidenceExecution,
 )
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
+from app.retrieval.interfaces import RetrievalResult
 
 
 #: How a routed execution shape maps onto the grouping EvidenceBuilder performs.
@@ -120,6 +125,7 @@ class AgentOrchestrator:
         periodic_evidence_selector: PeriodicEvidenceSelector | None = None,
         answer_composer: AnswerComposer | None = None,
         report_relative_execution: HoldingReportRelativeExecution | None = None,
+        holding_company_role_resolver: HoldingCompanyRoleResolver | None = None,
     ) -> None:
         self.task_router = task_router or TaskRouter()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
@@ -130,6 +136,7 @@ class AgentOrchestrator:
         )
         self.answer_composer = answer_composer or AnswerComposer()
         self.report_relative_execution = report_relative_execution
+        self.holding_company_role_resolver = holding_company_role_resolver
 
     def run(
         self,
@@ -171,6 +178,7 @@ class AgentOrchestrator:
         # type for what was asked. Top the gap up from the pool retrieval
         # already fetched -- no query is issued here -- and leave the original
         # execution untouched so the read-only invariants still hold.
+        reporter_scoped = False
         if report_relative is not None:
             trace.append("holding_report_relative_execution")
             evidence_input = SimpleNamespace(
@@ -180,19 +188,29 @@ class AgentOrchestrator:
             )
             coverage = CoverageAssessment(results=report_relative.results)
         else:
+            scoped_execution = _holding_reporter_scope(
+                execution,
+                query_plan,
+                routed_task_type=decision.task_type,
+                resolver=self.holding_company_role_resolver,
+            )
+            ordinary_execution = scoped_execution or execution
+            if scoped_execution is not None:
+                reporter_scoped = True
+                trace.append("holding_reporter_scope")
             coverage = assess_holding_coverage(
                 question,
                 query_plan,
-                execution.chunks,
-                execution.results,
+                ordinary_execution.chunks,
+                ordinary_execution.results,
                 routed_task_type=decision.task_type,
             )
-            evidence_input = execution
+            evidence_input = ordinary_execution
             if coverage.rescued:
                 trace.append("holding_evidence_coverage")
                 evidence_input = SimpleNamespace(
-                    plan=execution.plan,
-                    chunks=execution.chunks,
+                    plan=ordinary_execution.plan,
+                    chunks=ordinary_execution.chunks,
                     results=list(coverage.results),
                 )
 
@@ -321,9 +339,75 @@ class AgentOrchestrator:
             holding_coverage=coverage,
             evidence_results=tuple(evidence_input.results),
             evidence_chunks=tuple(evidence_input.chunks),
-            evidence_overridden=bool(report_relative is not None or coverage.rescued),
+            evidence_overridden=bool(
+                report_relative is not None or coverage.rescued or reporter_scoped
+            ),
             report_relative_execution=report_relative,
         )
+
+
+def _holding_reporter_scope(
+    execution: Any,
+    plan: Any,
+    *,
+    routed_task_type: str | None,
+    resolver: HoldingCompanyRoleResolver | None,
+) -> Any | None:
+    """Keep only retrieved evidence from the indexed issuer/reporter pair.
+
+    Scoped to plans whose reporter this system derived from the corpus itself.
+    A reporter the asker named directly is left alone: those questions answered
+    without this pruning before B.2 existed, and B.2 is not a licence to change
+    them.
+    """
+
+    if routed_task_type != "holding_event" or resolver is None:
+        return None
+    if not has_role_provenance(plan):
+        return None
+    corp_code = str(getattr(plan, "corp_code", "") or "").strip()
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    document_ids = resolver.document_ids(corp_code, reporter)
+    if not document_ids:
+        return None
+    chunks = tuple(
+        candidate
+        for candidate in execution.chunks
+        if str(getattr(candidate, "doc_id", "") or "") in document_ids
+    )
+    results = tuple(
+        result
+        for result in execution.results
+        if str(getattr(result, "doc_id", "") or "") in document_ids
+    )
+    if (
+        list(chunks) == list(execution.chunks)
+        and list(results) == list(execution.results)
+    ):
+        return None
+    return SimpleNamespace(
+        plan=execution.plan, chunks=chunks, results=_dense_ranks(results)
+    )
+
+
+def _dense_ranks(results: Sequence[RetrievalResult]) -> tuple[RetrievalResult, ...]:
+    """Relabel surviving ranks 1..N without reordering or rescoring.
+
+    Excluding evidence leaves holes in the served rank sequence, and every
+    other evidence path in this pipeline hands out a contiguous one.  Only the
+    label changes: order, scores, and provenance are carried through untouched.
+    """
+
+    return tuple(
+        RetrievalResult(
+            chunk_id=result.chunk_id,
+            doc_id=result.doc_id,
+            bm25_score=result.bm25_score,
+            rank=rank,
+            metadata_match=result.metadata_match,
+        )
+        for rank, result in enumerate(results, start=1)
+    )
 
 
 def orchestrate(
