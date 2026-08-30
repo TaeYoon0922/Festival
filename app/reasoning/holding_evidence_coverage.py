@@ -216,6 +216,59 @@ def _all_refs(chunk: Mapping[str, Any]) -> set[tuple[Any, Any, Any]]:
     return refs
 
 
+def _row_union(
+    refs: set[tuple[Any, Any, Any]]
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    """Which rows of each table these refs cover, as one canonical form.
+
+    Row ranges are closed intervals, and the same rows can be written either
+    per row or as a span.  Merging overlapping and directly adjacent intervals
+    reduces both encodings to the identical answer, so two items can be
+    compared on the rows they actually cover rather than on how those rows
+    happened to be recorded.
+    """
+
+    by_table: dict[str, list[tuple[int, int]]] = {}
+    for table_id, start, end in refs:
+        if not table_id or not isinstance(start, int) or not isinstance(end, int):
+            continue
+        if isinstance(start, bool) or isinstance(end, bool) or end < start:
+            continue
+        by_table.setdefault(str(table_id), []).append((start, end))
+
+    canonical: dict[str, tuple[tuple[int, int], ...]] = {}
+    for table_id, spans in by_table.items():
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            # ``start <= last_end + 1`` merges touching spans too: rows 2-3 and
+            # 4-5 cover 2-5, while a gap at row 4 must stay two spans.
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        canonical[table_id] = tuple(merged)
+    return canonical
+
+
+def _same_source_rows(
+    candidate: Mapping[str, Any], served: Mapping[str, Any]
+) -> bool:
+    """Whether some table is covered identically by both items.
+
+    Existential per table, as one shared table covered row-for-row already
+    establishes that the candidate renders evidence the served item carries.
+    Anything short of equality -- containment, partial overlap, adjacency, or
+    merely sharing a table -- is a different event and is not accepted here.
+    """
+
+    candidate_rows = _row_union(_event_refs(candidate))
+    served_rows = _row_union(_all_refs(served))
+    return any(
+        candidate_rows[table_id] == served_rows[table_id]
+        for table_id in candidate_rows.keys() & served_rows.keys()
+    )
+
+
 def _reference_date(chunk: Mapping[str, Any]) -> str | None:
     fields = dict(chunk.get("projection_fields") or {})
     for label in _FIELD_LABELS.get("reference_date", ()):
@@ -234,7 +287,10 @@ def anchor_tier(
 
     STRONG -- the two describe the same source rows: the candidate's event
     fields are backed by a row the served item also covers, so the candidate is
-    literally the structured rendering of evidence already retrieved.
+    literally the structured rendering of evidence already retrieved.  A
+    projection records those rows one per field while a served table chunk
+    records them as one span, so identical rows can be written two ways; both
+    spellings are read here, and neither widens what STRONG means.
 
     MEDIUM -- the exact row link is unavailable (a served projection and a
     candidate projection of the same filing draw on different tables), but both
@@ -248,6 +304,8 @@ def anchor_tier(
     if str(candidate.get("doc_id") or "") != str(served.get("doc_id") or ""):
         return None
     if _event_refs(candidate) & _all_refs(served):
+        return ANCHOR_STRONG
+    if _same_source_rows(candidate, served):
         return ANCHOR_STRONG
     served_date = _reference_date(served)
     if served_date and served_date == _reference_date(candidate):
