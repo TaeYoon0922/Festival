@@ -23,7 +23,10 @@ from app.reasoning.holding_company_role_resolution import (
     HoldingCompanyRoleResolver,
     role_provenance,
 )
-from app.reasoning.holding_evidence_coverage import requested_holding_fields
+from app.reasoning.holding_evidence_coverage import (
+    CURRENT_HOLDING_STATE_FIELDS,
+    requested_holding_fields,
+)
 from app.reasoning.holding_report_relative_execution import ACQUISITION_REQUEST_FIELDS
 from app.reasoning.holding_reporter import reporter_matches
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
@@ -161,6 +164,29 @@ def _comparison_firewall_engaged(plan: QueryPlan) -> bool:
     """
 
     return plan.evidence.get("comparison_frame") in _COMPARISON_FIREWALL_FRAMES
+
+
+def _generic_holding_amount_request(plan: QueryPlan) -> tuple[str, ...] | None:
+    """The current-state pair, when the shared request parser proves it.
+
+    Whether the wording is a generic present-tense possession question is
+    decided once, inside the holding request parser; this only reads the
+    result.  Any other tuple -- previous, change, acquisition, or half a pair
+    -- leaves the metric slot missing, so a question that named no unit and
+    asked for something else cannot slip through on non-emptiness alone.
+
+    The returned value is an internal slot filler.  ``QueryPlan.metric`` stays
+    ``None`` and no new metric name reaches the plan or the public contract.
+    """
+
+    if plan.metric:
+        return None
+    if not str(plan.evidence.get("holding_ownership_intent") or ""):
+        return None
+    requested = requested_holding_fields(str(plan.raw_query or ""), plan)
+    if requested != CURRENT_HOLDING_STATE_FIELDS:
+        return None
+    return requested
 
 
 def _holding_company_role_resolution_allowed(plan: QueryPlan) -> bool:
@@ -553,7 +579,13 @@ class QueryValidator:
         issues.extend(conflicts)
 
         period_value = _period_value(normalized_plan)
-        metric_value = normalized_plan.metric
+        # A generic ownership question names no unit, so the plan carries no
+        # metric and must keep carrying none.  The slot is still satisfiable:
+        # the request parser can prove the question asks for the current-state
+        # pair, and that proof fills the slot without renaming the metric.
+        metric_value = normalized_plan.metric or _generic_holding_amount_request(
+            normalized_plan
+        )
         correction_intent = normalized_plan.evidence.get("correction_intent")
         set_intent = _set_intent(question, multi_plan)
         requested_state = _requested_state(question, multi_plan)

@@ -629,7 +629,16 @@ class HoldingCompanyRoleValidationTests(unittest.TestCase):
         self.assertEqual(receipt.plan.period.from_date, "2024-02-05")
         self.assertEqual(receipt.plan.evidence["date_semantics"]["role"], "receipt")
 
-    def test_metric_none_is_the_next_independent_blocker(self) -> None:
+    def test_generic_amount_resolves_without_naming_a_metric(self) -> None:
+        """Roles resolve here, and the unnamed unit no longer blocks.
+
+        This was the metric=None blocker recorded during role resolution.
+        B.3 answered it by requesting the pair the filing publishes together
+        rather than guessing a unit, so the plan still carries no metric while
+        the slot is satisfied.  Everything the earlier test pinned about role
+        resolution is pinned here unchanged.
+        """
+
         result = self.validated(
             f"{self.B}가 {self.A} 주식을 "
             "2024년 2월 3일 기준 얼마나 들고 있어?",
@@ -638,6 +647,20 @@ class HoldingCompanyRoleValidationTests(unittest.TestCase):
 
         self.assertEqual(result.plan.company, self.A)
         self.assertEqual(result.plan.reporter, self.B)
+        self.assertIsNone(result.plan.metric, "the plan must not be relabelled")
+        self.assertIs(result.state, QueryState.RESOLVED)
+        self.assertTrue(result.retrieval_allowed)
+        self.assertEqual(result.slots["metric"].status.value, "resolved")
+
+    def test_metric_stays_missing_when_no_unit_and_no_stative_request(self) -> None:
+        """The slot is only satisfied by the current-state pair, never by
+        mere non-emptiness of the requested-field tuple."""
+
+        result = self.validated(
+            f"{self.B}의 {self.A} 지분은 얼마나 매각됐어?",
+            self.record(self.A_CODE, self.B, "a_b"),
+        )
+
         self.assertIsNone(result.plan.metric)
         self.assertIs(result.state, QueryState.INCOMPLETE)
         self.assertFalse(result.retrieval_allowed)

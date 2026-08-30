@@ -31,6 +31,7 @@ from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import _evidence_item, _normalize_date
 from app.reasoning.holding_event_resolver import (
+    CURRENT_HOLDING_STATE_FIELDS,
     _FIELD_LABELS,
     _field_candidate,
     _normalize_text,
