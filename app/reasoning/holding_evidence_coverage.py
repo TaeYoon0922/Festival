@@ -35,6 +35,7 @@ from app.reasoning.holding_event_resolver import (
     _field_candidate,
     _normalize_text,
     _requested_fields,
+    has_acquisition_semantics,
 )
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
@@ -127,6 +128,20 @@ def requested_holding_fields(question: str, plan: Any) -> tuple[str, ...]:
 
     mapping = plan.to_dict() if hasattr(plan, "to_dict") else plan
     return _requested_fields(str(question or ""), dict(mapping or {}))
+
+
+def has_holding_acquisition_semantics(question: str, plan: Any) -> bool:
+    """Whether this question is acquisition-family language.
+
+    Delegates to the resolver's own acquisition authority for the same reason
+    the coverage check drives its field reader: an upstream firewall and the
+    resolver must not disagree about what an acquisition question looks like.
+    A true result is an intent signal only -- it does not mean the acquisition
+    is answerable, and the unit price in particular is not.
+    """
+
+    mapping = plan.to_dict() if hasattr(plan, "to_dict") else plan
+    return has_acquisition_semantics(str(question or ""), dict(mapping or {}))
 
 
 def holding_projection_type(chunk: Mapping[str, Any]) -> str | None:

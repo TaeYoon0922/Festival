@@ -14,8 +14,7 @@ from app.reasoning.clarification_request import (
     ClarificationState,
 )
 from app.reasoning.holding_company_role_resolution import has_role_provenance
-from app.reasoning.holding_evidence_coverage import requested_holding_fields
-from app.reasoning.holding_report_relative_execution import ACQUISITION_REQUEST_FIELDS
+from app.reasoning.holding_evidence_coverage import has_holding_acquisition_semantics
 from app.reasoning.query_validation import QuerySlotStatus, QueryState
 
 
@@ -277,10 +276,11 @@ def _protected_semantics(question: str, plan: Any) -> bool:
     if isinstance(report_relative, Mapping) and report_relative.get("selector") == "selected_context":
         return True
     try:
-        requested = requested_holding_fields(question, plan)
+        # Acquisition wording -- including the unit price the resolver cannot
+        # answer -- is never re-read as bare shares-vs-ratio ambiguity.
+        return has_holding_acquisition_semantics(question, plan)
     except (TypeError, ValueError):
-        requested = ()
-    return bool(ACQUISITION_REQUEST_FIELDS.intersection(requested))
+        return False
 
 
 def _date_text(value: Any) -> str | None:

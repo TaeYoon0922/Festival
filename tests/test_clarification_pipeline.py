@@ -14,8 +14,22 @@ from app.reasoning.holding_company_role_resolution import (
     ROLE_PROVENANCE_KEY,
     ROLE_PROVENANCE_SOURCE,
 )
+from app.reasoning.clarification_candidates import (
+    _protected_semantics,
+    validation_clarification_request,
+)
+from app.reasoning.holding_company_role_resolution import (
+    RESOLVED,
+    HoldingCompanyRoleResolution,
+    has_role_provenance,
+)
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
-from app.reasoning.query_validation import CorpusScope, QueryValidator
+from app.reasoning.query_understanding import understand_query
+from app.reasoning.query_validation import (
+    CorpusScope,
+    QuerySlotStatus,
+    QueryValidator,
+)
 from app.retrieval.interfaces import (
     CandidateChunk,
     CandidateDocument,
@@ -431,6 +445,134 @@ class ClarificationPipelineTests(unittest.TestCase):
             "holding_change", json.dumps(payload, ensure_ascii=False, default=str)
         )
         AnswerResponse.model_validate(payload)
+
+#: Two corpus companies in a proven issuer/reporter relation.  Named for the
+#: role each one plays, so no real filer or filing date is encoded here.
+ISSUER, ISSUER_CODE = "가상발행사", "00000011"
+REPORTER, REPORTER_CODE = "가상투자사", "00000022"
+HOLDING_ALIASES = {ISSUER: [ISSUER], REPORTER: [REPORTER]}
+HOLDING_SCOPE = CorpusScope(
+    companies={ISSUER: (ISSUER, ISSUER_CODE), REPORTER: (REPORTER, REPORTER_CODE)},
+    receipt_from="2020-01-01",
+    receipt_to="2025-12-31",
+    fiscal_years=tuple(range(2020, 2026)),
+    event_from="2020-01-01",
+    event_to="2025-12-31",
+)
+
+
+class _RoleResolver:
+    """Stands in for the corpus-backed issuer/reporter role resolver."""
+
+    def resolve(self, first, first_code, second, second_code):
+        del first, first_code, second, second_code
+        return HoldingCompanyRoleResolution(
+            status=RESOLVED,
+            issuer=ISSUER,
+            issuer_corp_code=ISSUER_CODE,
+            reporter=REPORTER,
+            reporter_key=REPORTER,
+            direction_1_report_count=3,
+        )
+
+
+class HoldingAcquisitionFirewallTests(unittest.TestCase):
+    """Acquisition wording is never re-read as shares-vs-ratio ambiguity."""
+
+    def _resolved_holding_validation(self, question):
+        """Drive the real understanding and validation path for a question."""
+
+        plan = understand_query(question, HOLDING_ALIASES)
+        validator = QueryValidator(
+            corpus_scope=HOLDING_SCOPE,
+            holding_company_role_resolver=_RoleResolver(),
+        )
+        return plan, validator.validate(plan)
+
+    def _answer(self, question, plan):
+        pipeline, executor = _pipeline(
+            plan,
+            _execution(plan),
+            classifier=_ExplodingClassifier(),
+            validator=QueryValidator(
+                corpus_scope=HOLDING_SCOPE,
+                holding_company_role_resolver=_RoleResolver(),
+            ),
+        )
+        return pipeline.answer("Q", question), executor
+
+    def test_acquisition_unit_price_keeps_the_validator_metric_question(self) -> None:
+        for question in (
+            f"{REPORTER}가 보유한 {ISSUER} 주식의 2024년 8월 4일 기준 취득 단가는?",
+            f"{REPORTER}가 보유한 {ISSUER} 주식의 취득단가는?",
+        ):
+            with self.subTest(question=question):
+                plan, validation = self._resolved_holding_validation(question)
+
+                # Every bare-ownership ingredient is still present, so a pass
+                # here cannot come from the ambiguity having disappeared.
+                self.assertEqual(
+                    validation.plan.evidence["holding_ownership_intent"],
+                    "company_holds_company_shares",
+                )
+                self.assertTrue(has_role_provenance(validation.plan))
+                self.assertIs(
+                    validation.slots["company"].status, QuerySlotStatus.RESOLVED
+                )
+                self.assertIsNot(
+                    validation.slots["metric"].status, QuerySlotStatus.RESOLVED
+                )
+                # The firewall is what stops it, and it grants no answer field.
+                self.assertTrue(_protected_semantics(question, validation.plan))
+                self.assertIsNone(
+                    validation_clarification_request(question, validation)
+                )
+
+                payload, executor = self._answer(question, plan)
+
+                self.assertEqual(
+                    payload["answer"], "확인하려는 재무 지표를 구체적으로 알려주세요."
+                )
+                self.assertEqual(payload["think_trace"]["route"], "clarification")
+                self.assertFalse(payload["think_trace"]["answerable"])
+                self.assertNotIn("clarification", payload["think_trace"])
+                for label in ("보유주식수", "보유비율"):
+                    self.assertNotIn(label, payload["answer"])
+                self.assertEqual(executor.calls, 0)
+                self.assertEqual(payload["retrieved_context"], [])
+                AnswerResponse.model_validate(payload)
+
+    def test_bare_ownership_ambiguity_still_offers_both_holding_metrics(self) -> None:
+        for question in (
+            f"{REPORTER}가 {ISSUER} 주식을 2023년 5월 9일 기준으로 얼마나 들고 있어?",
+            f"{REPORTER}의 {ISSUER} 지분은 2025년 3월 24일 보고 기준 얼마나 되나?",
+        ):
+            with self.subTest(question=question):
+                _plan, validation = self._resolved_holding_validation(question)
+
+                self.assertFalse(_protected_semantics(question, validation.plan))
+                request = validation_clarification_request(question, validation)
+
+                self.assertIsNotNone(request)
+                assert request is not None
+                self.assertEqual(
+                    [item.label for item in request.candidates],
+                    ["보유주식수", "보유비율"],
+                )
+
+    def test_answerable_acquisition_fields_stay_protected(self) -> None:
+        for question in (
+            f"{REPORTER}가 보유한 {ISSUER} 주식의 취득일은?",
+            f"{REPORTER}가 보유한 {ISSUER} 주식의 취득 주식수는?",
+        ):
+            with self.subTest(question=question):
+                _plan, validation = self._resolved_holding_validation(question)
+
+                self.assertTrue(_protected_semantics(question, validation.plan))
+                self.assertIsNone(
+                    validation_clarification_request(question, validation)
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
