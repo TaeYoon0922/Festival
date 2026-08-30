@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import EvidenceGroup, EvidenceItem, EvidenceSet
+from app.reasoning.holding_reporter import reporter_matches
 
 
 _FIELD_NAMES = (
@@ -24,6 +25,13 @@ _FIELD_NAMES = (
     "change_ratio",
     "change_direction",
 )
+#: Acquisition facts are kept out of ``_FIELD_NAMES`` so the frozen completeness
+#: and confidence denominators keep their exact values for every other event.
+_ACQUISITION_FIELD_NAMES = (
+    "acquisition_date",
+    "acquired_shares",
+)
+_ALL_FIELD_NAMES = _FIELD_NAMES + _ACQUISITION_FIELD_NAMES
 _NUMERIC_FIELDS = {
     "before_shares",
     "change_shares",
@@ -31,6 +39,7 @@ _NUMERIC_FIELDS = {
     "before_ratio",
     "after_ratio",
     "change_ratio",
+    "acquired_shares",
 }
 _RATIO_FIELDS = {"before_ratio", "after_ratio", "change_ratio"}
 _FIELD_LABELS: dict[str, tuple[str, ...]] = {
@@ -45,6 +54,9 @@ _FIELD_LABELS: dict[str, tuple[str, ...]] = {
     "after_ratio": ("보유비율", "지분율", "변동후 비율"),
     "change_ratio": ("증감비율", "증감 비율"),
     "change_direction": ("change_direction", "변동방향"),
+    # Read from the detail row itself, never from a projection field label.
+    "acquisition_date": (),
+    "acquired_shares": (),
 }
 _QUERY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "reporter": (r"보고자(?:는|가|명|\s*성명|\s*누구)", r"보유자(?:는|가|명|\s*누구)"),
@@ -72,6 +84,11 @@ _QUERY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "change_ratio": (r"증감\s*비율", r"(?:증가|감소)\s*비율"),
     "change_direction": (r"증감\s*방향", r"증가", r"감소", r"변동\s*없음"),
+    # "취득일", "취득 일자" -- the acquisition's own date, which is not
+    # interchangeable with a report or base date.
+    "acquisition_date": (r"취득\s*일",),
+    # "취득 수량", "취득수량", "취득 주식수", "취득주식수".
+    "acquired_shares": (r"취득\s*수량", r"취득\s*주식\s*수"),
 }
 _QUERY_FIELD_CANONICAL = {
     "direction": "change_direction",
@@ -201,6 +218,11 @@ class HoldingEvent:
     confidence: Mapping[str, Any]
     completeness: Mapping[str, Any]
     warnings: tuple[str, ...]
+    #: Present only for a detail row that proved its own acquisition, so every
+    #: pre-existing event keeps exactly the shape it had.
+    acquisition_date: str | None = None
+    acquired_shares: NumericValue | None = None
+    transaction_method: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -218,6 +240,15 @@ class HoldingEvent:
             "after_ratio": _serialize_value(self.after_ratio),
             "change_ratio": _serialize_value(self.change_ratio),
             "change_direction": self.change_direction,
+            **(
+                {
+                    "acquisition_date": self.acquisition_date,
+                    "acquired_shares": _serialize_value(self.acquired_shares),
+                    "transaction_method": self.transaction_method,
+                }
+                if self.transaction_method is not None
+                else {}
+            ),
             "event_type": self.event_type,
             "doc_id": self.doc_id,
             "doc_ids": list(self.doc_ids),
@@ -348,7 +379,7 @@ def _resolve_group(
 ) -> HoldingEvent:
     provenance: dict[str, FieldProvenance] = {}
     resolved: dict[str, Any] = {}
-    for field_name in _FIELD_NAMES:
+    for field_name in _ALL_FIELD_NAMES:
         if field_name == "change_direction":
             continue
         field = _resolve_field(field_name, group.items)
@@ -381,7 +412,7 @@ def _resolve_group(
     reporter_match = (
         _reporter_matches(reporter, reporter_constraint)
         if reporter_constraint and reporter
-        else None
+        else _conflicting_reporter_match(provenance["reporter"], reporter_constraint)
         if reporter_constraint
         else True
     )
@@ -401,16 +432,20 @@ def _resolve_group(
             for ref in source.source_refs
         ]
     )
-    resolved_count = sum(value.value is not None for value in provenance.values())
+    # Restricted to the frozen field set: acquisition facts must not move the
+    # completeness or confidence numbers of any pre-existing event.
+    resolved_count = sum(
+        provenance[field].value is not None for field in _FIELD_NAMES
+    )
     requested_resolved = sum(
         provenance[field].value is not None and not provenance[field].field_conflict
         for field in requested_fields
         if field in provenance
     )
     direct_count = sum(
-        any(source.direct_field_ref for source in value.sources)
-        for value in provenance.values()
-        if value.value is not None
+        any(source.direct_field_ref for source in provenance[field].sources)
+        for field in _FIELD_NAMES
+        if provenance[field].value is not None
     )
     completeness = {
         "resolved_field_count": resolved_count,
@@ -465,6 +500,9 @@ def _resolve_group(
         confidence=confidence,
         completeness=completeness,
         warnings=tuple(event_warnings),
+        acquisition_date=_string_value(resolved["acquisition_date"]),
+        acquired_shares=_numeric_value(resolved["acquired_shares"]),
+        transaction_method=_acquisition_method(group.items),
     )
 
 
@@ -483,6 +521,8 @@ def _field_candidate(
     field_name: str, item: EvidenceItem
 ) -> _CandidateValue | None:
     holding = dict(item.holding)
+    if field_name in _ACQUISITION_FIELD_NAMES:
+        return _acquisition_candidate(field_name, item, holding)
     projection_fields = dict(holding.get("projection_fields") or {})
     source_chunk = dict(item.provenance.get("source_chunk") or {})
     label = next(
@@ -516,6 +556,54 @@ def _field_candidate(
             projection_type=_text(holding.get("projection_type")),
             retrieval_rank=item.retrieval_rank,
             direct_field_ref=bool(direct_refs),
+        ),
+    )
+
+
+def _acquisition_method(items: Sequence[EvidenceItem]) -> str | None:
+    """The proving method, kept only when the group agrees on exactly one."""
+
+    methods = {
+        method
+        for item in items
+        if (method := _text(
+            dict(dict(item.holding).get("acquisition") or {}).get(
+                "transaction_method")))
+    }
+    return next(iter(methods)) if len(methods) == 1 else None
+
+
+def _acquisition_candidate(
+    field_name: str, item: EvidenceItem, holding: Mapping[str, Any]
+) -> _CandidateValue | None:
+    """An acquisition fact, or nothing -- the row either proves it or does not.
+
+    ``holding["acquisition"]`` is present only for a detail row whose own
+    transaction method names an acquisition and whose own signed change agrees,
+    so a report summary, a disposal, and an unexplained increase all yield
+    ``None`` here rather than a weaker answer.
+    """
+
+    acquisition = dict(holding.get("acquisition") or {})
+    if not acquisition:
+        return None
+    raw = _usable_raw(acquisition.get(field_name))
+    if raw is None:
+        return None
+    ref = acquisition.get("source_ref")
+    # The reference points at the row the method was read from, so a citation
+    # can never be satisfied by a neighbouring row of the same table.
+    refs = (copy.deepcopy(ref),) if ref else ()
+    return _CandidateValue(
+        raw=raw,
+        normalized=_normalize_field_value(field_name, raw),
+        source=FieldSource(
+            chunk_id=item.chunk_id,
+            doc_id=item.doc_id,
+            source_refs=refs or tuple(copy.deepcopy(list(item.source_refs))),
+            projection_type=_text(holding.get("projection_type")),
+            retrieval_rank=item.retrieval_rank,
+            direct_field_ref=bool(refs),
         ),
     )
 
@@ -617,7 +705,7 @@ def _requested_fields(question: str, plan: Mapping[str, Any]) -> tuple[str, ...]
         configured = [configured]
     for value in configured:
         canonical = _QUERY_FIELD_CANONICAL.get(str(value), str(value))
-        if canonical in _FIELD_NAMES and canonical not in requested:
+        if canonical in _ALL_FIELD_NAMES and canonical not in requested:
             requested.append(canonical)
 
     for field, patterns in _QUERY_FIELD_ALIASES.items():
@@ -714,7 +802,9 @@ def _temporal_constraint(
 def _normalize_field_value(field_name: str, raw: str) -> Any:
     if field_name in _NUMERIC_FIELDS:
         return _normalize_number(raw, ratio=field_name in _RATIO_FIELDS)
-    if field_name in {"reference_date", "report_date", "receipt_date"}:
+    if field_name in {
+        "reference_date", "report_date", "receipt_date", "acquisition_date",
+    }:
         return _normalize_date(raw) or raw.strip()
     if field_name == "change_direction":
         return _canonical_direction(raw)
@@ -758,14 +848,32 @@ def _canonical_direction(value: Any) -> str | None:
 
 
 def _reporter_matches(value: str, constraint: str) -> bool:
-    left = _normalize_text(value)
-    right = _normalize_text(constraint)
-    if left == right:
-        return True
-    suffixes = ("공단", "기금", "조합", "법인", "회사")
-    return any(
-        left == right + suffix or right == left + suffix for suffix in suffixes
-    )
+    """Delegates to the shared contract so the composer cannot drift from it."""
+
+    return reporter_matches(value, constraint)
+
+
+def _conflicting_reporter_match(
+    provenance: FieldProvenance, constraint: str
+) -> bool | None:
+    """Whether a group holding several holder labels answers to the constraint.
+
+    A group normally carries one holder, so this is reached only when evidence
+    describing one event was spelled two ways and the field could not resolve.
+    Every label must answer to the constraint: if even one names someone else,
+    the group is not wholly about the holder that was asked for, and attributing
+    it to them would be wrong.  Unknown, not False, when nothing is resolvable --
+    the same answer this returned before there was anything to look at.
+    """
+
+    values = [
+        text
+        for alternative in provenance.alternatives
+        if (text := _string_value(alternative.value))
+    ]
+    if not values:
+        return None
+    return all(_reporter_matches(value, constraint) for value in values)
 
 
 def _combine_matches(values: Sequence[bool | None]) -> bool | None:

@@ -293,10 +293,11 @@ class HybridQueryExecutor:
 
         fused = reciprocal_rank_fusion(lexical_results, vector_results, self.config.rrf)
         rerank_diagnostics: Sequence[Mapping[str, Any]] = ()
+        scored_tail: ScoredTail | None = None
         if not vector_results:
             final_results = _annotate_lexical_fallback(lexical_final, fused, vector_status)
         else:
-            final_results, rerank_diagnostics = self._hybrid_rerank(
+            final_results, rerank_diagnostics, scored_tail = self._hybrid_rerank(
                 fused,
                 route,
                 chunks,
@@ -354,6 +355,13 @@ class HybridQueryExecutor:
             event_expansion, chunks, final_results
         )
 
+        # Last, so the document set it inspects is the one actually emitted:
+        # the rescues and expansions above may already have supplied the very
+        # document a crowded list was missing.
+        final_results, document_recovery = _additive_document_rescue(
+            final_results, scored_tail
+        )
+
         correction = self.router.correction_summary(documents, route)
         routing = {
             **route.to_dict(),
@@ -369,6 +377,7 @@ class HybridQueryExecutor:
                 "vector_status": vector_status,
                 "vector_error": vector_error,
                 "coverage": vector_coverage,
+                "additive_document_recovery": document_recovery,
             },
         }
         return HybridQueryExecution(
@@ -738,43 +747,151 @@ class HybridQueryExecutor:
             row["rerank_mode"] = self.config.rerank_mode
         _attach_weight_grid(scored, retrieval_order, self.config.rerank_window_size)
 
-        output: list[RetrievalResult] = []
-        for row in final_order[:top_k]:
-            fused_candidate = row["candidate"]
-            final_rank = int(row["final_rank"])
-            source = chunks_by_id[fused_candidate.chunk_id]
-            match = source.metadata_match.to_dict()
-            match["hybrid"] = {
-                **fused_candidate.to_dict(),
-                "normalized_rrf_score": row["normalized_rrf_score"],
-                "source_rank_score": row["source_rank_score"],
-                "retrieval_score": row["retrieval_score"],
-                "preservation_rank": row["preservation_rank"],
-                "deterministic_rerank_score": row["deterministic_score"],
-                "legacy_final_score": row["legacy_final_score"],
-                "legacy_final_rank": row["legacy_final_rank"],
-                "bounded_final_score": row["bounded_final_score"],
-                "bounded_final_rank": row["bounded_final_rank"],
-                "unbounded_final_rank": row["unbounded_final_rank"],
-                "final_score": row["final_score"],
-                "final_rank": final_rank,
-                "rerank_mode": self.config.rerank_mode,
-                "fusion_weight": self.config.fusion_weight,
-                "deterministic_weight": self.config.deterministic_weight,
-                "rerank_window_size": self.config.rerank_window_size,
-            }
-            match["score_components"] = row["components"]
-            output.append(
-                RetrievalResult(
-                    chunk_id=fused_candidate.chunk_id,
-                    doc_id=fused_candidate.doc_id,
-                    bm25_score=float(fused_candidate.lexical_score or 0.0),
-                    rank=final_rank,
-                    metadata_match=match,
-                )
-            )
+        output = [
+            self._result_from_scored_row(row, chunks_by_id)
+            for row in final_order[:top_k]
+        ]
         diagnostics = [_rerank_diagnostic(row) for row in final_order]
-        return output, diagnostics
+        # Rows past the budget keep their scores and ranks. They are not emitted,
+        # and nothing downstream may treat them as retrieved; they exist so a
+        # later stage can consult the order that was already computed instead of
+        # querying again.
+        tail = ScoredTail(rows=tuple(final_order[top_k:]), chunks_by_id=chunks_by_id,
+                          builder=self._result_from_scored_row)
+        return output, diagnostics, tail
+
+    def _result_from_scored_row(
+        self, row: Mapping[str, Any], chunks_by_id: Mapping[str, CandidateChunk]
+    ) -> RetrievalResult:
+        fused_candidate = row["candidate"]
+        final_rank = int(row["final_rank"])
+        source = chunks_by_id[fused_candidate.chunk_id]
+        match = source.metadata_match.to_dict()
+        match["hybrid"] = {
+            **fused_candidate.to_dict(),
+            "normalized_rrf_score": row["normalized_rrf_score"],
+            "source_rank_score": row["source_rank_score"],
+            "retrieval_score": row["retrieval_score"],
+            "preservation_rank": row["preservation_rank"],
+            "deterministic_rerank_score": row["deterministic_score"],
+            "legacy_final_score": row["legacy_final_score"],
+            "legacy_final_rank": row["legacy_final_rank"],
+            "bounded_final_score": row["bounded_final_score"],
+            "bounded_final_rank": row["bounded_final_rank"],
+            "unbounded_final_rank": row["unbounded_final_rank"],
+            "final_score": row["final_score"],
+            "final_rank": final_rank,
+            "rerank_mode": self.config.rerank_mode,
+            "fusion_weight": self.config.fusion_weight,
+            "deterministic_weight": self.config.deterministic_weight,
+            "rerank_window_size": self.config.rerank_window_size,
+        }
+        match["score_components"] = row["components"]
+        return RetrievalResult(
+            chunk_id=fused_candidate.chunk_id,
+            doc_id=fused_candidate.doc_id,
+            bm25_score=float(fused_candidate.lexical_score or 0.0),
+            rank=final_rank,
+            metadata_match=match,
+        )
+
+
+#: A document occupying this many of the emitted slots is crowding the list: the
+#: budget is being spent re-showing one filing while others retrieved just below
+#: it are never seen at all.
+DOCUMENT_CROWDING_THRESHOLD = 3
+
+#: How many unseen documents a crowded result may recover. One, deliberately:
+#: the recovery is a correction for crowding, not a wider retrieval budget.
+ADDITIVE_DOCUMENT_RESCUE_LIMIT = 1
+
+
+@dataclass(frozen=True)
+class ScoredTail:
+    """Candidates that were scored and ranked but fell outside the budget.
+
+    Keeping them costs nothing -- they were already ordered -- and lets a later
+    stage consult that order instead of running retrieval a second time or
+    widening the budget that produced it.
+    """
+
+    rows: tuple[Mapping[str, Any], ...] = ()
+    chunks_by_id: Mapping[str, CandidateChunk] = field(default_factory=dict)
+    builder: Any = None
+
+    def result_for(self, row: Mapping[str, Any]) -> RetrievalResult:
+        return self.builder(row, self.chunks_by_id)
+
+
+def _additive_document_rescue(
+    results: Sequence[RetrievalResult],
+    tail: ScoredTail | None,
+    *,
+    crowding_threshold: int = DOCUMENT_CROWDING_THRESHOLD,
+    limit: int = ADDITIVE_DOCUMENT_RESCUE_LIMIT,
+) -> tuple[list[RetrievalResult], dict[str, Any]]:
+    """Append an unseen document when one filing has crowded out the rest.
+
+    Ranking scores chunks, so a filing whose table splits into several similar
+    chunks can take much of the list while a document ranked just below it never
+    appears.  Replacing a crowding chunk was tried and rejected: it removed
+    evidence other answers depended on.  So nothing is removed here.  The
+    emitted results keep their exact identity and order, and at most one already
+    scored candidate from a document the list never showed is appended after
+    them.
+
+    The rescue reads only retrieval structure -- how many chunks each document
+    holds, and the order the reranker already produced.  It knows nothing about
+    what the chunks contain.
+    """
+
+    emitted = list(results)
+    trace: dict[str, Any] = {
+        "attempted": False,
+        "crowding_detected": False,
+        "max_chunks_from_document": 0,
+        "appended": False,
+        "appended_chunk_id": None,
+        "appended_doc_id": None,
+        "original_candidate_rank": None,
+    }
+    if not emitted or tail is None or not tail.rows or limit < 1:
+        return emitted, trace
+
+    trace["attempted"] = True
+    counts: dict[str, int] = {}
+    for result in emitted:
+        # A result without a document identity is not evidence that some other
+        # filing is crowding the list, so it never contributes to the count.
+        if result.doc_id:
+            counts[result.doc_id] = counts.get(result.doc_id, 0) + 1
+    crowding = max(counts.values(), default=0)
+    trace["max_chunks_from_document"] = crowding
+    if crowding < crowding_threshold:
+        return emitted, trace
+
+    trace["crowding_detected"] = True
+    seen_docs = set(counts)
+    seen_chunks = {result.chunk_id for result in emitted}
+    added = 0
+    for row in tail.rows:
+        candidate = row["candidate"]
+        doc_id = getattr(candidate, "doc_id", None)
+        if not doc_id or doc_id in seen_docs:
+            continue
+        if candidate.chunk_id in seen_chunks:
+            continue
+        emitted.append(tail.result_for(row))
+        trace.update({
+            "appended": True,
+            "appended_chunk_id": candidate.chunk_id,
+            "appended_doc_id": doc_id,
+            "original_candidate_rank": int(row["final_rank"]),
+        })
+        added += 1
+        if added >= limit:
+            break
+    return emitted, trace
 
 
 def _best_source_rank_score(candidate: FusedCandidate, rrf_k: int) -> float:

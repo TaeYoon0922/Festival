@@ -1,0 +1,43 @@
+# Evaluation only. The database is the isolated pgvector container on 55433;
+# nothing here may reach a production or dev database, and port 8010 is never used.
+services:
+  eval-bge:
+    build:
+      context: ../..
+      dockerfile: docker/eval-bge/Dockerfile
+    image: festival-eval-bge:latest
+    container_name: festival-eval-bge
+    environment:
+      # Model identity is pinned; the preflight refuses anything else.
+      FESTIVAL_EMBEDDING_PROVIDER: bge_m3_local
+      FESTIVAL_EMBEDDING_MODEL: BAAI/bge-m3
+      FESTIVAL_EMBEDDING_VERSION: 6892b95fed65c899a30896eb40d619ae284d0455
+      FESTIVAL_EMBEDDING_DIMENSIONS: "1024"
+      FESTIVAL_EMBEDDING_MAX_LENGTH: "8192"
+      FESTIVAL_EMBEDDING_DEVICE: cuda
+      FESTIVAL_EMBEDDING_BATCH_SIZE: "8"
+      FESTIVAL_EMBEDDING_MIN_BATCH_SIZE: "1"
+      FESTIVAL_EMBEDDING_CUDA_OOM_RETRY: "true"
+      FESTIVAL_HCX_ENABLED: "false"
+      HF_HOME: /models
+      DATABASE_URL: postgresql://verify:verify@host.docker.internal:55433/festival_verify
+    volumes:
+      # Repository read-only: the container must not be able to edit the tree.
+      - ../..:/app:ro
+      # Model weights live in a named volume, never inside the Git workspace.
+      - festival-bge-models:/models
+      # Only the evaluation outputs are writable.
+      - ../../reports/evaluation:/out
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  festival-bge-models:
+    name: festival-bge-models

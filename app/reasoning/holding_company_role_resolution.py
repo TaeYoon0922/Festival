@@ -1,0 +1,246 @@
+"""Corpus-backed issuer/reporter direction for two-company holding queries."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from app.reasoning.holding_report_index import HoldingReportIndex
+from app.reasoning.holding_reporter import canonical_reporter_key
+
+
+#: ``plan.evidence`` key recording that this plan's reporter was produced by
+#: corpus-backed two-company role resolution.  Only the validator writes it and
+#: only evidence scoping reads it: it is provenance and a gate, never a value
+#: store.  The typed ``QueryPlan.company``/``corp_code``/``reporter`` fields
+#: remain the single source of truth for who the issuer and the holder are, so
+#: nothing here is duplicated and nothing downstream can drift from them.
+ROLE_PROVENANCE_KEY = "holding_company_role"
+ROLE_PROVENANCE_SOURCE = "corpus_relation"
+
+RESOLVED = "resolved"
+NO_INDEX = "no_index"
+INCOMPLETE_INDEX = "incomplete_index"
+STALE_INDEX = "stale_index"
+INVALID_PAIR = "invalid_pair"
+NO_DIRECTION = "no_direction"
+BIDIRECTIONAL = "bidirectional"
+INDEX_ERROR = "index_error"
+
+
+@dataclass(frozen=True)
+class HoldingCompanyRoleResolution:
+    """The result of evaluating both directed corpus relationships."""
+
+    status: str
+    issuer: str | None = None
+    issuer_corp_code: str | None = None
+    reporter: str | None = None
+    reporter_key: str = ""
+    direction_1_report_count: int = 0
+    direction_2_report_count: int = 0
+    reason: str | None = None
+
+    @property
+    def resolved(self) -> bool:
+        return (
+            self.status == RESOLVED
+            and bool(self.issuer)
+            and bool(self.issuer_corp_code)
+            and bool(self.reporter)
+            and bool(self.reporter_key)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "resolved": self.resolved,
+            "issuer": self.issuer,
+            "issuer_corp_code": self.issuer_corp_code,
+            "reporter": self.reporter,
+            "reporter_key": self.reporter_key,
+            "direction_1_report_count": self.direction_1_report_count,
+            "direction_2_report_count": self.direction_2_report_count,
+            "reason": self.reason,
+        }
+
+
+class HoldingCompanyRoleResolver:
+    """Resolve roles only when exactly one indexed direction exists."""
+
+    def __init__(
+        self,
+        index: HoldingReportIndex | None,
+        *,
+        active_corpus_identity: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.index = index
+        self.active_corpus_identity = (
+            dict(active_corpus_identity)
+            if active_corpus_identity is not None
+            else None
+        )
+
+    def resolve(
+        self,
+        company_a: str,
+        corp_code_a: str,
+        company_b: str,
+        corp_code_b: str,
+    ) -> HoldingCompanyRoleResolution:
+        """Evaluate ``A issuer/B reporter`` and its reverse independently."""
+
+        name_a = str(company_a or "").strip()
+        name_b = str(company_b or "").strip()
+        code_a = str(corp_code_a or "").strip()
+        code_b = str(corp_code_b or "").strip()
+        key_a = canonical_reporter_key(name_a)
+        key_b = canonical_reporter_key(name_b)
+        if (
+            not name_a
+            or not name_b
+            or not code_a
+            or not code_b
+            or not key_a
+            or not key_b
+            or name_a == name_b
+            or code_a == code_b
+        ):
+            return HoldingCompanyRoleResolution(
+                INVALID_PAIR, reason="two distinct canonical companies are required"
+            )
+        if self.index is None:
+            return HoldingCompanyRoleResolution(
+                NO_INDEX, reason="holding report index is unavailable"
+            )
+        if not self.index.complete:
+            return HoldingCompanyRoleResolution(
+                INCOMPLETE_INDEX, reason="holding report index is incomplete"
+            )
+        if (
+            self.active_corpus_identity is not None
+            and not self.index.matches_corpus(self.active_corpus_identity)
+        ):
+            return HoldingCompanyRoleResolution(
+                STALE_INDEX, reason="holding report index does not match the active corpus"
+            )
+
+        try:
+            direction_1 = self.index.enumerate_reports(code_a, name_b)
+            direction_2 = self.index.enumerate_reports(code_b, name_a)
+        except Exception:  # noqa: BLE001 - corpus lookup must fail closed
+            return HoldingCompanyRoleResolution(
+                INDEX_ERROR, reason="holding relationship lookup failed"
+            )
+
+        count_1 = len(direction_1)
+        count_2 = len(direction_2)
+        if bool(count_1) == bool(count_2):
+            status = BIDIRECTIONAL if count_1 else NO_DIRECTION
+            reason = (
+                "both directed relationships are present"
+                if count_1
+                else "neither directed relationship is present"
+            )
+            return HoldingCompanyRoleResolution(
+                status,
+                direction_1_report_count=count_1,
+                direction_2_report_count=count_2,
+                reason=reason,
+            )
+        if count_1:
+            return HoldingCompanyRoleResolution(
+                RESOLVED,
+                issuer=name_a,
+                issuer_corp_code=code_a,
+                reporter=name_b,
+                reporter_key=key_b,
+                direction_1_report_count=count_1,
+                direction_2_report_count=count_2,
+            )
+        return HoldingCompanyRoleResolution(
+            RESOLVED,
+            issuer=name_b,
+            issuer_corp_code=code_b,
+            reporter=name_a,
+            reporter_key=key_a,
+            direction_1_report_count=count_1,
+            direction_2_report_count=count_2,
+        )
+
+    def document_ids(
+        self, issuer_corp_code: str, reporter: str
+    ) -> frozenset[str] | None:
+        """Indexed documents for an exact pair, or ``None`` if not provable.
+
+        This is a post-retrieval scope, not a search.  An unavailable, stale,
+        incomplete, or unmatched index leaves older one-company reporter flows
+        untouched; a B.2-resolved pair always reaches the non-empty branch.
+        """
+
+        code = str(issuer_corp_code or "").strip()
+        key = canonical_reporter_key(reporter)
+        if not code or not key or self.index is None or not self.index.complete:
+            return None
+        if (
+            self.active_corpus_identity is not None
+            and not self.index.matches_corpus(self.active_corpus_identity)
+        ):
+            return None
+        try:
+            records = self.index.enumerate_reports(code, reporter)
+        except Exception:  # noqa: BLE001 - evidence scoping must fail closed
+            return None
+        if not records:
+            return None
+        return frozenset(record.doc_id for record in records)
+
+
+def role_provenance(resolution: HoldingCompanyRoleResolution) -> dict[str, Any]:
+    """Bounded provenance for one resolved direction.
+
+    Deliberately carries no issuer or reporter value.  Exactly one direction is
+    non-empty for a resolved result, so its report count is the informative
+    half and the other is zero.
+    """
+
+    return {
+        "source": ROLE_PROVENANCE_SOURCE,
+        "resolved": True,
+        "direction_report_count": max(
+            resolution.direction_1_report_count,
+            resolution.direction_2_report_count,
+        ),
+    }
+
+
+def has_role_provenance(plan: Any) -> bool:
+    """Whether this plan's reporter came from corpus-backed role resolution."""
+
+    evidence = getattr(plan, "evidence", None)
+    if not isinstance(evidence, Mapping):
+        return False
+    marker = evidence.get(ROLE_PROVENANCE_KEY)
+    return (
+        isinstance(marker, Mapping)
+        and marker.get("source") == ROLE_PROVENANCE_SOURCE
+        and bool(marker.get("resolved"))
+    )
+
+
+__all__ = [
+    "BIDIRECTIONAL",
+    "HoldingCompanyRoleResolution",
+    "HoldingCompanyRoleResolver",
+    "ROLE_PROVENANCE_KEY",
+    "ROLE_PROVENANCE_SOURCE",
+    "has_role_provenance",
+    "role_provenance",
+    "INCOMPLETE_INDEX",
+    "INDEX_ERROR",
+    "INVALID_PAIR",
+    "NO_DIRECTION",
+    "NO_INDEX",
+    "RESOLVED",
+    "STALE_INDEX",
+]

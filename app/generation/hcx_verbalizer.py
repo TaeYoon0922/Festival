@@ -69,6 +69,16 @@ SKIPPED_NO_COMPACT_CLAIM = "skipped_no_compact_verified_claim"
 #: asked to.  A deliberate skip, not an error.
 SKIPPED_MULTI_EVENT_CLAIM = "skipped_multi_event_compact_claim"
 
+#: The answer carries a statement about what the question left open, and a
+#: compact claim holds only verified facts -- so the model is never shown that
+#: statement and its reply cannot contain it.  Restating the facts would
+#: therefore delete it.  A deliberate skip, not an error.
+SKIPPED_SEMANTIC_CONTROL_NOTICE = "skipped_semantic_control_notice"
+
+#: Draft flags that mark an answer as carrying such a statement.  Structural,
+#: so the text itself stays owned by the generator and is never matched here.
+_SEMANTIC_CONTROL_FLAGS = ("under_specified", "exact_multi_match")
+
 #: Citations could not be reattached to the events that own them.
 CITATION_ATTACHMENT_FAILED_STATUS = "fallback_citation_attachment_failed"
 
@@ -174,7 +184,6 @@ class HcxVerbalizer:
         if not generated.answerable:
             # An unsupported answer must never be made to sound confident.
             return VerbalizationOutcome(deterministic, "skipped_not_answerable")
-
         if claim is None:
             claim = build_compact_claim(draft, resolution, task_type=task_type)
         if claim is None:
@@ -189,6 +198,18 @@ class HcxVerbalizer:
         # eligibility and the caps behind it are untouched.
         if claim_event_count(claim) != 1:
             return VerbalizationOutcome(deterministic, SKIPPED_MULTI_EVENT_CLAIM)
+
+        if _carries_semantic_control_notice(draft):
+            # Last gate before the model, so the established skip statuses keep
+            # their precedence.  Restating the claim would drop this answer's
+            # statement about what the question left open: the claim carries
+            # verified facts only, so that statement is not in what the model is
+            # shown and cannot be in what it returns.  Whether it survives must
+            # not depend on the model, nor on how much evidence retrieval
+            # happened to serve.
+            return VerbalizationOutcome(
+                deterministic, SKIPPED_SEMANTIC_CONTROL_NOTICE
+            )
 
         try:
             detached = detach_claim_citations(claim)
@@ -273,6 +294,22 @@ _CITATION_FAULTS = frozenset(
         "event_field_text_mismatch",
     }
 )
+
+
+def _carries_semantic_control_notice(draft: Any) -> bool:
+    """Whether this answer states something the model would silently drop.
+
+    Reads the draft's own flags rather than the rendered text: the wording
+    belongs to the generator, and a verbalizer that matched on it would own a
+    copy of a sentence it does not write.  A draft without the mapping -- an
+    older caller, or a diagnostic passing a claim directly -- reports nothing,
+    so existing behaviour is unchanged.
+    """
+
+    ambiguity = getattr(draft, "ambiguity", None)
+    if not isinstance(ambiguity, Mapping):
+        return False
+    return any(bool(ambiguity.get(flag)) for flag in _SEMANTIC_CONTROL_FLAGS)
 
 
 def _failure_status(reason: str | None) -> str:

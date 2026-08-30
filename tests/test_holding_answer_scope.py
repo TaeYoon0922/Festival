@@ -307,14 +307,21 @@ class ReportedEventSelectionTests(unittest.TestCase):
 
         self.assertEqual(list(reported), events)
 
-    def test_several_matches_keep_every_event(self) -> None:
+    def test_several_matches_keep_only_the_matching_events(self) -> None:
+        """P1-A5-B: being unable to pick one is not a reason to show the rest.
+
+        This previously kept every event, which put rows the resolver had
+        already rejected into the answer -- a decrease question was answered
+        with increases.
+        """
+
         events = [self._Event(True), self._Event(True), self._Event(False)]
 
         reported = _reported_holding_events(
             self._Resolution(events, ["after_ratio"])
         )
 
-        self.assertEqual(list(reported), events)
+        self.assertEqual(list(reported), [events[0], events[1]])
 
     def test_no_match_keeps_every_event(self) -> None:
         events = [self._Event(False), self._Event(False)]

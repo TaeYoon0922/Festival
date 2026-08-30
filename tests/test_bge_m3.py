@@ -1,9 +1,12 @@
 import math
+import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import app.retrieval.bge_m3 as bge_m3
 from app.retrieval.bge_m3 import (
     BGE_M3_DIMENSIONS,
     BgeM3HttpEmbeddingProvider,
@@ -16,6 +19,21 @@ from app.retrieval.embeddings import (
     HttpEmbeddingSettings,
     create_embedding_provider,
 )
+
+#: Shaped like a real commit; the loader now refuses anything that is not one.
+PINNED_SHA = "6892b95fed65c899a30896eb40d619ae284d0455"
+
+
+def _write_snapshot(root, revision, *, files=None):
+    """A cache directory shaped like huggingface_hub's, named for its commit."""
+
+    path = os.path.join(root, revision)
+    os.makedirs(path, exist_ok=True)
+    for name in (files if files is not None
+                 else ("config.json", "model.safetensors", "tokenizer.json")):
+        with open(os.path.join(path, name), "w", encoding="utf-8") as handle:
+            handle.write("{}")
+    return path
 
 
 class FakeEncoder:
@@ -123,7 +141,14 @@ class BgeM3ProviderTests(unittest.TestCase):
                 bge_config(max_length=8193), encoder=FakeEncoder()
             )
 
-    def test_local_loader_propagates_device_normalization_and_revision(self) -> None:
+    def test_local_loader_passes_a_verified_path_and_delegates_no_revision(self) -> None:
+        """FlagEmbedding must get a proven directory, never a repository id.
+
+        It accepts ``revision`` and does not honour it -- asked for a pinned
+        commit it resolved ``main`` -- so handing it anything it could resolve
+        itself is what allowed a different model to load unnoticed.
+        """
+
         calls = []
 
         def model_factory(model, **kwargs):
@@ -131,14 +156,21 @@ class BgeM3ProviderTests(unittest.TestCase):
             return FakeEncoder()
 
         fake_module = SimpleNamespace(BGEM3FlagModel=model_factory)
-        with patch.dict(sys.modules, {"FlagEmbedding": fake_module}):
-            _load_flag_embedding_encoder(bge_config(device="cuda"))
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = _write_snapshot(root, PINNED_SHA)
+            with patch.dict(sys.modules, {"FlagEmbedding": fake_module}), patch.object(
+                bge_m3, "_snapshot_downloader", lambda: (lambda **_kw: snapshot)
+            ):
+                _load_flag_embedding_encoder(
+                    bge_config(device="cuda", version=PINNED_SHA))
+
         model, kwargs = calls[0]
-        self.assertEqual(model, "BAAI/bge-m3")
+        self.assertEqual(model, snapshot)
+        self.assertNotEqual(model, "BAAI/bge-m3")
+        self.assertNotIn("revision", kwargs)
         self.assertEqual(kwargs["devices"], "cuda")
         self.assertTrue(kwargs["use_fp16"])
         self.assertTrue(kwargs["normalize_embeddings"])
-        self.assertEqual(kwargs["revision"], "pinned-revision")
 
     def test_http_provider_uses_dense_only_contract_and_normalizes(self) -> None:
         vector = [0.0] * 1024

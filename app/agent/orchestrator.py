@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
@@ -20,11 +20,33 @@ from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
     HoldingResolution,
 )
+from app.reasoning.holding_company_role_resolution import (
+    HoldingCompanyRoleResolver,
+    has_role_provenance,
+)
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactResolver,
 )
+from app.reasoning.holding_date_intent import (
+    exact_reference_date,
+    execution_plan as holding_execution_plan,
+)
+from app.reasoning.holding_event_fusion import fuse as fuse_holding_events
+from app.reasoning.holding_event_selection import (
+    EXACT,
+    classify_holding_event_selection,
+)
+from app.reasoning.holding_evidence_coverage import (
+    CoverageAssessment,
+    assess as assess_holding_coverage,
+)
+from app.reasoning.holding_report_relative_execution import (
+    HoldingReportRelativeExecution,
+    ReportRelativeEvidenceExecution,
+)
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
+from app.retrieval.interfaces import RetrievalResult
 
 
 #: How a routed execution shape maps onto the grouping EvidenceBuilder performs.
@@ -58,6 +80,24 @@ class AgentResult:
     answer_draft: AnswerDraft
     warnings: tuple[str, ...]
     execution_trace: tuple[str, ...]
+    #: Internal diagnostic only; never serialised into the public response.
+    holding_coverage: CoverageAssessment = field(default_factory=CoverageAssessment)
+    #: The served evidence the answer was actually built from.  This equals the
+    #: retrieval output unless a post-retrieval stage enriched it; because that
+    #: output is immutable, an enriched list can only be carried out here.  The
+    #: public response renders this list, so what the resolver used and what the
+    #: caller is shown stay the same evidence.
+    evidence_results: tuple[Any, ...] = ()
+    #: Candidate chunks paired with ``evidence_results``.  Usually this is the
+    #: frozen retrieval pool; exact deterministic hydration can instead supply
+    #: a selected chunk that retrieval never fetched.
+    evidence_chunks: tuple[Any, ...] = ()
+    #: Distinguishes an intentional empty deterministic failure from an older
+    #: caller that simply did not populate the two internal evidence fields.
+    evidence_overridden: bool = False
+    #: Internal Phase 3 diagnostic; deliberately absent from ``to_dict`` and
+    #: therefore from the public API schema.
+    report_relative_execution: ReportRelativeEvidenceExecution | None = None
 
     def to_dict(self) -> dict[str, Any]:
         resolution = self.resolution
@@ -84,6 +124,8 @@ class AgentOrchestrator:
         periodic_resolver: PeriodicFactResolver | None = None,
         periodic_evidence_selector: PeriodicEvidenceSelector | None = None,
         answer_composer: AnswerComposer | None = None,
+        report_relative_execution: HoldingReportRelativeExecution | None = None,
+        holding_company_role_resolver: HoldingCompanyRoleResolver | None = None,
     ) -> None:
         self.task_router = task_router or TaskRouter()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
@@ -93,6 +135,8 @@ class AgentOrchestrator:
             periodic_evidence_selector or PeriodicEvidenceSelector()
         )
         self.answer_composer = answer_composer or AnswerComposer()
+        self.report_relative_execution = report_relative_execution
+        self.holding_company_role_resolver = holding_company_role_resolver
 
     def run(
         self,
@@ -113,24 +157,122 @@ class AgentOrchestrator:
         trace = ["task_router"]
         decision = self.task_router.route(question, query_plan)
 
+        # Phase 3.  The report index, never ranked retrieval, decides which
+        # filing report-relative wording names.  A returned execution is
+        # authoritative even when empty: empty means the deterministic source
+        # declined and ordinary retrieval must not answer from another report.
+        report_relative = (
+            self.report_relative_execution.adapt(
+                question,
+                query_plan,
+                execution,
+                routed_task_type=decision.task_type,
+            )
+            if self.report_relative_execution is not None
+            else None
+        )
+
+        # A holding execution can be served plenty of evidence and still be
+        # unable to answer: the structured projections carrying the fields may
+        # have missed the cutoff, or the served ones may be the wrong projection
+        # type for what was asked. Top the gap up from the pool retrieval
+        # already fetched -- no query is issued here -- and leave the original
+        # execution untouched so the read-only invariants still hold.
+        reporter_scoped = False
+        if report_relative is not None:
+            trace.append("holding_report_relative_execution")
+            evidence_input = SimpleNamespace(
+                plan=execution.plan,
+                chunks=report_relative.chunks,
+                results=report_relative.results,
+            )
+            coverage = CoverageAssessment(results=report_relative.results)
+        else:
+            scoped_execution = _holding_reporter_scope(
+                execution,
+                query_plan,
+                routed_task_type=decision.task_type,
+                resolver=self.holding_company_role_resolver,
+            )
+            ordinary_execution = scoped_execution or execution
+            if scoped_execution is not None:
+                reporter_scoped = True
+                trace.append("holding_reporter_scope")
+            coverage = assess_holding_coverage(
+                question,
+                query_plan,
+                ordinary_execution.chunks,
+                ordinary_execution.results,
+                routed_task_type=decision.task_type,
+            )
+            evidence_input = ordinary_execution
+            if coverage.rescued:
+                trace.append("holding_evidence_coverage")
+                evidence_input = SimpleNamespace(
+                    plan=ordinary_execution.plan,
+                    chunks=ordinary_execution.chunks,
+                    results=list(coverage.results),
+                )
+
+        # P1-A4 D1. A question naming one calendar day is asking about one
+        # event, but the plan only carries that day when its own task type was
+        # already holding_change -- a promoted execution gets the year instead.
+        # Re-read the date with the routed semantics and carry it on a copy, so
+        # the frozen plan (and the understanding trace) stay exactly as P0-D
+        # left them.
+        holding_plan = holding_execution_plan(
+            question, query_plan, routed_task_type=decision.task_type
+        )
+        if holding_plan is not query_plan:
+            trace.append("holding_date_intent")
+
         trace.append("evidence_builder")
         evidence = self.evidence_builder.build(
-            execution,
+            evidence_input,
             question=question,
             grouping_intent=_EXECUTION_GROUPING_INTENT.get(decision.task_type),
         )
+
+        # P1-A4 D2. One filing can render one event twice -- the detail row
+        # carries the shares, the report the ratios -- and the two are grouped
+        # apart because their holder labels differ. Asked about a single day,
+        # that reads as two events, which is both one too many and each one
+        # short of the requested fields. Merge only those views, only on the day
+        # that was asked about, and only when the numbers say they are the same
+        # event. The builder's own output is left untouched.
+        if decision.task_type == "holding_event":
+            fused = fuse_holding_events(
+                evidence,
+                reference_date=exact_reference_date(holding_plan),
+                reporter=getattr(holding_plan, "reporter", None),
+            )
+            if fused is not evidence:
+                trace.append("holding_event_fusion")
+                evidence = fused
+
         evidence_before = copy.deepcopy(evidence.to_dict())
         resolution: HoldingResolution | PeriodicFactResolution | None
 
         if decision.task_type == "holding_event":
             trace.append("holding_event_resolver")
             resolution = self.holding_resolver.resolve(
-                evidence, query_plan=query_plan
+                evidence, query_plan=holding_plan
             )
             resolution_before = copy.deepcopy(resolution.to_dict())
             trace.append("answer_composer")
+            # What the question itself said about which event is wanted, read
+            # from the plan alone. The composer must not re-derive it, and the
+            # count of served events must not stand in for it.
             draft = self.answer_composer.compose(
-                evidence, holding_resolution=resolution
+                evidence,
+                holding_resolution=resolution,
+                selection_mode=(
+                    EXACT
+                    if report_relative is not None and report_relative.resolved
+                    else classify_holding_event_selection(
+                        holding_plan, routed_task_type=decision.task_type
+                    )
+                ),
             )
         elif decision.task_type == "periodic_fact":
             trace.append("periodic_fact_resolver")
@@ -170,6 +312,12 @@ class AgentOrchestrator:
             dict.fromkeys(
                 [
                     *decision.warnings,
+                    *(
+                        (f"holding_report_relative:{report_relative.status}",)
+                        if report_relative is not None
+                        and not report_relative.resolved
+                        else ()
+                    ),
                     *evidence.warnings,
                     *(
                         resolution.warnings
@@ -188,7 +336,78 @@ class AgentOrchestrator:
             answer_draft=draft,
             warnings=warnings,
             execution_trace=tuple(trace),
+            holding_coverage=coverage,
+            evidence_results=tuple(evidence_input.results),
+            evidence_chunks=tuple(evidence_input.chunks),
+            evidence_overridden=bool(
+                report_relative is not None or coverage.rescued or reporter_scoped
+            ),
+            report_relative_execution=report_relative,
         )
+
+
+def _holding_reporter_scope(
+    execution: Any,
+    plan: Any,
+    *,
+    routed_task_type: str | None,
+    resolver: HoldingCompanyRoleResolver | None,
+) -> Any | None:
+    """Keep only retrieved evidence from the indexed issuer/reporter pair.
+
+    Scoped to plans whose reporter this system derived from the corpus itself.
+    A reporter the asker named directly is left alone: those questions answered
+    without this pruning before B.2 existed, and B.2 is not a licence to change
+    them.
+    """
+
+    if routed_task_type != "holding_event" or resolver is None:
+        return None
+    if not has_role_provenance(plan):
+        return None
+    corp_code = str(getattr(plan, "corp_code", "") or "").strip()
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    document_ids = resolver.document_ids(corp_code, reporter)
+    if not document_ids:
+        return None
+    chunks = tuple(
+        candidate
+        for candidate in execution.chunks
+        if str(getattr(candidate, "doc_id", "") or "") in document_ids
+    )
+    results = tuple(
+        result
+        for result in execution.results
+        if str(getattr(result, "doc_id", "") or "") in document_ids
+    )
+    if (
+        list(chunks) == list(execution.chunks)
+        and list(results) == list(execution.results)
+    ):
+        return None
+    return SimpleNamespace(
+        plan=execution.plan, chunks=chunks, results=_dense_ranks(results)
+    )
+
+
+def _dense_ranks(results: Sequence[RetrievalResult]) -> tuple[RetrievalResult, ...]:
+    """Relabel surviving ranks 1..N without reordering or rescoring.
+
+    Excluding evidence leaves holes in the served rank sequence, and every
+    other evidence path in this pipeline hands out a contiguous one.  Only the
+    label changes: order, scores, and provenance are carried through untouched.
+    """
+
+    return tuple(
+        RetrievalResult(
+            chunk_id=result.chunk_id,
+            doc_id=result.doc_id,
+            bm25_score=result.bm25_score,
+            rank=rank,
+            metadata_match=result.metadata_match,
+        )
+        for rank, result in enumerate(results, start=1)
+    )
 
 
 def orchestrate(

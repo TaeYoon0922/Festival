@@ -10,7 +10,7 @@ rendered answer and falls back to it whenever validation fails.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import psycopg
@@ -41,6 +41,12 @@ from app.reasoning.multi_document_evidence import (
 from app.reasoning.multi_document_executor import MultiDocumentExecutor
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
 from app.reasoning.multi_document_semantics import check_answer
+from app.reasoning.holding_report_relative_execution import (
+    HoldingReportRelativeExecution,
+)
+from app.reasoning.holding_company_role_resolution import (
+    HoldingCompanyRoleResolver,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import (
     CorpusScope,
@@ -60,6 +66,11 @@ from app.retrieval.corporate_event_repository import (
     PostgresCorporateEventRepository,
 )
 from app.retrieval.correction_repository import PostgresCorrectionRepository
+from app.reasoning.vector_coverage_policy import (
+    HEALTHY as _VECTOR_HEALTHY,
+    classify as _classify_vector_availability,
+    warning_for as _vector_warning_for,
+)
 from app.retrieval.embeddings import (
     EmbeddingConfig,
     EmbeddingHttpError,
@@ -177,6 +188,14 @@ class AnswerPipeline:
         multi_document_planner = MultiDocumentPlanner()
         hcx_settings = HcxSettings.from_env()
         corpus_scope = CorpusScope.repository_default()
+        report_relative_execution = HoldingReportRelativeExecution.from_repository(
+            document_backend=backend,
+            chunk_backend=backend,
+        )
+        holding_company_role_resolver = HoldingCompanyRoleResolver(
+            report_relative_execution.index,
+            active_corpus_identity=report_relative_execution.active_corpus_identity,
+        )
         return cls(
             settings=settings,
             understanding=QueryUnderstanding(
@@ -208,6 +227,10 @@ class AnswerPipeline:
                 ),
                 config=settings.retrieval_config(),
             ),
+            orchestrator=AgentOrchestrator(
+                report_relative_execution=report_relative_execution,
+                holding_company_role_resolver=holding_company_role_resolver,
+            ),
             # P0-C: a deterministic completeness layer on top of the frozen
             # ranking. It engages only for questions that name a company, an
             # enumerable family, a bounded period, and an explicit date basis;
@@ -229,6 +252,7 @@ class AnswerPipeline:
                 corpus_scope=corpus_scope,
                 multi_document_planner=multi_document_planner,
                 event_scope_provider=PostgresEventScopeProvider(backend),
+                holding_company_role_resolver=holding_company_role_resolver,
             ),
             semantic_fallback=HcxSemanticQueryFallback(hcx_settings),
             answerability_guard=AnswerabilityGuard(),
@@ -259,13 +283,19 @@ class AnswerPipeline:
         except Exception as error:  # noqa: BLE001 - surfaced as a sanitized reason
             raise AnswerPipelineError(_classify(error)) from error
 
+        # One evidence set from here on: whatever the orchestrator resolved,
+        # composed and cited from is what the guard judges and what the caller
+        # is shown.  ``execution`` stays the immutable retrieval record and is
+        # still what the retrieval diagnostics describe.
+        evidence = final_evidence(execution, result)
+
         answerability: AnswerabilityResult | None = None
         if self.answerability_guard is not None:
             answerability = self.answerability_guard.evaluate(
                 generated,
                 plan=plan,
                 agent_result=result,
-                execution=execution,
+                execution=evidence,
                 multi_document=multi,
             )
         if answerability is None or answerability.model_answer_allowed:
@@ -290,7 +320,7 @@ class AnswerPipeline:
             "question_id": question_id,
             "question": question,
             "retrieved_context": retrieved_context(
-                execution,
+                evidence,
                 self.settings.top_k
                 + _expanded_count(execution)
                 + _multi_document_count(multi),
@@ -510,6 +540,57 @@ def _expanded_count(execution: Any) -> int:
     return total
 
 
+class _FinalEvidence:
+    """An execution whose served results were replaced, not mutated.
+
+    Retrieval output is immutable, so a post-retrieval stage that enriches the
+    served list has to hand its own list forward.  This wraps the original so
+    every retrieval attribute still reads through untouched while ``results``
+    reports what the agent actually answered from.
+    """
+
+    __slots__ = ("_execution", "chunks", "results")
+
+    def __init__(
+        self,
+        execution: Any,
+        chunks: Sequence[Any],
+        results: Sequence[Any],
+    ) -> None:
+        self._execution = execution
+        self.chunks = chunks
+        self.results = tuple(results)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._execution, name)
+
+
+def final_evidence(execution: Any, result: Any) -> Any:
+    """The evidence set the answer was actually built from.
+
+    Returns the execution itself whenever nothing enriched it, so an untouched
+    question keeps rendering the exact object it always did.
+    """
+
+    overridden = bool(getattr(result, "evidence_overridden", False))
+    results = tuple(getattr(result, "evidence_results", ()) or ())
+    chunks = tuple(getattr(result, "evidence_chunks", ()) or ())
+    if overridden:
+        return _FinalEvidence(execution, chunks, results)
+    if not results:
+        return execution
+    if list(results) == list(execution.results) and not chunks:
+        return execution
+    if not chunks:
+        chunks = getattr(execution, "chunks", ())
+    if (
+        list(results) == list(execution.results)
+        and list(chunks) == list(execution.chunks)
+    ):
+        return execution
+    return _FinalEvidence(execution, chunks, results)
+
+
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
     """Render the served Top-K in the shape the Gold60 report records."""
 
@@ -543,6 +624,34 @@ def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
+def _vector_degradation_warning(execution: Any) -> str | None:
+    """Make a degraded retrieval lane visible without changing what is served.
+
+    Serving policy is untouched: a degraded request still answers.  What changes
+    is that partial coverage can no longer look identical to a healthy hybrid
+    run -- a corpus with 53.6% of candidates embedded still reported
+    ``vector_status == "ok"`` while 91.2% of the chunks it served came from the
+    embedded subset, because only embedded chunks can compete in both lanes.
+    """
+
+    status = getattr(execution, "vector_status", None)
+    if status is None:
+        return None
+    coverage = getattr(execution, "vector_coverage", None) or {}
+    degradation = _classify_vector_availability(status, coverage)
+    if degradation == _VECTOR_HEALTHY:
+        return None
+    hybrid = (getattr(execution, "routing", None) or {}).get("hybrid") or {}
+    return _vector_warning_for(
+        degradation,
+        coverage,
+        # Carried from the configured identity, so an intentional hash
+        # diagnostic is never reported as a degraded BGE run.
+        provider=(hybrid.get("embedding") or {}).get("provider"),
+        error=getattr(execution, "vector_error", None) or coverage.get("error"),
+    )
+
+
 def think_trace(
     result: Any,
     generated: GeneratedAnswer,
@@ -572,6 +681,9 @@ def think_trace(
         "warnings": list(generated.warnings),
         "hcx_status": outcome.status,
     }
+    degradation = _vector_degradation_warning(execution)
+    if degradation:
+        trace["warnings"] = [*trace["warnings"], degradation]
     correction = getattr(execution, "correction_expansion", None)
     if isinstance(correction, Mapping) and correction.get("correction_expanded"):
         # Which documents the graph added and which chain they came from. This

@@ -18,6 +18,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from app.reasoning.holding_company_role_resolution import (
+    ROLE_PROVENANCE_KEY,
+    HoldingCompanyRoleResolver,
+    role_provenance,
+)
+from app.reasoning.holding_evidence_coverage import requested_holding_fields
+from app.reasoning.holding_report_relative_execution import ACQUISITION_REQUEST_FIELDS
+from app.reasoning.holding_reporter import reporter_matches
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -137,6 +145,44 @@ _VAGUE_OPERATION_PATTERNS = (
     "바뀐 거", "변경된 거", "어떻게 됐", "무슨 일", "피해 본 건", "취소한 건",
 )
 _VAGUE_TASK_PATTERNS = ("재무지표", "재무 수치")
+
+#: Comparison frames that forbid reinterpreting a multi-company slot as one
+#: company plus a role.  ``uncertain`` is included deliberately: an unresolved
+#: comparative frame fails closed, because guessing wrong here turns a
+#: clarification into a confident answer about the wrong subject.
+_COMPARISON_FIREWALL_FRAMES = ("cross_company", "uncertain")
+
+
+def _comparison_firewall_engaged(plan: QueryPlan) -> bool:
+    """Whether a comparison frame forbids role reinterpretation of the slot.
+
+    Query understanding owns the semantics; this only reads the signal, so the
+    validator does not grow a second comparison-language parser.
+    """
+
+    return plan.evidence.get("comparison_frame") in _COMPARISON_FIREWALL_FRAMES
+
+
+def _holding_company_role_resolution_allowed(plan: QueryPlan) -> bool:
+    """Whether a two-company plan may consult the holding relation corpus."""
+
+    if len(plan.companies) != 2 or len(plan.corp_codes) != 2:
+        return False
+    if plan.task_type != "holding_change":
+        return False
+    if tuple(plan.disclosure_route) != ("holding",):
+        return False
+    if plan.event_type:
+        return False
+    if (
+        isinstance(plan.comparison, Mapping)
+        and plan.comparison.get("type") == "company_comparison"
+    ):
+        return False
+    if _comparison_firewall_engaged(plan):
+        return False
+    requested = requested_holding_fields(str(plan.raw_query or ""), plan)
+    return not ACQUISITION_REQUEST_FIELDS.intersection(requested)
 
 
 @dataclass(frozen=True)
@@ -390,10 +436,12 @@ class QueryValidator:
         event_scope_provider: Callable[
             [], tuple[str | None, str | None]
         ] | None = None,
+        holding_company_role_resolver: HoldingCompanyRoleResolver | None = None,
     ) -> None:
         self.corpus_scope = corpus_scope
         self.multi_document_planner = multi_document_planner
         self.event_scope_provider = event_scope_provider
+        self.holding_company_role_resolver = holding_company_role_resolver
 
     def validate(
         self,
@@ -655,6 +703,50 @@ class QueryValidator:
                 and plan.comparison.get("type") == "company_comparison"
             ):
                 return _deterministic_slot("company", list(plan.companies)), None, plan
+            if (
+                self.corpus_scope is not None
+                and self.holding_company_role_resolver is not None
+                and _holding_company_role_resolution_allowed(plan)
+            ):
+                role = self.holding_company_role_resolver.resolve(
+                    plan.companies[0],
+                    plan.corp_codes[0],
+                    plan.companies[1],
+                    plan.corp_codes[1],
+                )
+                reporter_compatible = (
+                    not plan.reporter
+                    or reporter_matches(plan.reporter, role.reporter)
+                )
+                if role.resolved and reporter_compatible:
+                    # The marker proves where this reporter came from. Evidence
+                    # scoping keys off it so that a reporter the asker typed
+                    # themselves keeps its pre-B.2 behaviour.
+                    resolved_plan = replace(
+                        plan,
+                        companies=(str(role.issuer),),
+                        corp_codes=(str(role.issuer_corp_code),),
+                        reporter=str(role.reporter),
+                        evidence={
+                            **plan.evidence,
+                            ROLE_PROVENANCE_KEY: role_provenance(role),
+                        },
+                    )
+                    return (
+                        _deterministic_slot("company", role.issuer),
+                        None,
+                        resolved_plan,
+                    )
+            # The corpus relation above either could not be consulted or did
+            # not prove exactly one direction.  Preserve the old ambiguity and
+            # record whether comparison semantics were the authoritative gate.
+            plan = replace(
+                plan,
+                evidence={
+                    **plan.evidence,
+                    "role_reinterpretation_blocked": _comparison_firewall_engaged(plan),
+                },
+            )
             return (
                 QuerySlot(
                     "company",

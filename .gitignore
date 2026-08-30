@@ -20,3 +20,7 @@ venv/
 .DS_Store
 __MACOSX/
 .env.*
+
+# Local BGE evaluation artifacts
+reports/evaluation/bge/*
+!reports/evaluation/bge/manifest.json

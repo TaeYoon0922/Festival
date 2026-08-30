@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
+from app.reasoning import holding_report_relative
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -249,14 +250,42 @@ class QueryUnderstanding:
             if inferred:
                 companies = (inferred,)
 
+        # The bounded two-company ownership rule must read the comparison
+        # firewall before it can classify the task.  Report comparison payloads
+        # still wait for period parsing below; the firewall itself depends only
+        # on the question and canonical company mentions.
+        company_mentions = _company_mentions(raw_query, companies, aliases)
+        comparison_frame = _comparison_frame(raw_query, companies, company_mentions)
+
         financial_metric, metric_evidence = _find_financial_metric(raw_query)
         event_type, event_evidence, event_route = _find_event(raw_query)
         holding_metric, holding_evidence = _find_holding_metric(raw_query)
+        ownership_intent = False
+        ownership_metric: str | None = None
+        ownership_evidence: str | None = None
+        ownership_metric_evidence: str | None = None
+        if holding_metric is None:
+            (
+                ownership_intent,
+                ownership_metric,
+                ownership_evidence,
+                ownership_metric_evidence,
+            ) = _find_bounded_ownership_intent(
+                raw_query,
+                companies,
+                company_mentions,
+                comparison_frame=comparison_frame,
+                conflicting_intent=bool(
+                    event_type
+                    or financial_metric
+                    or extracted.get("doc_group") not in {None, "holding"}
+                ),
+            )
         reporter = _find_reporter(raw_query)
 
-        if holding_metric:
+        if holding_metric or ownership_intent:
             task_type = "holding_change"
-            metric = holding_metric
+            metric = holding_metric or ownership_metric
         elif event_type:
             task_type = "corporate_event"
             metric = None
@@ -283,6 +312,18 @@ class QueryUnderstanding:
             task_type=task_type,
             routes=routes,
         )
+        # Which report the question speaks relative to, and which of that
+        # report's fields. Read from the period parser's own date decision so
+        # reference-date and receipt-date wording keep the axis it assigned.
+        report_relative = (
+            holding_report_relative.parse(
+                raw_query,
+                date_semantics=date_semantics,
+                has_exact_date=bool(period.from_date and period.from_date == period.to_date),
+            )
+            if "holding" in routes
+            else None
+        )
         basis, basis_evidence, basis_span = _basis_from_query(raw_query)
         parsed_correction, correction_confidence, correction_evidence = (
             _correction_from_query(raw_query)
@@ -300,7 +341,9 @@ class QueryUnderstanding:
             parsed_correction = correction_policy
             correction_confidence = 1.0
             correction_evidence = "caller_override"
-        comparison = _comparison_from_query(raw_query, companies, mentioned_years)
+        comparison = _comparison_from_query(
+            raw_query, companies, mentioned_years, company_mentions
+        )
 
         subtype = extracted["doc_subtype"]
         if not subtype:
@@ -339,7 +382,9 @@ class QueryUnderstanding:
             raw_query,
             structured_spans,
             metric=metric,
-            metric_evidence=metric_evidence or holding_evidence,
+            metric_evidence=(
+                metric_evidence or holding_evidence or ownership_metric_evidence
+            ),
             event_type=event_type,
             event_evidence=event_evidence,
         )
@@ -379,13 +424,20 @@ class QueryUnderstanding:
                 "report_preference": "annual" if annual_preferred else None,
                 "company_resolved": bool(resolved),
                 "company_resolution_attempted": self._company_resolver is not None,
-                "metric": metric_evidence or holding_evidence,
+                "metric": (
+                    metric_evidence or holding_evidence or ownership_metric_evidence
+                ),
                 "event_type": event_evidence,
                 "operation": operation,
+                "holding_ownership_intent": ownership_evidence,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
                 "correction_intent": correction_intent,
                 "correction_intent_evidence": correction_intent_evidence,
+                "comparison_frame": comparison_frame,
+                "holding_report_relative": (
+                    report_relative.to_dict() if report_relative else None
+                ),
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
             },
         )
@@ -447,6 +499,61 @@ def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
     ):
         return "holding_shares", "특수관계자"
     return None, None
+
+
+def _find_bounded_ownership_intent(
+    query: str,
+    companies: tuple[str, ...],
+    mentions: tuple[tuple[int, int, str], ...],
+    *,
+    comparison_frame: str | None,
+    conflicting_intent: bool,
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Recognize closed two-company securities-ownership constructions.
+
+    This classifier determines only the holding task family and, when the
+    wording is explicit, its metric.  The canonical company tuple remains
+    untouched: issuer/reporter direction belongs to validation and cannot be
+    inferred from mention order here.
+    """
+
+    if (
+        len(companies) != 2
+        or len(mentions) != 2
+        or comparison_frame in {"cross_company", "uncertain"}
+        or conflicting_intent
+    ):
+        return False, None, None, None
+
+    (_first_start, first_end, _first), (second_start, second_end, _second) = mentions
+    gap = re.sub(r"\s+", "", query[first_end:second_start])
+    tail = re.sub(r"\s+", "", query[second_end:])
+
+    family: str | None = None
+    if re.fullmatch(r"[이가]보유한", gap) and re.match(
+        r"^주식(?:은|는|이|가|을|를)?", tail
+    ):
+        family = "company_holds_company_shares"
+    elif re.fullmatch(r"[이가]", gap) and re.match(
+        r"^주식(?:은|는|이|가|을|를)?.*들고(?:있|계)", tail
+    ):
+        family = "company_has_company_shares"
+    elif gap == "의" and re.match(r"^지분(?:은|는|이|가|을|를|율|비율)?", tail):
+        family = "company_ownership_interest"
+
+    if family is None:
+        return False, None, None, None
+
+    # Generic "얼마나" does not select an answer unit.  Only explicit count or
+    # ratio vocabulary promotes the otherwise valid ownership intent to a
+    # concrete holding metric.
+    ratio = re.search(r"지분\s*비율|보유\s*비율|지분율|퍼센트|%", query)
+    if ratio:
+        return True, "holding_ratio", family, ratio.group(0)
+    shares = re.search(r"몇\s*주|주식\s*수(?:량)?|보유\s*수량", query)
+    if shares:
+        return True, "holding_shares", family, shares.group(0)
+    return True, None, family, None
 
 
 def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
@@ -926,10 +1033,182 @@ def _correction_from_query(query: str) -> tuple[str, float, str | None]:
     return "latest_preferred", 0.0, None
 
 
+#: Postpositional comparison operators.  Korean attaches these to the *left*
+#: operand, so what precedes one says whether it compares two companies or a
+#: company against a period or a metric.  That is why the operator is resolved
+#: structurally instead of by blacklisting the words it can follow.
+_COMPARISON_OPERATORS = ("대비", "보다")
+#: Connectors that coordinate two company mentions into one operand list.
+#: Bare whitespace is deliberately absent: two names side by side name a
+#: subject rather than coordinate it, and reading that as coordination would
+#: claim every keyword-style two-company holding question.
+_COMPANY_CONNECTOR = re.compile(r"^\s*(?:와|과|랑|이랑|하고|및|,|·|/)\s*$")
+#: A particle may sit between a company mention and an operator.
+_OPERATOR_GAP = re.compile(r"^\s*[은는이가의을를와과]?\s*$")
+#: Asking which member of a named set the answer is.
+_CHOICE_MARKERS = ("중어디", "중누가", "중어느", "어느쪽", "어느회사", "중더", "중가장")
+#: Asking for each company separately.  Not arithmetic comparison, but equally
+#: unsafe to reinterpret as one issuer and one reporter.
+_ENUMERATION_MARKERS = ("각각", "각회사", "각사", "둘다", "양사", "양쪽")
+#: Explicit comparison nouns.
+_EXPLICIT_COMPARISON = ("비교", "차이")
+#: Comparative predicates.  Never sufficient alone -- see ``_comparison_frame``.
+_COMPARATIVE_PREDICATES = (
+    "더많", "더높", "더적", "더낮", "더큰", "더작", "더크",
+    "가장많", "가장높", "가장큰", "가장작", "가장적",
+)
+#: References that bind a comparison to a period or a prior filing rather than
+#: to another company.  Matched against the whitespace-stripped query so
+#: "직전 보고 대비" and "직전보고 대비" are one case.
+_TEMPORAL_ANCHORS = (
+    "전년", "전기", "전분기", "전년동기", "직전보고", "직전공시", "직전분기",
+    "직전연도", "직전사업", "작년", "지난해", "예년", "종전", "동기",
+    "이전보다", "이전공시", "이전과", "변동전후", "변경전후", "추이", "변화",
+)
+_TEMPORAL_YEAR = re.compile(r"(?:19|20)\d{2}년?(?:보다|대비)")
+
+
+def _company_mentions(
+    query: str,
+    companies: tuple[str, ...],
+    aliases: Mapping[str, set[str]],
+) -> tuple[tuple[int, int, str], ...]:
+    """Where each canonical company is named, in reading order.
+
+    ``companies`` is sorted rather than ordered by mention, so positional
+    structure has to be recovered from the text.  Longer surface forms win an
+    overlap, and each canonical company is kept once so a repeated name cannot
+    look like a second operand.
+    """
+
+    surface: dict[str, str] = {}
+    for company in companies:
+        surface[company] = company
+    for alias, canonical_names in aliases.items():
+        for canonical in canonical_names:
+            if canonical in companies:
+                surface.setdefault(alias, canonical)
+    found: list[tuple[int, int, str]] = []
+    for term in sorted(surface, key=len, reverse=True):
+        canonical = surface[term]
+        for match in re.finditer(re.escape(term), query, re.IGNORECASE):
+            start, end = match.span()
+            if any(start < other_end and other_start < end
+                   for other_start, other_end, _ in found):
+                continue
+            found.append((start, end, canonical))
+    found.sort()
+    mentions: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for start, end, canonical in found:
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        mentions.append((start, end, canonical))
+    return tuple(mentions)
+
+
+def _operator_binds_companies(
+    query: str,
+    mentions: tuple[tuple[int, int, str], ...],
+) -> bool:
+    """Does a comparison operator take a company as its left operand?
+
+    A company name followed by ``대비``/``보다`` compares companies;
+    ``직전 보고 대비``, ``자기자본 대비`` and ``작년보다`` compare a period or a
+    metric.  The difference is which token the operator attaches to, not which
+    words appear elsewhere in the sentence.
+    """
+
+    for operator in _COMPARISON_OPERATORS:
+        for match in re.finditer(re.escape(operator), query):
+            start = match.start()
+            if any(
+                end <= start and _OPERATOR_GAP.fullmatch(query[end:start])
+                for _mention_start, end, _canonical in mentions
+            ):
+                return True
+    return False
+
+
+def _companies_are_coordinated(
+    query: str,
+    mentions: tuple[tuple[int, int, str], ...],
+) -> bool:
+    """Are two company mentions joined into a single operand list?"""
+
+    return any(
+        _COMPANY_CONNECTOR.fullmatch(query[first_end:second_start])
+        for (_first_start, first_end, _first), (second_start, _second_end, _second)
+        in zip(mentions, mentions[1:])
+    )
+
+
+def _comparison_frame(
+    query: str,
+    companies: tuple[str, ...],
+    mentions: tuple[tuple[int, int, str], ...],
+) -> str | None:
+    """Whether the question relates several named companies to each other.
+
+    This is a **firewall** signal, not an execution signal: ``cross_company``
+    says that reading one company as the disclosure issuer and another as its
+    reporter would be unsafe, and says nothing about whether a cross-company
+    comparison can be answered.  ``uncertain`` says comparative language stands
+    between two companies without a structure that resolves it, which fails
+    closed the same way.
+
+    Only the question text and the canonical companies are read.  Routes, task
+    type, and any issuer/reporter relation are deliberately not consulted, so
+    the same sentence classifies identically wherever it is routed.
+    """
+
+    if len(companies) < 2:
+        return None
+
+    compact = re.sub(r"\s+", "", query)
+    has_explicit = any(term in compact for term in _EXPLICIT_COMPARISON)
+    has_choice = any(term in compact for term in _CHOICE_MARKERS)
+    has_enumeration = any(term in compact for term in _ENUMERATION_MARKERS)
+    has_predicate = any(term in compact for term in _COMPARATIVE_PREDICATES)
+    has_operator = any(term in compact for term in _COMPARISON_OPERATORS)
+    comparative = (
+        has_explicit or has_choice or has_enumeration or has_predicate or has_operator
+    )
+    if not comparative:
+        return None
+
+    # Two companies are named but at most one could be located, so no operand
+    # structure can be checked.  Comparative language is present, so decline.
+    if len(mentions) < 2:
+        return "uncertain"
+
+    # Structure first: an operator or a connector that actually joins the
+    # company mentions outranks vocabulary that merely appears nearby.
+    if _operator_binds_companies(query, mentions):
+        return "cross_company"
+    if _companies_are_coordinated(query, mentions) and (
+        has_choice or has_enumeration or has_explicit or has_predicate
+    ):
+        return "cross_company"
+
+    # No cross-company structure.  A period or prior-filing reference explains
+    # the comparative wording, so the question stays a single-subject fact
+    # request and remains available to later role interpretation.
+    if any(anchor in compact for anchor in _TEMPORAL_ANCHORS):
+        return None
+    if _TEMPORAL_YEAR.search(compact):
+        return None
+
+    # Comparative language between two companies that no structure resolves.
+    return "uncertain"
+
+
 def _comparison_from_query(
     query: str,
     companies: tuple[str, ...],
     years: tuple[int, ...],
+    mentions: tuple[tuple[int, int, str], ...] = (),
 ) -> Mapping[str, Any] | None:
     compact = re.sub(r"\s+", "", query)
     if any(term in compact for term in ("변동전후", "변경전후", "이전과이후")):
@@ -939,7 +1218,13 @@ def _comparison_from_query(
         if len(years) == 1:
             payload["years"] = [years[0] - 1, years[0]]
         return payload
-    if len(companies) > 1 and any(term in compact for term in ("비교", "대비")):
+    # "비교" states the comparison outright and keeps its existing reach. "대비"
+    # does not: it is the operator that also builds 자기자본 대비, 매출액 대비 and
+    # 직전 보고 대비, so it counts only when a company is its left operand.
+    if len(companies) > 1 and (
+        "비교" in compact
+        or ("대비" in compact and _operator_binds_companies(query, mentions))
+    ):
         return {"type": "company_comparison", "companies": list(companies)}
     if len(years) > 1:
         return {"type": "period_comparison", "years": list(years)}

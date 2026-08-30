@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import EvidenceItem, EvidenceSet
 from app.reasoning.holding_event_resolver import HoldingEvent, HoldingResolution
+from app.reasoning.holding_event_selection import (
+    EXACT,
+    NOT_APPLICABLE,
+    is_semantically_unique,
+)
+from app.reasoning.holding_reporter import reporter_matches
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFact,
     PeriodicFactResolution,
@@ -82,6 +87,7 @@ class AnswerComposer:
         *,
         holding_resolution: HoldingResolution | None = None,
         periodic_resolution: PeriodicFactResolution | None = None,
+        selection_mode: str = NOT_APPLICABLE,
     ) -> AnswerDraft:
         supplied = sum(
             value is not None for value in (holding_resolution, periodic_resolution)
@@ -89,14 +95,22 @@ class AnswerComposer:
         if supplied != 1:
             raise ValueError("exactly one resolver output must be supplied")
         if holding_resolution is not None:
-            return compose_holding_answer(holding_resolution, evidence_set)
+            return compose_holding_answer(
+                holding_resolution, evidence_set, selection_mode=selection_mode
+            )
         assert periodic_resolution is not None
         return compose_periodic_answer(periodic_resolution, evidence_set)
 
     def compose_holding(
-        self, resolution: HoldingResolution, evidence_set: EvidenceSet
+        self,
+        resolution: HoldingResolution,
+        evidence_set: EvidenceSet,
+        *,
+        selection_mode: str = NOT_APPLICABLE,
     ) -> AnswerDraft:
-        return compose_holding_answer(resolution, evidence_set)
+        return compose_holding_answer(
+            resolution, evidence_set, selection_mode=selection_mode
+        )
 
     def compose_periodic(
         self, resolution: PeriodicFactResolution, evidence_set: EvidenceSet
@@ -105,7 +119,10 @@ class AnswerComposer:
 
 
 def compose_holding_answer(
-    resolution: HoldingResolution, evidence_set: EvidenceSet
+    resolution: HoldingResolution,
+    evidence_set: EvidenceSet,
+    *,
+    selection_mode: str = NOT_APPLICABLE,
 ) -> AnswerDraft:
     evidence_by_id = _evidence_by_id(evidence_set)
     citation_builder = _CitationBuilder(evidence_by_id)
@@ -136,6 +153,19 @@ def compose_holding_answer(
     temporal_ambiguity = (
         resolution.temporal_ambiguity or resolution.matching_event_count > 1
     )
+    # Whether one event may be called *the* answer is a question about the
+    # question, not about how many events retrieval exposed.  A count of one is
+    # routinely an artifact of which projections were served, so it is recorded
+    # separately from whether the query ever identified a single event.
+    observed = len(reported_events)
+    semantic_unique = is_semantically_unique(
+        selection_mode, resolution.matching_event_count
+    )
+    scoped = bool(resolution.requested_fields) and bool(observed)
+    under_specified = scoped and selection_mode not in (NOT_APPLICABLE, EXACT)
+    exact_multi = (
+        scoped and selection_mode == EXACT and resolution.matching_event_count > 1
+    )
     warnings = [*evidence_set.warnings, *resolution.warnings]
     if temporal_ambiguity:
         warnings.append("multiple_matching_holding_events")
@@ -159,6 +189,11 @@ def compose_holding_answer(
             "matching_event_count": resolution.matching_event_count,
             "alternative_event_count": len(resolution.events),
             "latest_event_selected": False,
+            "selection_mode": selection_mode,
+            "semantic_unique": semantic_unique,
+            "under_specified": under_specified,
+            "exact_multi_match": exact_multi,
+            "observable_matching_event_count": observed,
         },
         warnings=tuple(dict.fromkeys(warnings)),
         confidence=confidence,
@@ -223,13 +258,16 @@ def _reported_holding_events(
     The resolver already decides which events satisfy the question's company,
     reporter, direction, and date constraints.  Reporting every retrieved event
     regardless answers a question nobody asked: given "2022-12-05 기준 보유
-    비율", the reader also gets 2023 and 2024 holdings.
+    비율", the reader also gets 2023 and 2024 holdings, and given "감소 후
+    주식수" the reader is shown increases.
 
-    Narrowing is deliberately limited to the unambiguous case — the question
-    named specific fields and exactly one event satisfies it.  A history
-    question names no field, and an ambiguous one matches several events; both
-    keep the existing multi-event answer, and no event is ever picked for being
-    the newest or the closest.
+    So every event that satisfies the question is reported, and nothing else.
+    That is one event when the question identifies one and several when it does
+    not; which of several the reader wanted is a question this function does not
+    answer, and no event is ever picked for ranking first, or for being the
+    newest or the closest.  A history question names no field and keeps its
+    whole timeline, and when nothing satisfies the question the existing
+    fallback still shows what was retrieved rather than nothing at all.
     """
 
     events = tuple(resolution.events)
@@ -246,26 +284,15 @@ def _reported_holding_events(
         )
     ):
         return ()
-    if len(matching) != 1:
+    if not matching:
         return events
     return matching
 
 
 def _holding_reporter_matches(value: str | None, constraint: str | None) -> bool:
-    left = _normalize_holding_reporter(value)
-    right = _normalize_holding_reporter(constraint)
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    suffixes = ("공단", "기금", "조합", "법인", "회사")
-    return any(
-        left == right + suffix or right == left + suffix for suffix in suffixes
-    )
+    """The same contract the resolver applies, so the two cannot disagree."""
 
-
-def _normalize_holding_reporter(value: str | None) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or "")).casefold()
+    return reporter_matches(value, constraint)
 
 
 def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:
@@ -296,6 +323,17 @@ def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:
         "completeness": copy.deepcopy(dict(event.completeness)),
         "confidence": copy.deepcopy(dict(event.confidence)),
         "evidence_chunk_ids": list(event.evidence_chunk_ids),
+        # Only for an event whose own row proved an acquisition, so every other
+        # event's content keeps exactly the keys it had.
+        **(
+            {
+                "acquisition_date": getattr(event, "acquisition_date", None),
+                "acquired_shares": serialized.get("acquired_shares"),
+                "transaction_method": getattr(event, "transaction_method", None),
+            }
+            if getattr(event, "transaction_method", None) is not None
+            else {}
+        ),
     }
 
 

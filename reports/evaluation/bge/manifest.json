@@ -1,0 +1,42 @@
+{
+ "manifest_version": 1,
+ "generated_at": "2026-08-28T15:54:30.809360+00:00",
+ "git_commit": "92549d08211120b9fce8268aae5dccfcd8cd6a18",
+ "corpus_snapshot": "structural_v2_1_full_4204",
+ "question_set": "gold60_agent_questions",
+ "question_set_sha256": "2d90957a6ac6def9fa70da44b09d67215044e7bbe0b126d6d2eb31c658e8bca2",
+ "candidate_union_hash": "474f89dc449ca86aff73e0ff5bedfe0f8c3930de4fe0d31933e0bbb1bc802eed",
+ "candidate_union_chunks": 75786,
+ "embedded_scope": "holding candidate subset (required P1-R + P0-D.2 gates)",
+ "embedded_scope_chunks": 9987,
+ "embedding_model": "BAAI/bge-m3",
+ "embedding_revision": "6892b95fed65c899a30896eb40d619ae284d0455",
+ "embedding_dimensions": 1024,
+ "embedding_provider": "bge_m3_local",
+ "embedding_device": "cuda",
+ "bge_rows_in_db": 10516,
+ "db_chunks": 296564,
+ "db_identifier": "festival-verify:55433/festival_verify",
+ "retrieval_config": {
+  "lexical_top_n": 50,
+  "vector_top_n": 50,
+  "final_top_k": 10,
+  "rrf_k": 60,
+  "fusion_weight": 0.6,
+  "deterministic_weight": 0.4,
+  "rerank_mode": "bounded",
+  "rerank_window_size": 2
+ },
+ "retrieval_config_hash": "d07eb39be79e4410",
+ "ml_versions": {
+  "python": "3.11.16",
+  "torch": "2.5.1+cu121",
+  "cuda": "12.1",
+  "FlagEmbedding": "1.4.2",
+  "transformers": "5.16.1",
+  "sentence-transformers": "6.0.0",
+  "numpy": "2.4.6",
+  "gpu": "NVIDIA GeForce RTX 4060",
+  "driver": "577.00"
+ }
+}

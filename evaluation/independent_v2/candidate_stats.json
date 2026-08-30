@@ -1,0 +1,413 @@
+{
+ "verified_pool": {
+  "count": 95,
+  "by_category": {
+   "T10_exact_reference_date": 4,
+   "T11_exact_receipt_date": 4,
+   "T12_date_axis_conflict": 3,
+   "T13_previous_change": 4,
+   "T14_acquisition": 2,
+   "T15_first_report_no_previous": 6,
+   "T16_periodic_extraction": 4,
+   "T17_cross_table_reference": 1,
+   "T18_negative_insufficient": 6,
+   "T19_deictic_context_dependent": 4,
+   "T1_single_doc_unseen": 10,
+   "T20_same_day_two_filings": 6,
+   "T2_resolved_correction": 12,
+   "T4_event_lifecycle": 6,
+   "T5_multi_doc_synthesis": 7,
+   "T6_two_company_comparison": 2,
+   "T7_multi_company_comparison": 1,
+   "T8_issuer_reporter_collision": 8,
+   "T9_holding_latest": 5
+  },
+  "by_difficulty": {
+   "hard": 45,
+   "medium": 35,
+   "simple": 15
+  },
+  "by_behavior": {
+   "answer": 79,
+   "insufficient_evidence": 15,
+   "clarify": 1
+  },
+  "by_quality": {
+   "A": 88,
+   "B": 6,
+   "C": 1
+  },
+  "by_citation_policy": {
+   "single": 68,
+   "none": 4,
+   "any_of": 6,
+   "all_required": 17
+  },
+  "unique_companies": 42,
+  "unique_reporters": 30,
+  "unique_docs": 93,
+  "max_company": [
+   "현대자동차",
+   6
+  ],
+  "max_template": [
+   "corrected-final-holding-value",
+   9
+  ],
+  "exact_template_overlap": 23,
+  "semantic_family_overlap": 60,
+  "same_company": 22,
+  "same_reporter": 3,
+  "same_doc": 0,
+  "server_verification_required": 8,
+  "runner_gap": 38
+ },
+ "proposed_final": {
+  "count": 69,
+  "by_category": {
+   "T10_exact_reference_date": 3,
+   "T11_exact_receipt_date": 3,
+   "T12_date_axis_conflict": 3,
+   "T13_previous_change": 3,
+   "T14_acquisition": 2,
+   "T15_first_report_no_previous": 4,
+   "T16_periodic_extraction": 3,
+   "T18_negative_insufficient": 5,
+   "T19_deictic_context_dependent": 3,
+   "T1_single_doc_unseen": 7,
+   "T20_same_day_two_filings": 4,
+   "T2_resolved_correction": 8,
+   "T4_event_lifecycle": 4,
+   "T5_multi_doc_synthesis": 5,
+   "T6_two_company_comparison": 2,
+   "T7_multi_company_comparison": 1,
+   "T8_issuer_reporter_collision": 5,
+   "T9_holding_latest": 4
+  },
+  "by_difficulty": {
+   "hard": 33,
+   "medium": 25,
+   "simple": 11
+  },
+  "by_behavior": {
+   "answer": 57,
+   "insufficient_evidence": 11,
+   "clarify": 1
+  },
+  "by_quality": {
+   "A": 65,
+   "B": 4
+  },
+  "by_citation_policy": {
+   "single": 49,
+   "none": 3,
+   "any_of": 4,
+   "all_required": 13
+  },
+  "unique_companies": 39,
+  "unique_reporters": 27,
+  "unique_docs": 70,
+  "max_company": [
+   "한국항공우주",
+   6
+  ],
+  "max_template": [
+   "corrected-final-holding-value",
+   5
+  ],
+  "exact_template_overlap": 17,
+  "semantic_family_overlap": 44,
+  "same_company": 12,
+  "same_reporter": 3,
+  "same_doc": 0,
+  "server_verification_required": 5,
+  "runner_gap": 28
+ },
+ "held": 26,
+ "rejected": [
+  [
+   "IEV2-C041",
+   "T15_first_report_no_previous",
+   "T15 gold invalid: an earlier filing (holding_20230307000265) exists for SK하이닉스 / The Capital Group, so this is not a first report even though the body cell reads '-'."
+  ],
+  [
+   "IEV2-C083",
+   "T14_acquisition",
+   "T14 gold has 증감주식수 == 보유주식수 (43,557,218), so a system confusing acquired_shares with after_shares still passes; no discriminating power."
+  ]
+ ],
+ "integrity_problems_pool": [],
+ "integrity_problems_final": [],
+ "audit_rows": [
+  {
+   "id": "IEV2-C009",
+   "check": "t3_reaudit",
+   "result": "RECLASSIFIED->T2/T3A",
+   "detail": "corpus-determinate; expected_behavior=answer"
+  },
+  {
+   "id": "IEV2-C010",
+   "check": "t3_reaudit",
+   "result": "RECLASSIFIED->T2/T3A",
+   "detail": "corpus-determinate; expected_behavior=answer"
+  },
+  {
+   "id": "IEV2-C011",
+   "check": "t3_reaudit",
+   "result": "RECLASSIFIED->T2/T3A",
+   "detail": "corpus-determinate; expected_behavior=answer"
+  },
+  {
+   "id": "IEV2-C012",
+   "check": "t3_reaudit",
+   "result": "RECLASSIFIED->T2/T3A",
+   "detail": "corpus-determinate; expected_behavior=answer"
+  },
+  {
+   "id": "IEV2-C041",
+   "check": "t15_chronology",
+   "result": "REJECT",
+   "detail": "T15 gold invalid: an earlier filing (holding_20230307000265) exists for SK하이닉스 / The Capital Group, so this is not a first report even though the body cell reads '-'."
+  },
+  {
+   "id": "IEV2-C042",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C043",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C044",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C045",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C046",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C047",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C048",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C049",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C050",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C051",
+   "check": "t20_citation",
+   "result": "any_of",
+   "detail": "identical body value in both filings"
+  },
+  {
+   "id": "IEV2-C052",
+   "check": "t20_citation",
+   "result": "any_of",
+   "detail": "identical body value in both filings"
+  },
+  {
+   "id": "IEV2-C053",
+   "check": "t20_citation",
+   "result": "any_of",
+   "detail": "identical body value in both filings"
+  },
+  {
+   "id": "IEV2-C054",
+   "check": "t20_citation",
+   "result": "any_of",
+   "detail": "identical body value in both filings"
+  },
+  {
+   "id": "IEV2-C055",
+   "check": "t20_citation",
+   "result": "any_of",
+   "detail": "identical body value in both filings"
+  },
+  {
+   "id": "IEV2-C056",
+   "check": "t20_citation",
+   "result": "any_of",
+   "detail": "identical body value in both filings"
+  },
+  {
+   "id": "IEV2-C067",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C068",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C069",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C070",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C071",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C072",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C073",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C074",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C075",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C076",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C077",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C078",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C079",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C080",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C081",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C082",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "4 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C083",
+   "check": "t14_same_row",
+   "result": "REJECT",
+   "detail": "증감 equals 변동후"
+  },
+  {
+   "id": "IEV2-C090",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C091",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C092",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C093",
+   "check": "citation",
+   "result": "all_required",
+   "detail": "2 documents needed to compose the answer"
+  },
+  {
+   "id": "IEV2-C093",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "clarify"
+  },
+  {
+   "id": "IEV2-C094",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "IEV2-C095",
+   "check": "refusal_gold",
+   "result": "behavioural",
+   "detail": "insufficient_evidence"
+  },
+  {
+   "id": "REPLACEMENTS",
+   "check": "added",
+   "result": "OK",
+   "detail": "2 verified items replacing 2 STEP 6 rejections"
+  }
+ ]
+}

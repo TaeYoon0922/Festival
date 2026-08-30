@@ -14,6 +14,10 @@ from app.reasoning.lexical_evaluation import (
     _candidate_is_relevant,
     _result_summary,
 )
+from app.reasoning.vector_coverage_policy import (
+    assert_complete_coverage,
+    claims_real_vectors,
+)
 
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -76,6 +80,12 @@ class QueryPlanHybridEvaluator:
             if progress:
                 progress(index, len(scheduled), question_id)
             rows.append(self._evaluate_question(set_name, question))
+
+        # Before any metric exists: a run configured for real semantic vectors
+        # may not publish numbers it did not earn.  Strictness is derived from
+        # the configured provider rather than a flag, so it cannot be omitted
+        # by a caller and an intentional hash diagnostic is unaffected.
+        self._assert_vector_evaluation_is_honest(rows)
 
         hybrid = _summary(rows, "hybrid_gold_rank", question_sets)
         lexical = _summary(rows, "lexical_gold_rank", question_sets)
@@ -143,6 +153,37 @@ class QueryPlanHybridEvaluator:
             "failures": [row for row in rows if row["failure_class"] != "success"],
             "questions": rows,
         }
+
+    def _assert_vector_evaluation_is_honest(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Refuse to compute metrics for a real-vector run without the vectors.
+
+        Lexical fallback and partially covered hybrid runs both produce numbers
+        that look like retrieval quality but are not: under partial coverage
+        only embedded chunks can reach the vector lane, so the comparison is
+        asymmetric while ``vector_status`` still reads ``ok``.
+        """
+
+        config = getattr(self.executor, "embedding_config", None)
+        if config is None or not claims_real_vectors(getattr(config, "provider", None)):
+            return
+        assert_complete_coverage(
+            {
+                str(row["question_id"]): {
+                    "available": row["embedded_vector_candidate_count"] is not None,
+                    "candidate_count": row["candidate_chunk_count"],
+                    "embedded_count": row["embedded_vector_candidate_count"] or 0,
+                }
+                for row in rows
+            },
+            identity={
+                "provider": getattr(config, "provider", None),
+                "model": getattr(config, "model", None),
+                "version": getattr(config, "version", None),
+                "dimensions": getattr(config, "dimensions", None),
+            },
+        )
 
     def _evaluate_question(
         self, set_name: str, question: Mapping[str, Any]

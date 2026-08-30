@@ -1,0 +1,76 @@
+{
+ "schema_version": "independent-eval-v2-gold-1.0",
+ "item_count": 69,
+ "gold_sha256": "d574e696cda10a3b7165dfe20dae8fdfad8742bb5a05dd71217547facb01565f",
+ "generation_timestamp": "2026-08-29T17:34:15Z",
+ "canonical_corpus_path": "data/processed/structural_v2_1_full_4204/",
+ "corpus_snapshot_id": "structural_v2_1_full_4204",
+ "corpus_manifest_sha256": "04750795e1a2d5c35f73e4bb7766ebede02ff3512d33c382bd4c3a51daba3364",
+ "corpus_disclosure_count": 4204,
+ "production_freeze_sha": "b8799e9299a5f795d2bec8ce0fad121b6c67c8db",
+ "documentation_freeze_sha": "a7a8f99",
+ "evaluator_contract": "evaluation/independent_v2/evaluator_contract.md",
+ "evaluator_contract_sha256": "a1cffe650ef44427370cb1ebd7ab41c4aca158bd2a7bed069e8087b6056bfefb",
+ "evaluator_implementation": "evaluation/independent_v2/evaluator.py",
+ "evaluator_implementation_sha256": "9f222d22067aeed831ea0f65f62935c1d271e23fa590f2b60a78784489018963",
+ "behavior_counts": {
+  "answer": 57,
+  "clarify": 1,
+  "insufficient_evidence": 11
+ },
+ "category_counts": {
+  "T10_exact_reference_date": 3,
+  "T11_exact_receipt_date": 3,
+  "T12_date_axis_conflict": 3,
+  "T13_previous_change": 3,
+  "T14_acquisition": 2,
+  "T15_first_report_no_previous": 4,
+  "T16_periodic_extraction": 3,
+  "T18_negative_insufficient": 5,
+  "T19_deictic_context_dependent": 3,
+  "T1_single_doc_unseen": 7,
+  "T20_same_day_two_filings": 4,
+  "T2_resolved_correction": 8,
+  "T4_event_lifecycle": 4,
+  "T5_multi_doc_synthesis": 5,
+  "T6_two_company_comparison": 2,
+  "T7_multi_company_comparison": 1,
+  "T8_issuer_reporter_collision": 5,
+  "T9_holding_latest": 4
+ },
+ "difficulty_counts": {
+  "hard": 33,
+  "medium": 25,
+  "simple": 11
+ },
+ "quality_counts": {
+  "A": 65,
+  "B": 4
+ },
+ "citation_policy_counts": {
+  "all_required": 13,
+  "any_of": 4,
+  "none": 3,
+  "single": 49
+ },
+ "unique_companies": 39,
+ "unique_reporters": 27,
+ "unique_gold_documents": 70,
+ "lifecycle_items": [
+  "IEV2-C072",
+  "IEV2-C074",
+  "IEV2-C075",
+  "IEV2-C076",
+  "IEV2-C077"
+ ],
+ "provenance_policy": "Gold truth is determined from the canonical provided disclosure corpus. Database correction/event relation tables are derived implementation artifacts and are not required to validate Gold when the filing corpus itself uniquely establishes the relation. If the PostgreSQL event graph later fails to reproduce one of these relations, that is a production relation/resolver finding, not a Gold error.",
+ "prediction_blind": "Agent predictions were not consulted at any point during candidate discovery, gold authoring, verification, or freeze. No API was started, no /answer call was made, and no frozen-agent output was inspected.",
+ "lifecycle_provenance": {
+  "status": "corpus_verified_db_unconfirmed",
+  "corpus_relation": "VERIFIED",
+  "postgres_corroboration": "UNCONFIRMED",
+  "reason": "server access unavailable from the authoring workstation",
+  "gold_impact": "NONE",
+  "future_db_comparison": "implementation diagnostic only"
+ }
+}
