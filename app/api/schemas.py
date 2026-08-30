@@ -143,6 +143,12 @@ class AnswerabilityTrace(BaseModel):
     answerable: bool = False
 
 
+class HoldingEvidenceCoverageTrace(BaseModel):
+    status: str
+    rescued: bool
+    rescue_mode: str
+
+
 class ThinkTrace(BaseModel):
     """Execution summary: which components ran and what they concluded.
 
@@ -179,6 +185,10 @@ class ThinkTrace(BaseModel):
         exclude_if=lambda value: value is None,
     )
     answerability: AnswerabilityTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    holding_evidence_coverage: HoldingEvidenceCoverageTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

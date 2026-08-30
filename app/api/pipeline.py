@@ -685,6 +685,14 @@ def think_trace(
         "warnings": list(generated.warnings),
         "hcx_status": outcome.status,
     }
+    coverage = getattr(result, "holding_coverage", None)
+    coverage_trace = coverage.to_dict() if coverage is not None else {}
+    if coverage_trace.get("rescue_mode"):
+        trace["holding_evidence_coverage"] = {
+            "status": coverage_trace.get("status"),
+            "rescued": bool(coverage_trace.get("rescued")),
+            "rescue_mode": coverage_trace["rescue_mode"],
+        }
     degradation = _vector_degradation_warning(execution)
     if degradation:
         trace["warnings"] = [*trace["warnings"], degradation]

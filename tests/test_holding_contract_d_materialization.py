@@ -12,7 +12,13 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
 from app.agent.orchestrator import AgentOrchestrator
+from app.api.app import create_app
+from app.api.pipeline import AnswerPipeline
+from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
+from app.reasoning.answerability import AnswerabilityGuard
 from app.reasoning.holding_correction_finality import (
     STATUS_RESOLVED,
     CorrectionChain,
@@ -966,6 +972,100 @@ class RescueModeObservabilityTests(ContractDFixture):
         self.assertFalse(refused.rescued)
         self.assertIsNone(refused.rescue_mode)
         self.assertIsNone(refused.to_dict()["rescue_mode"])
+
+
+class ApiTracePropagationTests(ContractDFixture):
+    def serve(self, *, chunks=None, results=None):
+        query_plan = plan(metric="holding_shares")
+        execution = SimpleNamespace(
+            plan=query_plan,
+            chunks=list(self.chunks if chunks is None else chunks),
+            results=list(self.results if results is None else results),
+        )
+
+        class Understanding:
+            def understand(self, question, *, top_k):
+                del question, top_k
+                return query_plan
+
+        class Executor:
+            def execute(self, supplied_plan):
+                self.plan = supplied_plan
+                return execution
+
+        class CapturingOrchestrator(AgentOrchestrator):
+            def run(self, *args, **kwargs):
+                self.result = super().run(*args, **kwargs)
+                return self.result
+
+        phase_three = HoldingReportRelativeExecution(
+            index=self.index,
+            active_corpus_identity=IDENTITY,
+        )
+        orchestrator = CapturingOrchestrator(
+            report_relative_execution=phase_three,
+            holding_report_index=self.index,
+            active_corpus_identity=IDENTITY,
+        )
+        pipeline = AnswerPipeline(
+            understanding=Understanding(),
+            executor=Executor(),
+            orchestrator=orchestrator,
+            verbalizer=HcxVerbalizer(HcxSettings(enabled=False)),
+            answerability_guard=AnswerabilityGuard(),
+        )
+        client = TestClient(create_app(pipeline_factory=lambda: pipeline))
+        response = client.get(
+            "/answer",
+            params={"question_id": "trace-fixture", "question": query_plan.raw_query},
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json(), orchestrator.result
+
+    def test_contract_d_mode_reaches_http_trace_without_moving_results(self) -> None:
+        payload, result = self.serve()
+
+        self.assertEqual(
+            payload["think_trace"]["holding_evidence_coverage"],
+            {
+                "status": STATUS_RESCUED,
+                "rescued": True,
+                "rescue_mode": RESCUE_MODE_CONTRACT_D,
+            },
+        )
+        self.assertEqual(
+            [(row["chunk_id"], row["rank"]) for row in payload["retrieved_context"]],
+            [(row.chunk_id, row.rank) for row in result.evidence_results],
+        )
+        self.assertEqual(
+            set(payload),
+            {"question_id", "question", "retrieved_context", "think_trace", "answer"},
+        )
+
+    def test_served_anchor_mode_reaches_http_trace(self) -> None:
+        payload, result = self.serve(
+            chunks=[self.raw, self.projection],
+            results=[ranked(self.raw)],
+        )
+
+        self.assertEqual(
+            payload["think_trace"]["holding_evidence_coverage"]["rescue_mode"],
+            RESCUE_MODE_SERVED_ANCHOR,
+        )
+        self.assertEqual(
+            [(row["chunk_id"], row["rank"]) for row in payload["retrieved_context"]],
+            [(row.chunk_id, row.rank) for row in result.evidence_results],
+        )
+
+    def test_refusal_does_not_claim_contract_d_in_http_trace(self) -> None:
+        other = served_document("unrelated_trace_text", doc_id=OTHER_DOC)
+        payload, result = self.serve(
+            chunks=[other, self.raw, self.projection],
+            results=[ranked(other)],
+        )
+
+        self.assertFalse(result.holding_coverage.rescued)
+        self.assertNotIn("holding_evidence_coverage", payload["think_trace"])
 
 
 if __name__ == "__main__":
