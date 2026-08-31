@@ -20,7 +20,10 @@ venv/
 .DS_Store
 __MACOSX/
 .env.*
+local-test/
 
-# Local BGE evaluation artifacts
-reports/evaluation/bge/*
-!reports/evaluation/bge/manifest.json
+# Q&A 작성 도구 개인 초안 (qa-tool/README.md)
+qa-tool/output/*.yaml
+qa-tool/output/*.yml
+qa-tool/output/*.json
+!qa-tool/output/.gitkeep

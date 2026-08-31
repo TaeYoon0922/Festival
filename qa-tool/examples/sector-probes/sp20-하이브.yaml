@@ -1,0 +1,56 @@
+# 20. 엔터테인먼트 · 하이브
+
+question_id: SP20
+question: 에스엠의 하이브 보유비율(H01)과 풋옵션 행사 후 증감(H02)을 합쳐, 순증가 주식수와 증가율(%)을 계산할 수 있어?
+
+listed_name: 하이브
+corp_name: 하이브
+
+sector_no: 20
+sector: 엔터테인먼트
+sector_focus: holding·exchange·연결
+
+reasoning_types:
+  - compute  # 연산
+  - compare  # 비교
+  - multi_doc  # 복수문서
+
+doc_group: holding
+report_nm · period: 대량보유상황보고서 · H01/H02
+basis: 해당없음
+
+task_type (기대): holding_change · multi_event_compute
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 별도
+
+must_include_in_answer:
+  - H01·H02 doc_id 각각
+  - 순증가 주식수·증가율(%) — verified delta only
+
+must_NOT_invent: 연결 재무표 혼입·보고자/피투자 혼동
+
+evidence:
+  doc_id: holding_20240314001102 + H02
+  section_path: 보유주식수·보유비율
+  manifest: corp_name=하이브
+
+negative_example: holding cross-table math
+
+corpus_sketch: |
+  Gold H01/H02.
+
+related_agent_gaps:
+  - holding multi-event math
+
+improve_hint (참고): holding_event aggregate
+
+gold_refs:
+  - H01
+  - H02
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

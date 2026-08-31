@@ -1,0 +1,57 @@
+# 1. 반도체·전자부품 · 삼성전자
+
+question_id: SP01
+question: 삼성전자 2023·2024 사업보고서 연결 매출액을 비교해서 증가율(%)을 계산해줘
+
+listed_name: 삼성전자
+corp_name: 삼성전자
+
+sector_no: 1
+sector: 반도체·전자부품
+sector_focus: 연결 손익·부문·Capa
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_doc  # 복수문서
+
+doc_group: periodic
+report_nm · period: 사업보고서 (2023.12 · 2024.12) · FY2023·FY2024
+basis: 연결
+
+task_type (기대): periodic_fact · financial_metric · comparative · derived_rate · multi_doc
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 별도
+
+must_include_in_answer:
+  - report_nm: 사업보고서 (2023.12) · 사업보고서 (2024.12) — 2건
+  - 재무제표 기준: 연결
+  - section: 연결 손익계산서 > 매출액
+  - 2023·2024 연결 매출액 (공시 숫자)
+  - 증가율(%) — 표 숫자로만 계산
+  - 단위: 백만원 등 공시 그대로
+
+must_NOT_invent: 코퍼스 밖·성장성 해석·별도 혼입·단일 연도만·LLM 임의 증가율
+
+evidence:
+  doc_id: periodic_(2023·2024 annual)
+  section_path: 연결 손익계산서 > 매출액
+  manifest: corp_name=삼성전자, doc_subtype=annual
+
+negative_example: 매출 단일행 1건만 · multi-doc·derived rate 미지원
+
+corpus_sketch: |
+  ① 각 annual 연결 매출 ② 증가율 산술 ③ 단위. taeyoon: comparison 파싱됨, derived compute는 미구현.
+
+related_agent_gaps:
+  - multi-doc retrieval
+  - derived_metric(rate)
+
+improve_hint (참고): comparative + derived_metric(rate) · 2 doc_id 바인딩
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

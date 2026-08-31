@@ -1,0 +1,48 @@
+# 연결 재고자산 · 전기/당기 비교 (comparative financial_metric)
+
+question_id: HM04
+question: 한미반도체 2025 사업보고서에서 연결재고자산 항목이 전기와 비교했을 때 어떻게 변했어
+
+listed_name: 한미반도체
+corp_name: 한미반도체
+
+doc_group: periodic
+report_nm · period: 사업보고서 (2025.12) · FY2025
+basis: 연결
+
+task_type (기대): periodic_fact · financial_metric · comparative
+
+expected_behavior: normal_answer
+
+must_include_in_answer:
+  - report_nm: 사업보고서 (2025.12)
+  - 재무제표 기준: 연결
+  - section: 연결 재무상태표 > 재고자산
+  - 당기·전기 금액 (공시 숫자)
+  - 변화: 증가/감소 + (가능하면) 차액·증감률 — 표 숫자만
+  - 단위: 백만원 등 공시 그대로
+
+must_NOT_invent:
+  - 별도 재고자산을 연결 질문에 사용
+  - 당기 한 줄만 제시
+  - 코퍼스 밖 해석·다른 재고 관련 과목 혼동
+
+evidence:
+  doc_id: periodic_20260312001230
+  rcept_dt: "20260312"
+  section_path: 연결 재무상태표 > 재고자산
+  manifest: corp_name=한미반도체, base_year=2025, doc_subtype=annual
+
+negative_example:
+  - metric 미등록(재고자산) → irrelevant chunk
+  - 당기 열만 투영
+  - comparison_frame uncertain → P0-D clarification/거절 (taeyoon)
+
+related_pipeline (taeyoon):
+  - query_understanding: comparison 파싱 · comparison_frame
+  - query_validation P0-D: uncertain comparative → fail-closed 가능
+  - periodic: named 연결/별도 metric row (STEP 10-B 계열)
+
+notes: |
+  「전기와 비교」= comparative. 주관적 평가 금지 ≠ 당기·전기 숫자 비교 금지.
+  공시 확인 후 구체 숫자 기입.

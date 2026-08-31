@@ -1,0 +1,47 @@
+# LG이노텍 · segment ranking (LGI06)
+
+question_id: LGI06
+question: LG이노텍 2023년 연결 영업이익에서 가장 큰 부분을 차지한 사업부문은?
+
+listed_name: LG이노텍
+corp_name: LG이노텍
+
+doc_group: periodic
+report_nm · period: 사업보고서 (2023.12) · FY2023
+basis: 연결
+
+task_type (기대): periodic_fact · segment_ranking
+  # metric=영업이익 · view=by_segment · largest_contributor
+
+expected_behavior: normal_answer
+
+must_include_in_answer:
+  - 재무제표 기준: 연결
+  - 섹션: 사업부문(세그먼트)별 영업이익 표
+  - 2023년 각 부문 영업이익 금액 (공시에 있는 부문만)
+  - 가장 큰 금액을 차지한 부문 명칭
+  - 단위 공시 그대로
+
+must_NOT_invent:
+  - 손익계산서 영업이익 총액 한 줄만으로 답변
+  - 매출 부문 표를 영업이익 질문에 그대로 사용
+  - 부문명 추측·전년 대비 해석
+
+evidence:
+  doc_id: periodic_20240228008553
+  report_nm: 사업보고서 (2023.12)
+  section_path: 사업부문별 / segment / 영업이익 열
+  manifest: corp_name=LG이노텍, base_year=2023, doc_subtype=annual
+
+negative_example:
+  - metric=영업이익 financial_metric → IS 한 줄만
+  - segment 표 미검색
+
+related_agent_gaps:
+  - segment_ranking intent
+  - periodic_metric_view 단일 행 투영
+
+improve_hint (참고): segment_ranking + argmax on verified segment table rows
+
+notes: |
+  「가장 큰 부분」= ranking intent. 공시 확인 후 부문별 숫자·최대 부문명 기입.

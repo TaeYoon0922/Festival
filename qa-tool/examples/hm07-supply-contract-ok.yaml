@@ -1,0 +1,45 @@
+# HM07-CLARIFY follow-up · exchange 양성
+
+question_id: HM07
+question: 한미반도체 2025년 5월 28일 공급계약 내용 알려줘
+
+listed_name: 한미반도체
+corp_name: 한미반도체
+
+doc_group: exchange
+doc_subtype: 단일판매공급계약체결
+report_nm · period: 단일판매·공급계약체결 · rcept_dt=20250528
+
+basis: 해당없음
+
+task_type (기대): corporate_event · supply_contract
+
+expected_behavior: normal_answer
+
+must_include_in_answer:
+  - doc_id: exchange_20250528800084
+  - 계약상대(방)
+  - 계약금액 (단위 공시 그대로)
+  - 계약기간
+  - 최근 매출액 대비(%) — 공시에 있는 경우
+
+must_NOT_invent:
+  - 사업보고서 주요계약 절과 혼동
+  - 5/16 공시와 혼동
+  - 표에 없는 판단
+
+evidence:
+  doc_id: exchange_20250528800084
+  rcept_dt: "20250528"
+  section_path: 단일판매·공급계약 / 계약내용
+
+negative_example:
+  - periodic_20260312001230 주요계약 서술만
+  - exchange_20250516800319 (5/16) 혼동
+
+related_cards:
+  - HM07-CLARIFY
+
+notes: |
+  HM07-CLARIFY clarification 후 follow-up.
+  숫자·상대방은 공시 확인 후 must_include에 기입.

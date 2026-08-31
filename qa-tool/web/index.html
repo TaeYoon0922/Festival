@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Festival qa-tool — 공시 Q&A 작성</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #fff;
+      --text: #1a1d26;
+      --muted: #5c6370;
+      --border: #d8dde6;
+      --accent: #245bdb;
+      --warn: #9a6700;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Apple SD Gothic Neo", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    main { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; }
+    h1 { font-size: 1.5rem; margin: 0 0 8px; }
+    .lead { color: var(--muted); margin-bottom: 24px; }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    h2 { font-size: 1rem; margin: 0 0 12px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; }
+    input[type="text"], textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font: inherit;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .row > * { flex: 1; min-width: 200px; }
+    .pill {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #e8eefb;
+      color: var(--accent);
+      margin-right: 6px;
+    }
+    .pill.warn { background: #fff4d6; color: var(--warn); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #eef1f6; }
+    pre {
+      margin: 0;
+      padding: 12px;
+      background: #0f1419;
+      color: #e6edf3;
+      border-radius: 6px;
+      overflow: auto;
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+    .note { font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>공시 Q&A 작성 도구</h1>
+    <p class="lead">
+      Festival 코퍼스(70개사) Q&A 초안 · <code>app/</code>·Gold60와 무관 ·
+      <a href="../README.md">qa-tool/README</a>
+    </p>
+
+    <section class="panel">
+      <h2>질문 입력</h2>
+      <div class="row">
+        <div>
+          <label for="prefix">question_id 접두사 (선택)</label>
+          <input id="prefix" type="text" placeholder="HY, HM …" />
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label for="question">질문</label>
+        <textarea id="question" placeholder="현대자동차 2025년 1분기 연결 매출액은?"></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <label for="batch">일괄 (한 줄에 하나)</label>
+        <textarea id="batch" rows="4" placeholder="고려아연 신규시설투자 투자종료일은?"></textarea>
+      </div>
+    </section>
+
+    <section id="single-out" class="panel hidden">
+      <h2>추천 양식</h2>
+      <div id="pills"></div>
+      <table id="field-table" style="margin-top:12px">
+        <thead><tr><th>필드</th><th>추천 값</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h2 style="margin-top:16px">복사용 YAML</h2>
+      <pre id="yaml-out"></pre>
+    </section>
+
+    <section id="batch-out" class="panel hidden">
+      <h2>일괄 초안</h2>
+      <div id="batch-list"></div>
+    </section>
+
+    <section class="panel">
+      <h2>필드 정의</h2>
+      <table>
+        <thead><tr><th>필드</th><th>의미</th></tr></thead>
+        <tbody>
+          <tr><td>doc_group</td><td>periodic / exchange / holding / major</td></tr>
+          <tr><td>must_include_in_answer</td><td>공시 확인 후 답에 넣을 표·숫자</td></tr>
+          <tr><td>negative_example</td><td>에이전트·사람 모두 흔한 오답</td></tr>
+          <tr><td>corpus_note</td><td>70개 universe 밖 회사 경고</td></tr>
+        </tbody>
+      </table>
+      <p class="note">로컬 서버: <code>cd qa-tool/web &amp;&amp; python -m http.server 8765</code></p>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

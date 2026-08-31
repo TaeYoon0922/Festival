@@ -1,0 +1,56 @@
+# 18. 전력기기 · LS ELECTRIC
+
+question_id: SP18
+question: LS ELECTRIC 2024년 초고압 변압기 시설투자 금액(Gold E03)과 자기자본 대비 비율, 종료일(E04)까지 한 번에
+
+listed_name: LS ELECTRIC
+corp_name: 엘에스일렉트릭
+
+sector_no: 18
+sector: 전력기기
+sector_focus: exchange 시설투자
+
+reasoning_types:
+  - compute  # 연산
+
+doc_group: exchange
+report_nm · period: 신규시설투자등 · rcept_dt=20240521
+basis: 해당없음
+
+task_type (기대): facility_investment · multi_field_single_event
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 별도
+
+must_include_in_answer:
+  - doc_id: exchange_20240521800037
+  - 투자금액 (Gold E03)
+  - 자기자본 대비(%)
+  - 투자종료일 (Gold E04)
+
+must_NOT_invent: 다른 시설투자 건 혼동
+
+evidence:
+  doc_id: exchange_20240521800037
+  rcept_dt: 20240521
+  section_path: 신규시설투자
+  manifest: corp_name=엘에스일렉트릭
+
+negative_example: 양성 벤치 — 단건 multi-field
+
+corpus_sketch: |
+  Gold E03/E04 검증.
+
+related_agent_gaps:
+
+improve_hint (참고): 양성 패턴을 comparative로 확장
+
+gold_refs:
+  - E03
+  - E04
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

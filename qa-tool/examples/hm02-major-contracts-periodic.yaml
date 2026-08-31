@@ -1,0 +1,40 @@
+# HM02 · 사업보고서 주요계약 (periodic narrative — not exchange)
+
+question_id: HM02
+question: 한미반도체 2025년 사업보고서에서 주목할만한 주요계약 내용 알려줘
+
+listed_name: 한미반도체
+corp_name: 한미반도체
+
+doc_group: periodic
+report_nm · period: 사업보고서 (2025.12) · FY2025
+basis: 해당없음
+
+task_type (기대): periodic_fact · major_contracts_narrative
+
+expected_behavior: normal_answer
+
+must_include_in_answer:
+  - section: 주요계약 및 연구개발활동 (또는 동의 절)
+  - 계약 상대·내용·금액 등 공시에 있는 항목
+  - 숫자 단위 공시 그대로
+
+must_NOT_invent:
+  - exchange 단일판매·공급계약 공시와 혼동
+  - 코퍼스 밖·성장성 해석
+
+evidence:
+  doc_id: periodic_(2025 annual)
+  section_path: 주요계약 및 연구개발활동
+  manifest: corp_name=한미반도체, base_year=2025
+
+negative_example:
+  - exchange supply_contract 라우트
+  - 손익계산서 매출 한 줄
+
+related_agent_gaps:
+  - periodic_intent=major_contracts
+  - section boost 주요계약
+
+notes: |
+  「주요계약」+ 사업보고서 → periodic narrative. exchange `계약` substring 함정 주의.

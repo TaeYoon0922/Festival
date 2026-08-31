@@ -1,0 +1,57 @@
+# 날짜·접수일 clarification / answerable_false 빈 템플릿
+# taeyoon: app/reasoning/query_validation.py P0-D · think_trace.query_understanding
+
+question_id: CLARIFY-DATE-XX
+question: (질문 원문 — 접수일·계약일 모호 또는 코퍼스 밖 날짜)
+
+listed_name: (listed_name)
+corp_name: (corp_name)
+
+doc_group: exchange  # 또는 major / holding
+report_nm · period: (rcept_dt 또는 모호한 날짜)
+
+basis: 해당없음
+
+task_type (기대): (supply_contract / facility_investment / …)
+
+expected_behavior: clarification  # 또는 answerable_false (후보 0건·코퍼스 밖)
+
+clarification_trigger:
+  - rcept_dt manifest 0건
+  - 접수일 > corpus 종료(2026-03-31)
+  - date_basis slot ambiguous (계약 체결일 vs 접수일)
+
+clarification_prompt: |
+  (규칙 기반 재질문 — manifest 후보만 제시)
+  예: "2025년이 계약 체결일 기준인가요, 공시 접수일 기준인가요?"
+
+candidate_docs:
+  - doc_id: (manifest에서만)
+    rcept_dt: (YYYYMMDD)
+
+follow_up_question: (재확인 후 정상 답변 질문)
+follow_up_expected_doc: (exchange_/major_/holding_ doc_id)
+
+must_include_in_answer:
+  - clarification 시: 후보 doc_id·rcept_dt 목록 (manifest 근거)
+  - follow-up normal_answer 시: 해당 공시 필드
+
+must_NOT_invent:
+  - 코퍼스 밖 날짜·doc_id
+  - HCX 자유 생성 후보
+  - 잘못된 날짜로 confident answer
+
+evidence:
+  manifest: data/corpus/manifest.jsonl · corp_name + rcept_dt 검색
+
+negative_example:
+  - 코퍼스 밖 날짜에 hallucinated exchange 본문
+  - 5/16·5/28 혼동 (HM07형)
+
+related_pipeline (taeyoon):
+  - route=clarification when query_validation unresolved slots
+  - think_trace.query_understanding.clarification_required
+  - answerable=false when retrieval_allowed=false
+
+notes: |
+  bounded candidate generation only. 용어·회사 하드코딩 금지.

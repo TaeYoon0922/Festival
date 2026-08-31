@@ -1,0 +1,53 @@
+# 2. 자동차·모빌리티 · 현대차
+
+question_id: SP02
+question: 현대자동차 2025 사업보고서 연결 기준 영업이익률(영업이익÷매출액)이 전기 대비 몇 %p 변했어?
+
+listed_name: 현대차
+corp_name: 현대자동차
+
+sector_no: 2
+sector: 자동차·모빌리티
+sector_focus: 연결 손익·부문·전동화
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: 사업보고서 (2025.12) · FY2025
+basis: 연결
+
+task_type (기대): periodic_fact · financial_metric · comparative · derived_ratio · delta_pp
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 별도
+
+must_include_in_answer:
+  - 당기·전기 매출·영업이익 (연결)
+  - 당기·전기 영업이익률(%)
+  - %p 변화
+
+must_NOT_invent: 별도 표 혼동·주관적 해석
+
+evidence:
+  doc_id: periodic_(2025 annual)
+  section_path: 연결 손익계산서
+  manifest: corp_name=현대자동차
+
+negative_example: 영업이익 단일행 · %p 파생 미등록
+
+corpus_sketch: |
+  한 표 4셀+2비율+%p.
+
+related_agent_gaps:
+  - derived_ratio
+  - delta_pp
+
+improve_hint (참고): same-table 4-cell atomic fact
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

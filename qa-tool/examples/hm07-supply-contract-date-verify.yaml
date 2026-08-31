@@ -1,0 +1,44 @@
+# HM07 · 2025-06-08 접수일 (manifest 확인 필요 — gold_pending)
+
+question_id: HM07
+question: 한미반도체 2025년 6월 8일에 올라온 공급계약 내용 알려줘
+
+listed_name: 한미반도체
+corp_name: 한미반도체
+
+doc_group: exchange
+doc_subtype: 단일판매공급계약체결
+report_nm · period: rcept_dt=20250608 (manifest 확인)
+
+basis: 해당없음
+
+task_type (기대): corporate_event · supply_contract
+
+expected_behavior: normal_answer  # doc 있으면 · 없으면 clarification/answerable_false
+
+must_include_in_answer:
+  - doc_id (20250608 exchange 1건 — 없으면 answerable=false)
+  - 계약상대·계약금액·계약기간
+  - 최근 매출액 대비(%) — 공시에 있으면
+
+must_NOT_invent:
+  - periodic 주요계약 절
+  - exchange_20250620800077 (6/20 시설투자)를 공급계약으로 오답
+  - 5/16·5/28 건과 혼합
+
+evidence:
+  doc_id: exchange_(rcept_no)
+  rcept_dt: "20250608"
+  section_path: 단일판매·공급계약 / 계약내용
+
+negative_example:
+  - periodic 사업보고서 주요계약 (HM02형)
+  - 시설투자 공시를 공급계약으로 오답
+
+status: routing_ok · gold_pending_date_verify
+
+notes: |
+  manifest상 2025-06-08 공급계약 없을 수 있음 → HM07-CLARIFY(2026-06-08) 또는 날짜 수정.
+
+related_cards:
+  - HM07-CLARIFY

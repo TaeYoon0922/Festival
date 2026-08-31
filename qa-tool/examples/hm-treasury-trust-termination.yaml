@@ -1,0 +1,19 @@
+question_id: HM01
+question: 한미반도체 최근 자기주식취득신탁계약해지결정에서 자기주식 소각 예정에 관한 내용이 있어?
+listed_name: 한미반도체
+corp_name: 한미반도체
+doc_group: major
+report_nm · period: (기간·보고서 종류 명시)
+basis: 해당없음
+task_type (기대): corporate_event · treasury_share_trust_termination
+must_include_in_answer:
+  - report_nm: 주요사항보고서(자기주식취득신탁계약해지결정) 등
+  - 신탁계약 해지·소각(예정) 관련 항목 (공시에 있는 경우만)
+  - 숫자 단위 (백만원/주/% 등 공시 그대로)
+must_NOT_invent: 코퍼스 밖 공시·뉴스, 전년 대비·성장성 해석, 표에 없는 재분류, exchange(공급계약 해지)로 오인
+evidence:
+  doc_id: major_(rcept_no)
+  section_path: (표 제목)
+  manifest: data/corpus/manifest.jsonl에서 corp_name·rcept_dt 검색
+negative_example: doc_group=exchange, subtype=단일판매공급계약해지 (신탁계약해지의 계약해지 부분문자열)
+notes: (공시 열람 후 doc_id·기대답 숫자 보완) · manifest 예: major_20250122000503

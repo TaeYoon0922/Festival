@@ -1,0 +1,57 @@
+# HM07 · 접수일 2026-06-08 — 코퍼스 밖 → clarification 또는 answerable_false
+
+question_id: HM07-CLARIFY
+question: 한미반도체 2025년 6월 8일 공급계약 내용 알려줘
+
+listed_name: 한미반도체
+corp_name: 한미반도체
+
+doc_group: exchange
+doc_subtype: 단일판매공급계약체결
+report_nm · period: rcept_dt=20260608 (코퍼스 종료 2026-03-31 밖)
+
+basis: 해당없음
+
+task_type (기대): corporate_event · supply_contract
+
+expected_behavior: clarification  # 후보 있으면 · answerable_false if 0건
+
+clarification_trigger:
+  - rcept_dt=20260608 manifest 0건 (corpus ~2026-03-31)
+  - 유사 후보: 20250516, 20250528 (manifest 확인)
+
+clarification_prompt: |
+  2026년 6월 8일 접수 공시는 corpus에 없습니다.
+  아래 접수일 중 어느 공시를 말씀하시나요?
+  - 2025-05-16 (exchange_20250516800319)
+  - 2025-05-28 (exchange_20250528800084)
+
+candidate_docs:
+  - doc_id: exchange_20250516800319
+    rcept_dt: "20250516"
+  - doc_id: exchange_20250528800084
+    rcept_dt: "20250528"
+
+follow_up_question: 한미반도체 2025년 5월 28일 공급계약 내용 알려줘
+follow_up_expected_doc: exchange_20250528800084
+
+must_include_in_answer:
+  - clarification: 후보 doc_id·rcept_dt (manifest만)
+  - 코퍼스 밖 날짜에 대한 사실 invent 금지
+
+must_NOT_invent:
+  - 2026-06-08 exchange 본문
+  - 사업보고서 주요계약과 혼동
+
+evidence:
+  manifest: corp_name=한미반도체, doc_group=exchange, rcept_dt 검색
+
+negative_example:
+  - periodic 주요계약 narrative
+  - 없는 2026-06-08 doc hallucination
+
+related_cards:
+  - HM07
+
+notes: |
+  follow-up 양성 카드: hm07-supply-contract-ok.yaml
