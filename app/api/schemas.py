@@ -96,6 +96,23 @@ class ClarificationTrace(BaseModel):
     options: list[ClarificationOptionTrace] = Field(default_factory=list)
 
 
+class BoundedClarificationCandidateTrace(BaseModel):
+    id: str
+    label: str
+    semantic_type: str
+    provenance: str
+
+
+class BoundedClarificationDecisionTrace(BaseModel):
+    state: str
+    reason: str
+    candidate_count: int
+    candidates: list[BoundedClarificationCandidateTrace] = Field(default_factory=list)
+    selected_candidate_id: str | None = None
+    classifier_status: str
+    truncated: bool = False
+
+
 class HcxSemanticDiagnosticTrace(BaseModel):
     transport_status: str
     response_shape: str | None = None
@@ -200,6 +217,10 @@ class ThinkTrace(BaseModel):
         exclude_if=lambda value: value is None,
     )
     holding_evidence_coverage: HoldingEvidenceCoverageTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    clarification: BoundedClarificationDecisionTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
