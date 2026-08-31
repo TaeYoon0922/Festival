@@ -338,6 +338,31 @@ class UnsupportedAndOutOfScopeTests(unittest.TestCase):
         self.assertIs(result.state, QueryState.OUT_OF_SCOPE)
         self.assertEqual(result.issues, ("period_out_of_corpus",))
 
+    def test_hm07_clarifies_near_miss_supply_receipt_date(self) -> None:
+        understanding, validator = _components()
+        scope = replace(validator.corpus_scope, receipt_to="2026-03-31")
+        validator = QueryValidator(
+            corpus_scope=scope,
+            multi_document_planner=validator.multi_document_planner,
+        )
+        question = "한미반도체 2026년 6월 8일에 올라온 공급계약 내용 알려줘"
+
+        plan = understanding.understand(question)
+        result = validator.validate(plan)
+
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.event_type, "supply_contract")
+        self.assertIs(result.state, QueryState.AMBIGUOUS)
+        self.assertEqual(result.issues, ("period_out_of_corpus",))
+        self.assertFalse(result.retrieval_allowed)
+        self.assertIn("period", result.ambiguous_slots)
+        self.assertIsNotNone(result.clarification)
+        assert result.clarification is not None
+        self.assertIn("corpus에 없습니다", result.clarification.question)
+        option_ids = {option.id for option in result.clarification.options}
+        self.assertIn("exchange_20250516800319", option_ids)
+        self.assertIn("exchange_20250528800084", option_ids)
+
 def _and_particle(name: str) -> str:
     """Attach 와/과 to a company name, picking the form Korean requires."""
 

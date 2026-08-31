@@ -9,6 +9,10 @@ from typing import Any, Mapping, Sequence
 
 from app.reasoning.answer_composer import AnswerDraft
 from app.reasoning.periodic_metric_view import project_periodic_metric_table
+from app.reasoning.periodic_segment_ranking import (
+    project_segment_ranking_table,
+    segment_ranking_requested,
+)
 
 
 @dataclass(frozen=True)
@@ -907,16 +911,29 @@ def _periodic_source_lines(
     if not fact_text:
         return []
     metric = _text((request or {}).get("metric"))
-    display = (
-        project_periodic_metric_table(
-            fact_text,
-            metric=metric,
-            period=(request or {}).get("period"),
-            comparison=(request or {}).get("comparison"),
-            raw_query=_text((request or {}).get("raw_query")),
+    if segment_ranking_requested(request or {}):
+        display = (
+            project_segment_ranking_table(fact_text, metric=metric)
+            or project_periodic_metric_table(
+                fact_text,
+                metric=metric,
+                period=(request or {}).get("period"),
+                comparison=(request or {}).get("comparison"),
+                raw_query=_text((request or {}).get("raw_query")),
+            )
+            or fact_text
         )
-        or fact_text
-    )
+    else:
+        display = (
+            project_periodic_metric_table(
+                fact_text,
+                metric=metric,
+                period=(request or {}).get("period"),
+                comparison=(request or {}).get("comparison"),
+                raw_query=_text((request or {}).get("raw_query")),
+            )
+            or fact_text
+        )
     display = _bounded_periodic_display(display)
     return [f"내용: {display} {marker}"]
 
@@ -970,16 +987,29 @@ def _periodic_fact_fallback_lines(
     if not fact_text:
         return []
     metric = _text((request or {}).get("metric"))
-    display = (
-        project_periodic_metric_table(
-            fact_text,
-            metric=metric,
-            period=(request or {}).get("period"),
-            comparison=(request or {}).get("comparison"),
-            raw_query=_text((request or {}).get("raw_query")),
+    if segment_ranking_requested(request or {}):
+        display = (
+            project_segment_ranking_table(fact_text, metric=metric)
+            or project_periodic_metric_table(
+                fact_text,
+                metric=metric,
+                period=(request or {}).get("period"),
+                comparison=(request or {}).get("comparison"),
+                raw_query=_text((request or {}).get("raw_query")),
+            )
+            or fact_text
         )
-        or fact_text
-    )
+    else:
+        display = (
+            project_periodic_metric_table(
+                fact_text,
+                metric=metric,
+                period=(request or {}).get("period"),
+                comparison=(request or {}).get("comparison"),
+                raw_query=_text((request or {}).get("raw_query")),
+            )
+            or fact_text
+        )
     display = _bounded_periodic_display(display)
     return [f"내용: {display} {marker}"]
 

@@ -373,6 +373,7 @@ def _periodic_request(query_plan: Mapping[str, Any] | None) -> dict[str, Any]:
     plan = dict(query_plan or {})
     period = plan.get("period")
     comparison = plan.get("comparison")
+    evidence = dict(plan.get("evidence") or {})
     return {
         "metric": plan.get("metric"),
         "basis": plan.get("basis"),
@@ -381,6 +382,9 @@ def _periodic_request(query_plan: Mapping[str, Any] | None) -> dict[str, Any]:
             copy.deepcopy(dict(comparison)) if isinstance(comparison, Mapping) else {}
         ),
         "raw_query": plan.get("raw_query"),
+        "segment_ranking": bool(evidence.get("segment_ranking")),
+        "metric_view": evidence.get("metric_view"),
+        "evidence": copy.deepcopy(evidence),
     }
 
 

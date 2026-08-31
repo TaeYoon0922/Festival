@@ -22,6 +22,7 @@ _FINANCIAL_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("자산총계", ("자산총계", "총자산")),
     ("부채총계", ("부채총계", "총부채")),
     ("자본총계", ("자본총계", "총자본")),
+    ("재고자산", ("재고자산", "연결재고자산", "재고")),
     ("주당순이익", ("주당순이익", "EPS")),
 )
 _FINANCIAL_METRIC_SEARCH_TERMS = {
@@ -142,6 +143,12 @@ _SECTION_BOOSTS: dict[str, dict[str, float]] = {
         "첨부재무제표": 0.98,
         "자본총계": 0.95,
     },
+    "재고자산": {
+        "재무상태표": 1.0,
+        "첨부연결재무제표": 1.0,
+        "첨부재무제표": 0.98,
+        "재고자산": 0.95,
+    },
     "주당순이익": {
         "주당이익": 1.0,
         "포괄손익계산서": 0.85,
@@ -180,6 +187,14 @@ _PERIODIC_INTENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
             r"회사의\s*중요한\s*변동",
         ),
     ),
+    (
+        "major_contracts",
+        (
+            r"주요\s*계약",
+            r"주목할\s*만한\s*주요\s*계약",
+            r"주요계약\s*및",
+        ),
+    ),
 )
 
 _PERIODIC_SECTION_BOOSTS: dict[str, dict[str, float]] = {
@@ -196,6 +211,11 @@ _PERIODIC_SECTION_BOOSTS: dict[str, dict[str, float]] = {
         "회사의 연혁": 1.0,
         "회사의 중요한 변동": 0.95,
         "합병": 0.85,
+    },
+    "major_contracts": {
+        "주요계약 및 연구개발활동": 1.0,
+        "주요계약": 0.98,
+        "계약현황": 0.90,
     },
 }
 
@@ -305,6 +325,11 @@ class QueryUnderstanding:
             event_evidence=event_evidence,
         )
         periodic_intent, periodic_intent_evidence = _find_periodic_intent(raw_query)
+        segment_ranking, segment_ranking_evidence = _find_segment_ranking_intent(
+            raw_query,
+            financial_metric,
+        )
+        metric_view = _metric_view_from_query(raw_query)
         if not _periodic_intent_allowed(task_type, event_type, routes):
             periodic_intent, periodic_intent_evidence = None, None
         period, period_spans, mentioned_years, date_semantics = _period_from_query(
@@ -413,7 +438,12 @@ class QueryUnderstanding:
             doc_subtype=subtype,
             section_path=section_path,
             date_basis=_date_basis_from_query(raw_query),
-            section_boosts=_section_boosts(metric, periodic_intent, event_type),
+            section_boosts=_section_boosts(
+                metric,
+                periodic_intent,
+                event_type,
+                segment_ranking=segment_ranking,
+            ),
             route_confidence=route_confidence,
             route_evidence=route_evidence,
             top_k=top_k,
@@ -432,6 +462,9 @@ class QueryUnderstanding:
                 "holding_ownership_intent": ownership_evidence,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
+                "segment_ranking": segment_ranking,
+                "segment_ranking_evidence": segment_ranking_evidence,
+                "metric_view": metric_view,
                 "correction_intent": correction_intent,
                 "correction_intent_evidence": correction_intent_evidence,
                 "comparison_frame": comparison_frame,
@@ -565,6 +598,43 @@ def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _find_segment_ranking_intent(
+    query: str,
+    metric: str | None,
+) -> tuple[bool, str | None]:
+    if not metric:
+        return False, None
+    compact = re.sub(r"\s+", "", query)
+    if not any(
+        term in compact
+        for term in (
+            "가장큰",
+            "가장많",
+            "가장높",
+            "최대",
+            "큰부분",
+            "큰편",
+            "부분을차지",
+            "차지한",
+        )
+    ):
+        return False, None
+    if not any(
+        term in compact for term in ("부문", "segment", "사업부", "사업부문")
+    ):
+        return False, None
+    return True, "segment_ranking"
+
+
+def _metric_view_from_query(query: str) -> str | None:
+    compact = re.sub(r"\s+", "", query)
+    if not re.search(r"구성|내역|수익\s*구분|비중|%p", query):
+        return None
+    if any(term in compact for term in ("매출", "영업", "수익", "재화", "용역")):
+        return "breakdown"
+    return None
+
+
 def _periodic_intent_allowed(
     task_type: str,
     event_type: str | None,
@@ -576,7 +646,11 @@ def _periodic_intent_allowed(
 
 
 def _section_boosts(
-    metric: str | None, periodic_intent: str | None, event_type: str | None = None
+    metric: str | None,
+    periodic_intent: str | None,
+    event_type: str | None = None,
+    *,
+    segment_ranking: bool = False,
 ) -> dict[str, float]:
     merged = dict(_SECTION_BOOSTS.get(metric or "", {}))
     for section, weight in _PERIODIC_SECTION_BOOSTS.get(
@@ -585,6 +659,15 @@ def _section_boosts(
         merged[section] = max(merged.get(section, 0.0), weight)
     for section, weight in _EVENT_SECTION_BOOSTS.get(event_type or "", {}).items():
         merged[section] = max(merged.get(section, 0.0), weight)
+    if segment_ranking:
+        for section, weight in {
+            "사업부문": 1.0,
+            "사업 부문": 0.98,
+            "segment": 0.98,
+            "부문별": 0.95,
+            "영업부문": 0.95,
+        }.items():
+            merged[section] = max(merged.get(section, 0.0), weight)
     return merged
 
 
@@ -790,6 +873,25 @@ def _period_from_query(
             years,
             _date_semantics("fiscal", None, [str(year)] if year else []),
         )
+    if (
+        len(dates) == 1
+        and task_type == "corporate_event"
+        and "exchange" in routes
+        and date_role != "holding_reference"
+    ):
+        value, date_span = dates[0]
+        spans.append(date_span)
+        return (
+            QueryPeriod(
+                year=int(value[:4]),
+                from_date=value,
+                to_date=value,
+                period_type="receipt_date",
+            ),
+            spans,
+            years,
+            _date_semantics("receipt", "exchange_calendar_date", [value]),
+        )
     if year is not None:
         return (
             QueryPeriod(year=year, period_type="reference_year"),
@@ -904,7 +1006,7 @@ def _date_basis_from_query(query: str) -> str:
 
 def _date_semantic_role(query: str, task_type: str) -> tuple[str | None, str | None]:
     receipt = re.search(
-        r"(?:공시(?:한|된|일|시점)?|접수(?:한|된|일)?|제출(?:한|된|일)?)",
+        r"(?:공시(?:한|된|일|시점)?|접수(?:한|된|일)?|제출(?:한|된|일)?|올라(?:온|간|라))",
         query,
     )
     if receipt:
@@ -1228,6 +1330,22 @@ def _comparison_from_query(
         return {"type": "company_comparison", "companies": list(companies)}
     if len(years) > 1:
         return {"type": "period_comparison", "years": list(years)}
+    if len(companies) <= 1 and len(years) == 1:
+        temporal_compare = (
+            "전기와" in compact
+            or "전기대비" in compact
+            or "당기와전기" in compact
+            or (
+                "전기" in compact
+                and any(
+                    term in compact
+                    for term in ("비교", "변했", "증감", "늘", "줄", "감소", "증가")
+                )
+            )
+        )
+        if temporal_compare:
+            year = years[0]
+            return {"type": "year_over_year", "years": [year - 1, year]}
     if any(term in compact for term in ("추이", "변화", "최근3년", "최근5년")):
         return {"type": "trend"}
     return None

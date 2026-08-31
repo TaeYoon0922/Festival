@@ -372,6 +372,13 @@ def _source_relevance(
         score += 1.0
     if exact_metric_row:
         score += _EXACT_METRIC_ROW_BOOST
+    evidence = plan.get("evidence")
+    if isinstance(evidence, Mapping) and evidence.get("segment_ranking"):
+        section_joined = " ".join(
+            str(part) for part in (source.section_path or ()) if part
+        )
+        if any(marker in section_joined for marker in ("부문", "segment", "Segment")):
+            score += 14.0
     if is_income_statement_section(source.section_path):
         score += _INCOME_STATEMENT_BOOST
     comparison_years = _period_comparison_years(plan)

@@ -1497,5 +1497,40 @@ class ComparisonFrameTests(unittest.TestCase):
             {"type": "trend"},
         )
 
+
+class QaCardRoutingTests(unittest.TestCase):
+    def test_hm04_inventory_yoy_comparison(self) -> None:
+        plan = QueryUnderstanding({"한미반도체": {"한미반도체"}}).understand(
+            "한미반도체 2025 사업보고서에서 연결재고자산이 전기와 비교했을 때 어떻게 변했어"
+        )
+        self.assertEqual(plan.metric, "재고자산")
+        self.assertEqual(plan.comparison, {"type": "year_over_year", "years": [2024, 2025]})
+
+    def test_hm02_major_contracts_periodic_intent(self) -> None:
+        plan = QueryUnderstanding({"한미반도체": {"한미반도체"}}).understand(
+            "한미반도체 2025년 사업보고서에서 주목할만한 주요계약 내용 알려줘"
+        )
+        self.assertEqual(plan.evidence.get("periodic_intent"), "major_contracts")
+        self.assertNotEqual(plan.event_type, "supply_contract")
+
+    def test_hm07_supply_contract_receipt_date(self) -> None:
+        plan = QueryUnderstanding({"한미반도체": {"한미반도체"}}).understand(
+            "한미반도체 2025년 5월 28일에 올라온 공급계약 내용 알려줘"
+        )
+        route = QueryRouter().route(plan)
+        self.assertEqual(plan.event_type, "supply_contract")
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2025-05-28")
+        self.assertIn("rcept_dt", route.hard_filters)
+
+    def test_lgi06_segment_ranking_intent(self) -> None:
+        plan = QueryUnderstanding({"LG이노텍": {"LG이노텍"}}).understand(
+            "LG이노텍 2023년 연결 영업이익에서 가장 큰 부분을 차지한 사업부문은?"
+        )
+        self.assertEqual(plan.metric, "영업이익")
+        self.assertTrue(plan.evidence.get("segment_ranking"))
+        self.assertIn("사업부문", plan.section_boosts)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1056,6 +1056,8 @@ corpus 범위 안인가:
 `corpus 범위 안인가`가 "아니오"면 **고칠 대상이 아닙니다.** 그것도 기록해 두면
 같은 질문으로 두 번 헤매지 않습니다.
 
+**공시 Q&A 카드 초안**은 에이전트와 분리된 [qa-tool/README.md](qa-tool/README.md)를 사용합니다. (`origin/taeyoon`에서 `feat/qa-tool-curation` 등 별도 브랜치)
+
 ---
 
 ## 14. 복구용 안정 태그 (이동·덮어쓰기 금지)

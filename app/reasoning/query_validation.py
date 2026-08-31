@@ -253,6 +253,12 @@ class QuerySlot:
 
 
 @dataclass(frozen=True)
+class ExchangeReceiptCandidate:
+    doc_id: str
+    rcept_dt: str
+
+
+@dataclass(frozen=True)
 class CorpusScope:
     """Read-only company and date bounds loaded from frozen corpus metadata."""
 
@@ -262,6 +268,7 @@ class CorpusScope:
     fiscal_years: tuple[int, ...] = ()
     event_from: str | None = None
     event_to: str | None = None
+    manifest_path: Path | None = None
 
     @classmethod
     def from_files(
@@ -302,6 +309,7 @@ class CorpusScope:
             receipt_from=min(dates, default=None),
             receipt_to=max(dates, default=None),
             fiscal_years=tuple(sorted(fiscal_years)),
+            manifest_path=Path(manifest_path),
         )
 
     @classmethod
@@ -328,6 +336,62 @@ class CorpusScope:
             alias: {canonical}
             for alias, (canonical, _corp_code) in self.companies.items()
         }
+
+    def nearest_exchange_receipt_candidates(
+        self,
+        corp_code: str,
+        target_rcept_dt: str,
+        *,
+        doc_subtype: str = "단일판매공급계약체결",
+        limit: int = 3,
+    ) -> tuple[ExchangeReceiptCandidate, ...]:
+        """Manifest-backed near-miss options when a receipt date is out of corpus."""
+
+        if not self.manifest_path or not self.manifest_path.is_file() or limit <= 0:
+            return ()
+        target = _iso_date(target_rcept_dt)
+        if not target:
+            return ()
+        scored: list[tuple[tuple[int, ...], str, str]] = []
+        for row in _manifest_rows(self.manifest_path):
+            if str(row.get("corp_code") or "") != corp_code:
+                continue
+            if row.get("doc_group") != "exchange":
+                continue
+            if str(row.get("doc_subtype") or "") != doc_subtype:
+                continue
+            receipt = _iso_date(row.get("rcept_dt"))
+            if not receipt:
+                continue
+            if self.receipt_from and receipt < self.receipt_from:
+                continue
+            if self.receipt_to and receipt > self.receipt_to:
+                continue
+            doc_id = str(row.get("doc_id") or "").strip()
+            if not doc_id:
+                continue
+            scored.append(
+                (
+                    _exchange_receipt_rank(
+                        target,
+                        receipt,
+                        receipt_to=self.receipt_to,
+                    ),
+                    receipt,
+                    doc_id,
+                )
+            )
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+        seen: set[str] = set()
+        candidates: list[ExchangeReceiptCandidate] = []
+        for _distance, receipt, doc_id in scored:
+            if receipt in seen:
+                continue
+            seen.add(receipt)
+            candidates.append(ExchangeReceiptCandidate(doc_id=doc_id, rcept_dt=receipt))
+            if len(candidates) >= limit:
+                break
+        return tuple(candidates)
 
 
 class PostgresEventScopeProvider:
@@ -501,6 +565,32 @@ class QueryValidator:
             multi_plan=multi_plan,
         )
         if out_of_scope:
+            receipt_clarification = self._receipt_date_out_of_corpus_clarification(
+                normalized_plan,
+                issue=out_of_scope,
+            )
+            if receipt_clarification is not None:
+                clarification, candidates = receipt_clarification
+                period_slot = QuerySlot(
+                    "period",
+                    _period_value(normalized_plan),
+                    QuerySlotSource.DETERMINISTIC,
+                    QuerySlotStatus.AMBIGUOUS,
+                    False,
+                    tuple(candidate.rcept_dt for candidate in candidates),
+                )
+                return QueryValidationResult(
+                    state=QueryState.AMBIGUOUS,
+                    plan=normalized_plan,
+                    slots={"company": company_slot, "period": period_slot},
+                    required_slots=("company", "period"),
+                    issues=(out_of_scope,),
+                    clarification=clarification,
+                    fallback_used=fallback_used,
+                    fallback_status=fallback_status,
+                    hcx_elapsed_ms=hcx_elapsed_ms,
+                    hcx_diagnostic=dict(hcx_diagnostic or {}),
+                )
             return self._terminal(
                 QueryState.OUT_OF_SCOPE,
                 normalized_plan,
@@ -838,6 +928,48 @@ class QueryValidator:
                 )
             return _deterministic_slot("company", company), "company_out_of_corpus", plan
         return _deterministic_slot("company", company), None, plan
+
+    def _receipt_date_out_of_corpus_clarification(
+        self,
+        plan: QueryPlan,
+        *,
+        issue: str,
+    ) -> tuple[Clarification, tuple[ExchangeReceiptCandidate, ...]] | None:
+        if issue != "period_out_of_corpus" or self.corpus_scope is None:
+            return None
+        if plan.period.period_type != "receipt_date":
+            return None
+        target = plan.period.from_date or plan.period.to_date
+        if not target:
+            return None
+        receipt_to = self.corpus_scope.receipt_to
+        if not receipt_to or target <= receipt_to:
+            return None
+        if not plan.corp_codes:
+            return None
+        question = str(plan.raw_query or "")
+        supply_query = plan.event_type == "supply_contract" or "공급" in question
+        if not supply_query:
+            return None
+        candidates = self.corpus_scope.nearest_exchange_receipt_candidates(
+            plan.corp_codes[0],
+            target,
+        )
+        if not candidates:
+            return None
+        display_date = target.replace("-", "")
+        prompt = (
+            f"{display_date[:4]}년 {int(display_date[4:6])}월 {int(display_date[6:8])}일 "
+            "접수 공시는 corpus에 없습니다. 아래 접수일 중 어느 공시를 말씀하시나요?"
+        )
+        options = tuple(
+            ClarificationOption(
+                candidate.doc_id,
+                f"{candidate.rcept_dt} ({candidate.doc_id})",
+            )
+            for candidate in candidates
+        )
+        return Clarification(prompt, options), candidates
 
     def _time_scope_issue(
         self,
@@ -1323,6 +1455,52 @@ def _iso_date(value: Any) -> str | None:
     except ValueError:
         return None
     return candidate
+
+
+def _month_day_anchor(value: str) -> date:
+    parsed = date.fromisoformat(value)
+    return date(2000, parsed.month, parsed.day)
+
+
+def _month_day_distance(left: date, right: date) -> int:
+    left_day = left.timetuple().tm_yday
+    right_day = right.timetuple().tm_yday
+    diff = abs(left_day - right_day)
+    return min(diff, 366 - diff)
+
+
+def _seasonal_month_window(month: int) -> set[int]:
+    return {(month - 2) % 12 + 1, (month - 1) % 12 + 1, month}
+
+
+def _exchange_receipt_rank(
+    target: str,
+    receipt: str,
+    *,
+    receipt_to: str | None,
+) -> tuple[int, int, int]:
+    target_date = date.fromisoformat(target)
+    receipt_date = date.fromisoformat(receipt)
+    month_day = _month_day_distance(
+        _month_day_anchor(target),
+        _month_day_anchor(receipt),
+    )
+    receipt_key = int(receipt.replace("-", ""))
+    if receipt_to and target > receipt_to:
+        if receipt_date.month not in _seasonal_month_window(target_date.month):
+            return (2, month_day, -receipt_key)
+        return (0, -receipt_date.year, month_day, -receipt_key)
+    return (1, month_day, -receipt_key)
+
+
+def _manifest_rows(manifest_path: Path) -> tuple[Mapping[str, Any], ...]:
+    rows: list[Mapping[str, Any]] = []
+    with manifest_path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            rows.append(json.loads(line))
+    return tuple(rows)
 
 
 def _date_text(value: Any) -> str | None:
