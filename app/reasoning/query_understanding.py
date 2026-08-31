@@ -76,7 +76,7 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "supply_contract",
         (
-            "단일판매", "공급계약", "수주계약",
+            "단일판매", "공급계약", "수주계약", "수주",
             # Ways a question names a supply contract or its life. Bare field
             # names such as "계약금액" are deliberately absent: they also appear
             # in periodic and correction questions, which must not route here.
@@ -494,6 +494,8 @@ class QueryUnderstanding:
         if exchange_aggregate and date_basis == "unspecified":
             if re.search(r"공시|접수|제출", raw_query):
                 date_basis = "receipt_date"
+            elif isinstance(comparison, Mapping) and comparison.get("type") == "company_comparison":
+                date_basis = "receipt_date"
         corpus_receipt_from: str | None = None
         corpus_receipt_to: str | None = None
         if exchange_recent_pair:
@@ -806,6 +808,9 @@ def _derived_metric_from_query(
             return "delta_pp"
         if "영업이익률" in compact or "÷" in compact:
             return "ratio"
+    if isinstance(comparison, Mapping) and comparison.get("type") == "company_comparison":
+        if any(term in compact for term in ("증가율", "증감률", "감소율")):
+            return "peer_rate"
     if any(term in compact for term in ("증가율", "증감률", "감소율")):
         if sum(term in compact for term in ("매출", "영업이익")) >= 2 and any(
             term in compact for term in ("더 높", "더큰", "어느쪽")
@@ -1321,6 +1326,11 @@ def _date_basis_from_query(query: str) -> str:
     """
 
     text = query or ""
+    compact = re.sub(r"\s+", "", text)
+    if "접수일기준" in compact:
+        return "receipt_date"
+    if any(marker in compact for marker in ("계약체결일기준", "체결일기준")):
+        return "contract_date"
     found: list[str] = []
     for match in _PERIOD_EXPRESSION.finditer(text):
         window = text[match.end() : match.end() + _DATE_BASIS_WINDOW]

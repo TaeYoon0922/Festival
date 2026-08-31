@@ -151,6 +151,18 @@ class PeriodicEvidenceSelector:
         )
 
 
+def _effective_max_evidence(plan: Mapping[str, Any], max_evidence: int) -> int:
+    comparison = plan.get("comparison")
+    companies = plan.get("companies") or ()
+    if (
+        isinstance(comparison, Mapping)
+        and comparison.get("type") == "company_comparison"
+        and len(companies) >= 2
+    ):
+        return max(max_evidence, len(companies) * 2)
+    return max_evidence
+
+
 def select_periodic_evidence(
     resolution: PeriodicFactResolution,
     *,
@@ -166,6 +178,7 @@ def select_periodic_evidence(
     ):
         raise ValueError("max_evidence must be a positive integer")
     plan = _plan_mapping(query_plan)
+    max_evidence = _effective_max_evidence(plan, max_evidence)
     explicit_period = _explicit_period(plan) and not _is_period_comparison(plan)
     signals = _query_signals(resolution.question, plan)
     candidates: list[tuple[float, int, str, PeriodicFact, PeriodicFactSource]] = []

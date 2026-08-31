@@ -36,6 +36,26 @@ class PeriodicDerivedMetricsTests(unittest.TestCase):
         self.assertIn("증가율(파생)", display)
         self.assertIn("20", display)
 
+    def test_peer_rate_projection(self) -> None:
+        display = project_derived_metric_display(
+            TABLE,
+            metric="매출액",
+            request={"derived_metric": "peer_rate"},
+            comparison={"type": "company_comparison"},
+        )
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertIn("증가율(파생)", display)
+
+    def test_peer_rate_compare_statement(self) -> None:
+        from app.reasoning.periodic_derived_metrics import peer_rate_compare_statement
+
+        statement = peer_rate_compare_statement(
+            [("A", 10.0), ("B", 20.0)],
+            metric="매출액",
+        )
+        self.assertIn("더 높은 쪽: B", statement or "")
+
     def test_compare_rates_projection(self) -> None:
         display = project_derived_metric_display(
             TABLE,

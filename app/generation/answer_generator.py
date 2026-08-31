@@ -10,6 +10,8 @@ from typing import Any, Mapping, Sequence
 from app.reasoning.answer_composer import AnswerDraft
 from app.reasoning.periodic_derived_metrics import (
     derived_metric_requested,
+    peer_rate_compare_statement,
+    peer_rate_from_table,
     project_derived_metric_display,
 )
 from app.reasoning.periodic_metric_view import project_periodic_metric_table
@@ -915,6 +917,8 @@ def _periodic_sections(
                 citations=(),
             )
         )
+    output, peer_warnings = _append_peer_rate_summary(draft, output, registry)
+    warnings.extend(peer_warnings)
     return output, warnings, bool(facts_seen) and supported
 
 
@@ -1105,6 +1109,9 @@ def validate_periodic_citation_scope(
             if payload is None:
                 kept_lines.append(line)
                 continue
+            if _derived_metric_claim_allowed(payload, draft):
+                kept_lines.append(line)
+                continue
             inline_ids = tuple(
                 f"[{value}]" for value in re.findall(r"\[(\d+)\]", line)
             )
@@ -1156,6 +1163,88 @@ def _selected_periodic_source_text(draft: AnswerDraft) -> dict[str, str]:
         chunk_id: "\n".join(dict.fromkeys(values))
         for chunk_id, values in output.items()
     }
+
+
+def _derived_metric_claim_allowed(payload: str, draft: AnswerDraft) -> bool:
+    if "(파생)" not in payload:
+        return False
+    for section in draft.answer_sections:
+        request = section.content.get("request")
+        if isinstance(request, Mapping) and derived_metric_requested(request):
+            return True
+    return False
+
+
+def _append_peer_rate_summary(
+    draft: AnswerDraft,
+    sections: list[GeneratedSection],
+    registry: _CitationRegistry,
+) -> tuple[list[GeneratedSection], list[str]]:
+    request = _peer_rate_request(draft)
+    if request is None:
+        return sections, []
+
+    metric = _text(request.get("metric")) or None
+    rows: list[tuple[str, float]] = []
+    citation_ids: list[str] = []
+    for answer_section in draft.answer_sections:
+        fact = answer_section.content.get("fact")
+        if not isinstance(fact, Mapping):
+            continue
+        corp_name = _text(fact.get("corp_name"))
+        if not corp_name:
+            continue
+        fact_text = _text(fact.get("fact_text"))
+        if not fact_text:
+            sources = _mapping_list(fact.get("sources"))
+            if sources:
+                fact_text = _text(sources[0].get("fact_text"))
+        table = project_periodic_metric_table(
+            fact_text,
+            metric=metric,
+            period=request.get("period"),
+            comparison=request.get("comparison"),
+            raw_query=_text(request.get("raw_query")),
+            metric_fallback=_metric_fallback_from_request(request),
+        )
+        rate = peer_rate_from_table(table or fact_text, metric=metric)
+        if rate is None:
+            continue
+        rows.append((corp_name, rate))
+        citation_ids.extend(
+            registry.ids_for(_string_list(fact.get("evidence_chunk_ids")))
+        )
+
+    statement = peer_rate_compare_statement(rows, metric=metric)
+    if statement is None:
+        return sections, []
+
+    ids = _unique(citation_ids)
+    marker = " ".join(ids) if ids else ""
+    content = f"{statement} {marker}".strip()
+    sections = [
+        *sections,
+        GeneratedSection(
+            title="Peer compare",
+            content=content,
+            citations=ids,
+        ),
+    ]
+    return sections, []
+
+
+def _peer_rate_request(draft: AnswerDraft) -> dict[str, Any] | None:
+    for section in draft.answer_sections:
+        request = section.content.get("request")
+        if not isinstance(request, Mapping):
+            continue
+        evidence = request.get("evidence")
+        derived = request.get("derived_metric")
+        if derived == "peer_rate":
+            return dict(request)
+        if isinstance(evidence, Mapping) and evidence.get("derived_metric") == "peer_rate":
+            return dict(request)
+    return None
 
 
 def _periodic_claim_payload(line: str) -> str | None:

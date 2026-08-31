@@ -90,6 +90,18 @@ def project_derived_metric_display(
             raw_query=raw_query,
             comparison=comparison,
         )
+    if kind == "peer_rate":
+        base = project_periodic_metric_table(
+            text,
+            metric=metric,
+            period=(request or {}).get("period"),
+            comparison=comparison,
+            raw_query=raw_query,
+            metric_fallback=fallback,
+        )
+        if not base:
+            return None
+        return _append_rate(base, metric=metric)
     if kind == "breakdown_share":
         return _append_breakdown_share(base, raw_query=raw_query)
     return None
@@ -477,3 +489,35 @@ def _format_amount(value: float) -> str:
     if float(value).is_integer():
         return f"{int(value):,}"
     return f"{value:,.2f}"
+
+
+def peer_rate_from_table(table: str, *, metric: str | None = None) -> float | None:
+    """Return YoY percent change from a two-period metric table."""
+
+    values = _metric_row_values(table)
+    if len(values) < 2:
+        return None
+    return _pct_change(values[-2], values[-1])
+
+
+def peer_rate_compare_statement(
+    rows: Sequence[tuple[str, float]],
+    *,
+    metric: str | None = None,
+) -> str | None:
+    """Compare YoY rates across named companies."""
+
+    if len(rows) < 2:
+        return None
+    label = metric or "지표"
+    parts = [f"{name} {_format_pct(rate)}" for name, rate in rows]
+    winner = max(rows, key=lambda item: item[1])
+    if len({rate for _, rate in rows}) == 1:
+        verdict = "동일"
+    else:
+        verdict = f"더 높은 쪽: {winner[0]}"
+    return (
+        f"(peer {label} 증감률 비교(파생): "
+        + " · ".join(parts)
+        + f" · {verdict})"
+    )

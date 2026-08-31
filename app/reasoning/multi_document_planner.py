@@ -24,7 +24,8 @@ change answers that are currently right.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.reasoning.multi_document_plan import (
@@ -170,6 +171,33 @@ class MultiDocumentPlanner:
             return _declined(REASON_NO_SET_INTENT)
 
         definition = self._define_set(text, query_plan)
+        if definition.reason == REASON_NO_CORP_CODE:
+            multi_definitions = self._multi_corp_definitions(text, query_plan)
+            if multi_definitions:
+                slots: list[EvidenceSlot] = []
+                for index, corp_definition in enumerate(multi_definitions):
+                    prefix = f"c{index}_"
+                    slots.extend(
+                        self._slots(corp_definition, intent, slot_id_prefix=prefix)
+                    )
+                aggregate_field, aggregate_ops = _aggregate_metadata(text, query_plan)
+                quantity_field = _quantity_compare_field(query_plan)
+                if quantity_field:
+                    aggregate_field = quantity_field
+                    aggregate_ops = tuple(dict.fromkeys((*aggregate_ops, "max")))
+                recent_pair_limit = _recent_pair_limit(query_plan)
+                recent_pair_equity_ratio = _recent_pair_equity_ratio(query_plan)
+                aggregate_years = _aggregate_years(query_plan)
+                return MultiDocumentPlan(
+                    plan_type=intent.value,
+                    slots=tuple(slots),
+                    family_resolution=multi_definitions[0].family_resolution,
+                    aggregate_field=aggregate_field,
+                    aggregate_ops=aggregate_ops,
+                    recent_pair_limit=recent_pair_limit,
+                    recent_pair_equity_ratio=recent_pair_equity_ratio,
+                    aggregate_years=aggregate_years,
+                )
         if definition.reason is not None:
             return _declined(definition.reason)
 
@@ -255,6 +283,38 @@ class MultiDocumentPlanner:
             family_resolution=source,
         )
 
+    def _multi_corp_definitions(
+        self, text: str, query_plan: Any
+    ) -> tuple[_SetDefinition, ...] | None:
+        comparison = getattr(query_plan, "comparison", None)
+        if not (
+            isinstance(comparison, Mapping)
+            and comparison.get("type") == "company_comparison"
+        ):
+            return None
+        corp_codes = tuple(getattr(query_plan, "corp_codes", ()) or ())
+        companies = tuple(getattr(query_plan, "companies", ()) or ())
+        if len(corp_codes) < 2 or len(companies) < 2:
+            return None
+        evidence = getattr(query_plan, "evidence", None) or {}
+        if not isinstance(evidence, Mapping) or not evidence.get("exchange_aggregate"):
+            return None
+
+        definitions: list[_SetDefinition] = []
+        for corp_code, company in zip(corp_codes, companies, strict=True):
+            patched = replace(
+                query_plan,
+                company=company,
+                companies=(company,),
+                corp_code=corp_code,
+                corp_codes=(corp_code,),
+            )
+            definition = self._define_set(text, patched)
+            if definition.reason is not None:
+                return None
+            definitions.append(definition)
+        return tuple(definitions)
+
     # ------------------------------------------------------------------ family
 
     def _resolve_family(
@@ -295,7 +355,11 @@ class MultiDocumentPlanner:
     # ------------------------------------------------------------------- slots
 
     def _slots(
-        self, definition: _SetDefinition, intent: MultiDocumentIntent
+        self,
+        definition: _SetDefinition,
+        intent: MultiDocumentIntent,
+        *,
+        slot_id_prefix: str = "",
     ) -> tuple[EvidenceSlot, ...]:
         receipt = definition.date_basis is DateBasis.RECEIPT_DATE or (
             definition.event_family == "facility_investment"
@@ -306,7 +370,7 @@ class MultiDocumentPlanner:
             # family P0-B models.
             doc_group, doc_subtype = _FAMILY_DOCUMENTS[definition.event_family]
             enumerate_slot = EvidenceSlot(
-                slot_id="documents",
+                slot_id=f"{slot_id_prefix}documents",
                 slot_type=SlotType.ENUMERATE_DOCUMENTS,
                 corp_code=definition.corp_code,
                 event_family=definition.event_family,
@@ -318,7 +382,7 @@ class MultiDocumentPlanner:
             )
         else:
             enumerate_slot = EvidenceSlot(
-                slot_id="contracts",
+                slot_id=f"{slot_id_prefix}contracts",
                 slot_type=SlotType.ENUMERATE_EVENTS,
                 corp_code=definition.corp_code,
                 event_family=definition.event_family,
@@ -332,7 +396,7 @@ class MultiDocumentPlanner:
         return (
             enumerate_slot,
             EvidenceSlot(
-                slot_id="lifecycle",
+                slot_id=f"{slot_id_prefix}lifecycle",
                 slot_type=SlotType.EVENT_STATE,
                 corp_code=definition.corp_code,
                 event_family=definition.event_family,

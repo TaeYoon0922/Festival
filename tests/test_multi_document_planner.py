@@ -364,6 +364,34 @@ class UnsupportedCalculationTests(_PlannerCase):
         self.assertEqual(plan.aggregate_years, (2024, 2025))
         self.assertEqual(plan.slots[0].date_from, "2024-01-01")
 
+    def test_cross_company_exchange_aggregate_engages_per_corp(self) -> None:
+        from app.reasoning.query_plan import QueryPeriod, QueryPlan
+
+        question = (
+            "LG에너지솔루션과 삼성SDI 2024년 신규시설투자 공시 투자금액 합계를 "
+            "비교하면 어느 쪽이 더 커?"
+        )
+        query_plan = QueryPlan(
+            query=question,
+            raw_query=question,
+            companies=("LG에너지솔루션", "삼성SDI"),
+            corp_codes=("01515323", "00126362"),
+            years=(2024,),
+            period=QueryPeriod(year=2024, period_type="annual"),
+            task_type="corporate_event",
+            event_type="facility_investment",
+            date_basis=DateBasis.RECEIPT_DATE,
+            comparison={"type": "company_comparison", "companies": ["LG에너지솔루션", "삼성SDI"]},
+            evidence={
+                "exchange_aggregate": {"field": "investment_amount", "ops": ["sum"]},
+                "mentioned_years": [2024],
+            },
+        )
+        plan = MultiDocumentPlanner().plan(question, query_plan)
+        self.assertTrue(plan.applied, plan.stop_reason)
+        corp_codes = {slot.corp_code for slot in plan.slots}
+        self.assertEqual(corp_codes, {"01515323", "00126362"})
+
     def test_cross_company_comparison_declines(self) -> None:
         plan = self.plan_for(
             "삼성중공업과 한화오션 중 2025년 설비투자 규모가 더 큰 기업은?"
