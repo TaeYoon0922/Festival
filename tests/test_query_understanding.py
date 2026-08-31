@@ -1702,3 +1702,136 @@ class TwoMentionUnitPriceAlignmentTests(unittest.TestCase):
                 self.assertNotEqual(
                     self.plan(query).metric, "acquisition_unit_price"
                 )
+
+
+class ItemizedDateAnchorTests(unittest.TestCase):
+    """Several dates in one question are anchors, not the ends of one span.
+
+    An itemized comparison names one date per item -- "A의 <date> 계약과 B의
+    <date> 계약 중 어느 쪽이 큰가".  Reading the first two as ``from``/``to``
+    invents a period nobody asked for, and when the first item happens to carry
+    the later date it invents a backwards one, which is not a period at all.
+    """
+
+    A, B, C, D = "가상가사", "가상나사", "가상다사", "가상라사"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.A, self.B, self.C, self.D)}
+        )
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def itemized(self) -> str:
+        """Four items, each with its own date; the first date is the latest."""
+
+        return (
+            f"{self.A}의 2023년 2월 28일 공급계약과 {self.B}의 2023년 1월 20일 공급계약, "
+            f"{self.C}의 2023년 5월 10일 공급계약, {self.D}의 2023년 7월 3일 공급계약 "
+            "중 계약금액이 가장 큰 곳은?"
+        )
+
+    def test_itemized_dates_do_not_become_a_backwards_range(self) -> None:
+        plan = self.plan(self.itemized())
+
+        # The pair that used to be read as a span, in the order they are written.
+        self.assertNotEqual(
+            (plan.period.from_date, plan.period.to_date),
+            ("2023-02-28", "2023-01-20"),
+        )
+        # Nor is it rescued by quietly reordering them.
+        self.assertNotEqual(
+            (plan.period.from_date, plan.period.to_date),
+            ("2023-01-20", "2023-02-28"),
+        )
+        self.assertNotEqual(plan.period.period_type, "date_range")
+        # What the question does establish is the year its items share.
+        self.assertEqual(plan.period.period_type, "reference_year")
+        self.assertEqual(plan.period.year, 2023)
+        self.assertIsNone(plan.period.from_date)
+        self.assertIsNone(plan.period.to_date)
+        # Every item's company survives for the comparison lanes downstream.
+        self.assertEqual(plan.companies, (self.A, self.B, self.C, self.D))
+
+    def test_two_anchors_without_span_wording_are_not_a_range(self) -> None:
+        for label, first, second in (
+            ("ascending", "2023년 1월 20일", "2023년 2월 28일"),
+            ("descending", "2023년 2월 28일", "2023년 1월 20일"),
+        ):
+            with self.subTest(order=label):
+                plan = self.plan(
+                    f"{self.A}의 {first} 공급계약과 {second} 공급계약의 계약금액은?"
+                )
+
+                self.assertNotEqual(plan.period.period_type, "date_range")
+                self.assertIsNone(plan.period.from_date)
+                self.assertIsNone(plan.period.to_date)
+
+    def test_a_stated_span_is_still_a_range(self) -> None:
+        plan = self.plan(
+            f"{self.A}의 2023년 1월 20일부터 2023년 2월 28일까지 공시된 공급계약은?"
+        )
+
+        self.assertEqual(plan.period.period_type, "date_range")
+        self.assertEqual(plan.period.from_date, "2023-01-20")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+    def test_a_backwards_stated_span_declines_instead_of_raising(self) -> None:
+        """Which end was meant is not something this stage may guess.
+
+        A span written backwards is refused as a span rather than reordered
+        into one.  What the question is left with is whatever the rest of the
+        parser can say honestly: a receipt question keeps its stated filing
+        date, and one that states no role keeps only the year.  Neither
+        invents the window the wording failed to describe.
+        """
+
+        receipt = self.plan(
+            f"{self.A}의 2023년 2월 28일부터 2023년 1월 20일까지 공시된 공급계약은?"
+        )
+        bare = self.plan(
+            f"{self.A}의 2023년 2월 28일부터 2023년 1월 20일까지 공급계약은?"
+        )
+
+        for plan in (receipt, bare):
+            self.assertNotEqual(plan.period.period_type, "date_range")
+            # Never the backwards pair, and never it silently turned around.
+            self.assertNotEqual(
+                (plan.period.from_date, plan.period.to_date),
+                ("2023-02-28", "2023-01-20"),
+            )
+            self.assertNotEqual(
+                (plan.period.from_date, plan.period.to_date),
+                ("2023-01-20", "2023-02-28"),
+            )
+        self.assertEqual(receipt.period.period_type, "receipt_date")
+        self.assertEqual(receipt.period.from_date, receipt.period.to_date)
+        self.assertEqual(bare.period.period_type, "reference_year")
+        self.assertIsNone(bare.period.from_date)
+
+    def test_one_exact_date_is_unchanged(self) -> None:
+        plan = self.plan(f"{self.A}가 2023년 2월 28일 공시한 공급계약의 계약금액은?")
+
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2023-02-28")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+    def test_a_stated_receipt_span_is_unchanged(self) -> None:
+        plan = self.plan(
+            f"{self.A}가 2023년 1월 20일부터 2023년 2월 28일까지 공시한 공급계약은?"
+        )
+
+        self.assertEqual(plan.period.period_type, "date_range")
+        self.assertEqual(plan.period.from_date, "2023-01-20")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+    def test_a_stated_holding_reference_span_is_unchanged(self) -> None:
+        plan = self.plan(
+            f"{self.A}가 보유한 {self.B} 주식은 "
+            "2023년 1월 20일부터 2023년 2월 28일까지 어떻게 변했어?"
+        )
+
+        self.assertEqual(plan.period.period_type, "holding_reference_range")
+        self.assertEqual(plan.period.from_date, "2023-01-20")
+        self.assertEqual(plan.period.to_date, "2023-02-28")

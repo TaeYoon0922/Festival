@@ -824,6 +824,44 @@ def _routes(
     return ordered, confidence, evidence
 
 
+#: Wording that ties two dates together as the ends of one span.  A range says
+#: so; dates that merely both appear do not.
+_DATE_RANGE_MARKERS = ("부터", "까지", "사이", "~")
+
+
+def _states_one_date_range(
+    query: str, dates: Sequence[tuple[str | None, tuple[int, int]]]
+) -> bool:
+    """Whether these dates are the two ends of one span the question stated.
+
+    Several dates in one question are usually several *anchors*, not one
+    period: "A의 <date> 계약과 B의 <date> 계약 중 어느 쪽이 큰가" names one date
+    per item and no span at all.  Reading the first two as ``from``/``to``
+    invents a range the asker never asked for -- and when the earlier item
+    happens to carry the later date, it invents an inverted one, which is not a
+    period any more.
+
+    So a span has to be claimed rather than inferred.  Exactly two dates, said
+    to be a span, in the order a span runs.  Anything else keeps its dates and
+    leaves the period to the rest of this parser, which is what the itemized
+    lanes downstream read anyway.
+    """
+
+    if len(dates) != 2:
+        # Three anchors are not two ends.  Two ends is what a span has.
+        return False
+    (start, _start_span), (end, _end_span) = dates
+    if not start or not end:
+        return False
+    compact = re.sub(r"\s+", "", query)
+    if not any(marker in compact for marker in _DATE_RANGE_MARKERS):
+        return False
+    # A span runs forwards.  A backwards pair is not silently reordered -- the
+    # question did not say which end was meant, and guessing is how the wrong
+    # window gets searched.
+    return start <= end
+
+
 def _period_from_query(
     query: str,
     *,
@@ -862,7 +900,7 @@ def _period_from_query(
         )
     ]
     date_role, date_marker = _date_semantic_role(query, task_type)
-    if len(dates) >= 2:
+    if _states_one_date_range(query, dates):
         selected_spans = [span for _, span in dates[:2]]
         if date_role != "holding_reference":
             spans.extend(selected_spans)
