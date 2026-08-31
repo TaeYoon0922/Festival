@@ -155,10 +155,18 @@ def _selection_intent(plan: Any) -> CorporateSelectionIntent:
             and bool(route_evidence.get("is_correction"))
         )
     )
+    # ``period`` already owns this fact: a single-date ``receipt_date`` period
+    # is set only when the question's own receipt wording was recognized.
+    # ``date_basis`` is a narrower secondary signal that stays ``unspecified``
+    # whenever the marker sits outside its lexical window, so requiring it
+    # positively would let a recognized exact filing lose authority to a later
+    # canonical member for a reason the question never gave.  It keeps its veto
+    # where it carries information: naming a different basis outright.
+    contradicts_receipt_date = date_basis in {"contract_date", "period_start"}
     return CorporateSelectionIntent(
         exact_historical_receipt_date=(
             exact
-            and date_basis == "receipt_date"
+            and not contradicts_receipt_date
             and not explicit_latest_or_corrected
         )
     )

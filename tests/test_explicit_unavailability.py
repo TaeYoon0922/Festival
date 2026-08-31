@@ -22,6 +22,7 @@ design: there is no markdown parser to exercise, no nearest-field rule, no
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 from app.agent.orchestrator import AgentOrchestrator
@@ -48,6 +49,7 @@ from app.reasoning.corporate_event_authority import (
 )
 from app.reasoning.corporate_event_field_evidence import (
     CONTRACT_AMOUNT,
+    _selection_intent,
     corporate_event_field_evidence,
     requested_corporate_fields,
 )
@@ -75,6 +77,7 @@ from app.reasoning.multi_document_evidence import (
     MultiDocumentFacts,
 )
 from app.reasoning.query_plan import DateBasis, QueryPeriod, QueryPlan
+from app.reasoning.query_understanding import QueryUnderstanding
 from app.retrieval.event_expansion import _trace as event_expansion_trace
 from app.retrieval.interfaces import CandidateChunk, MetadataMatch, RetrievalResult
 
@@ -2281,3 +2284,267 @@ class TraceCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class CorporateSilentBasisAuthorityTests(unittest.TestCase):
+    """An exact receipt date whose basis helper stayed silent.
+
+    ``period_type == "receipt_date"`` with one date is set from the question's
+    own receipt wording.  ``date_basis`` is a narrower secondary signal that
+    only fires when its marker sits inside a tight window after the date
+    expression, so production can legitimately produce an exact receipt period
+    with no basis at all.  Every plan here is built by ``QueryUnderstanding``
+    so that combination is real rather than asserted: a fixture that sets the
+    two together cannot express the state this covers.
+    """
+
+    COMPANY = "가상건설"
+    #: Receipt wording the period reader recognizes, with the marker pushed
+    #: past the basis helper's window by an intervening disclosure name.
+    SILENT_BASIS = "가상건설의 2023년 6월 26일 공급계약 체결 건 공시의 계약금액은?"
+    #: The same request with the marker adjacent, so the basis is named.
+    NAMED_BASIS = "가상건설이 2023년 6월 26일 공시한 공급계약의 계약금액은?"
+    AMOUNT = "1,234,567,890"
+    LATER_AMOUNT = "9,876,543,210"
+    HISTORICAL = "doc_hist_a"
+    CANONICAL = "doc_canon_b"
+
+    def understood(self, question: str) -> QueryPlan:
+        return QueryUnderstanding(
+            {self.COMPANY: {self.COMPANY}}
+        ).understand(question)
+
+    def plan(self, question: str | None = None, **overrides) -> QueryPlan:
+        # Only the corp code is supplied: resolving it needs a corpus this test
+        # does not carry.  Period, basis and correction policy stay exactly as
+        # query understanding produced them.
+        base = replace(
+            self.understood(question or self.SILENT_BASIS), corp_code=CORP
+        )
+        return replace(base, **overrides) if overrides else base
+
+    def chain_state(self, correction_status: str = RESOLVED):
+        """The historical filing, whose state names a later chain member."""
+
+        return _state(
+            self.CANONICAL,
+            canonical=self.CANONICAL,
+            group="chain-1",
+            correction_status=correction_status,
+            member_count=2,
+        )
+
+    def evidence(self, chunks, states, *, plan=None, question=None):
+        return corporate_event_field_evidence(
+            question=question or self.SILENT_BASIS,
+            plan=plan if plan is not None else self.plan(),
+            execution=_repository_shaped_execution(states),
+            evidence_items=_items(*chunks),
+        )
+
+    def _run(self, served, states, *, plan=None):
+        """The served filings through the real orchestrator and guard."""
+
+        selected = plan if plan is not None else self.plan()
+        candidates = [
+            CandidateChunk(str(chunk["chunk_id"]), str(chunk["doc_id"]), chunk,
+                           MetadataMatch())
+            for chunk in served
+        ]
+        results = [
+            RetrievalResult(str(chunk["chunk_id"]), str(chunk["doc_id"]),
+                            1.0 / index, index, {})
+            for index, chunk in enumerate(served, start=1)
+        ]
+        carried = _repository_shaped_execution(states)
+        execution = SimpleNamespace(
+            plan=selected,
+            chunks=candidates,
+            results=results,
+            event_expansion=carried.event_expansion,
+            correction_expansion=carried.correction_expansion,
+        )
+        result = AgentOrchestrator().run(self.SILENT_BASIS, selected, execution)
+        generated = generate_answer(result.answer_draft)
+        verdict = AnswerabilityGuard().evaluate(
+            generated,
+            plan=selected,
+            agent_result=result,
+            execution=SimpleNamespace(results=result.evidence_results),
+        )
+        return result, verdict, guarded_answer_text(verdict, generated.answer_text)
+
+    # ------------------------------------------------------------------ A
+    def test_receipt_date_plan_can_have_unspecified_date_basis(self) -> None:
+        plan = self.plan()
+
+        self.assertIsNotNone(plan.period)
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertIsNotNone(plan.period.from_date)
+        self.assertEqual(plan.period.from_date, plan.period.to_date)
+        self.assertEqual(
+            getattr(plan.date_basis, "value", plan.date_basis), "unspecified"
+        )
+        # The period already fixed which filing was asked for, so a silent
+        # basis may not take that authority away.
+        self.assertTrue(_selection_intent(plan).exact_historical_receipt_date)
+
+        named = self.plan(self.NAMED_BASIS)
+        self.assertEqual(
+            getattr(named.date_basis, "value", named.date_basis), "receipt_date"
+        )
+        self.assertTrue(_selection_intent(named).exact_historical_receipt_date)
+
+    # ------------------------------------------------------------------ B
+    def test_exact_receipt_date_value_bearing_contract_stays_authoritative(
+        self,
+    ) -> None:
+        historical = _contract_chunk(
+            "hist-amount", self.HISTORICAL, amount=self.AMOUNT
+        )
+
+        records = self.evidence((historical,), {self.HISTORICAL: self.chain_state()})
+
+        self.assertEqual(len(records), 1)
+        found = records[0]
+        self.assertIs(found.status, FieldStatus.AVAILABLE)
+        self.assertEqual(found.value, self.AMOUNT)
+        # The later canonical pointer may not take the filing the question
+        # named, and the answer must stay citable.
+        self.assertEqual(found.doc_id, self.HISTORICAL)
+        self.assertNotEqual(found.doc_id, self.CANONICAL)
+        self.assertEqual(found.chunk_id, "hist-amount")
+        self.assertTrue(found.authoritative)
+
+    # ------------------------------------------------------------------ C
+    def test_exact_receipt_date_withheld_amount_is_grounded_unavailable(
+        self,
+    ) -> None:
+        historical = _contract_chunk(
+            "hist-amount", self.HISTORICAL, amount="-",
+            extra_rows=(
+                _row("8. 비고", "계약금액은 유보기간 종료 후 추후 공시 예정"),
+            ),
+        )
+
+        result, verdict, answer = self._run(
+            (historical,), {self.HISTORICAL: self.chain_state()}
+        )
+
+        self.assertEqual(len(result.field_evidence), 1)
+        found = result.field_evidence[0]
+        self.assertIs(found.status, FieldStatus.UNAVAILABLE)
+        self.assertIs(found.reason, FieldReason.WITHHELD_OR_DEFERRED)
+        self.assertEqual(found.doc_id, self.HISTORICAL)
+        self.assertIsNotNone(found.chunk_id)
+        self.assertIsNotNone(found.table_id)
+        self.assertIsNotNone(found.row_start)
+        self.assertTrue(found.authoritative)
+        self.assertIsNone(found.value)
+
+        self.assertFalse(verdict.answerable)
+        self.assertEqual(verdict.unavailable_fields, (CONTRACT_AMOUNT,))
+        self.assertIsNotNone(verdict.refusal_citation)
+        # The genuine numbers sitting beside the blank say nothing about the
+        # contract amount, and none of them may stand in for it.
+        for neighbour in ("1,482,000,000,000", "12.4"):
+            self.assertNotEqual(found.value, neighbour)
+            self.assertNotIn(neighbour, answer)
+
+    # ------------------------------------------------------------------ D
+    def test_explicit_latest_intent_still_uses_canonical_authority(self) -> None:
+        historical = _contract_chunk(
+            "hist-amount", self.HISTORICAL, amount=self.AMOUNT
+        )
+        corrected = _contract_chunk(
+            "canon-amount", self.CANONICAL, amount=self.LATER_AMOUNT,
+            rcept_dt=LATER_RECEIPT, table_id="t0002",
+        )
+        final = self.chain_state()
+        states = {self.HISTORICAL: final, self.CANONICAL: final}
+        latest = self.plan(
+            correction_policy="latest_preferred",
+            route_evidence={"is_correction": "explicit latest"},
+        )
+        corrected_only = self.plan(correction_policy="corrected_only")
+
+        for label, plan in (("latest", latest), ("corrected", corrected_only)):
+            with self.subTest(intent=label):
+                # A silent basis must not turn an explicit latest/corrected
+                # request into a historical read.
+                self.assertFalse(
+                    _selection_intent(plan).exact_historical_receipt_date
+                )
+                records = self.evidence(
+                    (historical, corrected), states, plan=plan
+                )
+                authoritative = [item for item in records if item.authoritative]
+                self.assertEqual(len(authoritative), 1)
+                self.assertEqual(authoritative[0].doc_id, self.CANONICAL)
+                self.assertEqual(authoritative[0].value, self.LATER_AMOUNT)
+
+    # ------------------------------------------------------------------ E
+    def test_contract_date_basis_does_not_claim_receipt_date_authority(
+        self,
+    ) -> None:
+        historical = _contract_chunk(
+            "hist-amount", self.HISTORICAL, amount=self.AMOUNT
+        )
+        for basis in (DateBasis.CONTRACT_DATE, DateBasis.PERIOD_START):
+            with self.subTest(date_basis=basis.value):
+                plan = self.plan(date_basis=basis)
+                # The period is untouched: only the basis positively names a
+                # different real-world date, and that is a real veto.
+                self.assertEqual(plan.period.period_type, "receipt_date")
+                self.assertEqual(plan.period.from_date, plan.period.to_date)
+                self.assertFalse(
+                    _selection_intent(plan).exact_historical_receipt_date
+                )
+
+                records = self.evidence(
+                    (historical,), {self.HISTORICAL: self.chain_state()},
+                    plan=plan,
+                )
+                found = records[0]
+                self.assertEqual(found.doc_id, self.CANONICAL)
+                self.assertIs(found.status, FieldStatus.MISSING)
+
+    # ------------------------------------------------------------------ F
+    def test_non_exact_periods_do_not_activate_historical_authority(self) -> None:
+        exact = self.plan().period
+        cases = (
+            (
+                "receipt range",
+                QueryPeriod(from_date="2023-06-01", to_date="2023-06-30",
+                            period_type="receipt_date"),
+            ),
+            (
+                "non receipt period type",
+                QueryPeriod(from_date=exact.from_date, to_date=exact.to_date,
+                            period_type="date_range"),
+            ),
+            ("no period", None),
+        )
+        for label, period in cases:
+            with self.subTest(period=label):
+                plan = self.plan(period=period)
+                self.assertFalse(
+                    _selection_intent(plan).exact_historical_receipt_date
+                )
+
+    # ------------------------------------------------- correction finality
+    def test_unresolved_finality_fails_closed_without_a_named_basis(self) -> None:
+        historical = _contract_chunk(
+            "hist-amount", self.HISTORICAL, amount=self.AMOUNT
+        )
+        for status in (AMBIGUOUS, UNRESOLVED):
+            with self.subTest(correction_status=status):
+                # P0-A could not say which filing is final.  A silent basis is
+                # not permission to read either end of the chain.
+                records = self.evidence(
+                    (historical,),
+                    {self.HISTORICAL: self.chain_state(correction_status=status)},
+                )
+                self.assertEqual(
+                    [item.status for item in records], [FieldStatus.CONFLICT]
+                )
