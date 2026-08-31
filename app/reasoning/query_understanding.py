@@ -375,7 +375,11 @@ class QueryUnderstanding:
             correction_confidence = 1.0
             correction_evidence = "caller_override"
         comparison = _comparison_from_query(
-            raw_query, companies, mentioned_years, company_mentions
+            raw_query,
+            companies,
+            mentioned_years,
+            company_mentions,
+            task_type=task_type,
         )
         derived_metric = _derived_metric_from_query(
             raw_query,
@@ -1657,6 +1661,8 @@ def _comparison_from_query(
     companies: tuple[str, ...],
     years: tuple[int, ...],
     mentions: tuple[tuple[int, int, str], ...] = (),
+    *,
+    task_type: str | None = None,
 ) -> Mapping[str, Any] | None:
     compact = re.sub(r"\s+", "", query)
     if any(term in compact for term in ("변동전후", "변경전후", "이전과이후")):
@@ -1666,14 +1672,20 @@ def _comparison_from_query(
         if len(years) == 1:
             payload["years"] = [years[0] - 1, years[0]]
         return payload
-    # "비교" states the comparison outright and keeps its existing reach. "대비"
-    # does not: it is the operator that also builds 자기자본 대비, 매출액 대비 and
-    # 직전 보고 대비, so it counts only when a company is its left operand.
-    if len(companies) > 1 and (
-        "비교" in compact
-        or ("대비" in compact and _operator_binds_companies(query, mentions))
-    ):
-        return {"type": "company_comparison", "companies": list(companies)}
+    # "비교"/"차이" states the comparison outright. "대비" counts only when a
+    # company is its left operand.  Peer choice frames ("A와 B … 중 더 큰") also
+    # resolve when the task is not holding — see ``_peer_choice_company_comparison``.
+    if len(companies) > 1:
+        if "비교" in compact or (
+            "차이" in compact and task_type != "holding_change"
+        ):
+            return {"type": "company_comparison", "companies": list(companies)}
+        if "대비" in compact and _operator_binds_companies(query, mentions):
+            return {"type": "company_comparison", "companies": list(companies)}
+        if task_type != "holding_change" and _peer_choice_company_comparison(
+            query, companies, mentions, task_type=task_type or ""
+        ):
+            return {"type": "company_comparison", "companies": list(companies)}
     if len(years) > 1:
         return {"type": "period_comparison", "years": list(years)}
     if len(companies) <= 1 and len(years) == 1:
@@ -1695,6 +1707,36 @@ def _comparison_from_query(
     if any(term in compact for term in ("추이", "변화", "최근3년", "최근5년")):
         return {"type": "trend"}
     return None
+
+
+def _peer_choice_company_comparison(
+    query: str,
+    companies: tuple[str, ...],
+    mentions: tuple[tuple[int, int, str], ...],
+    *,
+    task_type: str,
+) -> bool:
+    """Whether a two-company choice frame is a peer compare, not a holding role."""
+
+    if len(companies) < 2 or task_type == "holding_change":
+        return False
+    compact = re.sub(r"\s+", "", query)
+    has_choice = any(term in compact for term in _CHOICE_MARKERS)
+    has_enumeration = any(term in compact for term in _ENUMERATION_MARKERS)
+    has_predicate = any(term in compact for term in _COMPARATIVE_PREDICATES)
+    if not (has_choice or has_enumeration):
+        return False
+    if not (has_predicate or has_enumeration):
+        return False
+    if len(mentions) < 2:
+        return False
+    if any(anchor in compact for anchor in _TEMPORAL_ANCHORS):
+        return False
+    if _TEMPORAL_YEAR.search(compact):
+        return False
+    return _operator_binds_companies(query, mentions) or _companies_are_coordinated(
+        query, mentions
+    )
 
 
 def _find_reporter(query: str) -> str | None:

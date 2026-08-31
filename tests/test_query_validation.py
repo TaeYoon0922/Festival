@@ -513,7 +513,6 @@ class ComparisonFirewallPrecedenceTests(unittest.TestCase):
     def test_the_guard_reads_the_frame_and_not_the_route(self) -> None:
         for query in (
             f"{_and_particle(self.A)} {self.B} 중 어디가 보유 주식수가 더 많아?",
-            f"{_and_particle(self.A)} {self.B} 중 어디가 2023년 매출액이 더 많아?",
             f"{_and_particle(self.A)} {self.B} 중 어디가 유상증자 규모가 더 커?",
         ):
             with self.subTest(query=query):
@@ -522,6 +521,14 @@ class ComparisonFirewallPrecedenceTests(unittest.TestCase):
                     result.plan.evidence["comparison_frame"], "cross_company"
                 )
                 self.assertTrue(result.plan.evidence["role_reinterpretation_blocked"])
+
+        financial_peer = (
+            f"{_and_particle(self.A)} {self.B} 중 어디가 2023년 매출액이 더 많아?"
+        )
+        result = self.validated(financial_peer)
+        self.assertEqual(result.plan.evidence["comparison_frame"], "cross_company")
+        self.assertEqual(result.plan.comparison["type"], "company_comparison")
+        self.assertIs(result.state, QueryState.RESOLVED)
 
 
 class HoldingCompanyRoleValidationTests(unittest.TestCase):

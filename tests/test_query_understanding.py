@@ -1,5 +1,6 @@
 import inspect
 import unittest
+from collections.abc import Mapping
 
 from app.agent.task_router import route_task
 from app.reasoning import (
@@ -1465,6 +1466,27 @@ class ComparisonFrameTests(unittest.TestCase):
         ):
             with self.subTest(query=query):
                 self.assertEqual(self.comparison(query)["type"], "company_comparison")
+
+    def test_peer_choice_financial_metric_promotes_company_comparison(self) -> None:
+        from app.reasoning.query_validation import CorpusScope
+
+        scope = CorpusScope.repository_default()
+        if scope is None:
+            self.skipTest("corpus scope unavailable")
+        understanding = QueryUnderstanding(
+            scope.company_aliases(),
+            company_resolver=scope.resolve_company,
+        )
+        for query in (
+            "현대모비스와 현대오토에버 2024 사업보고서 연결 영업이익 중 더 큰 쪽은?",
+            "삼성바이오로직스와 셀트리온 2024 사업보고서 연결 매출액·영업이익 중 어느 CMO·바이오사가 더 크고 차이는?",
+            "한화에어로스페이스와 LIG넥스원 2024 사업보고서 연결 영업이익·매출액 증가율 중 어느 방산사가 더 높아?",
+        ):
+            with self.subTest(query=query):
+                plan = understanding.understand(query)
+                self.assertIsInstance(plan.comparison, Mapping)
+                assert isinstance(plan.comparison, Mapping)
+                self.assertEqual(plan.comparison["type"], "company_comparison")
 
     def test_period_bound_operator_is_no_longer_a_company_comparison(self) -> None:
         """The defect this reopen fixes.
