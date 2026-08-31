@@ -1,0 +1,56 @@
+# 9. 통신 · SK텔레콤 vs KT
+
+question_id: PC15
+question: SK텔레콤과 KT 2024 사업보고서 연결 영업이익률(영업이익÷매출)을 비교하면 어느 통신사가 더 높아?
+
+listed_name: SK텔레콤  # peer: KT
+corp_name: SK텔레콤
+peer_listed_name: KT
+peer_corp_name: KT
+
+sector_no: 9
+sector: 통신
+sector_focus: 통신사 영업이익률 peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · derived_ratio · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - SKT·KT 2024 연결 매출·영업이익
+  - 영업이익률(파생)
+  - 더 높은 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=SK텔레콤
+  manifest_b: corp_name=KT
+
+negative_example: 무선 segment만 단독
+
+corpus_sketch: |
+  telco margin compare.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

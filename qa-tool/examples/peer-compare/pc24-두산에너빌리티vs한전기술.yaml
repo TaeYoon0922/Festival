@@ -1,0 +1,56 @@
+# 13. 원전 · 두산에너빌리티 vs 한전기술
+
+question_id: PC24
+question: 두산에너빌리티와 한전기술 2024·2025년 원전 관련 exchange 공급계약 건수와 최대 계약금액을 비교하면 어느 쪽이 더 많아?
+
+listed_name: 두산에너빌리티  # peer: 한전기술
+corp_name: 두산에너빌리티
+peer_listed_name: 한전기술
+peer_corp_name: 한전기술
+
+sector_no: 13
+sector: 원전
+sector_focus: 원전 supply count·max peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: exchange
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 해당없음
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · exchange_aggregate · max · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 2024·2025 건수
+  - 최대 계약금액(파생)
+  - 더 많은/큰 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=두산에너빌리티
+  manifest_b: corp_name=한전기술
+
+negative_example: 원전 segment 없이 단일 계약
+
+corpus_sketch: |
+  nuclear supply peer.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

@@ -1,0 +1,56 @@
+# 1. 반도체·전자부품 · 삼성전자 vs SK하이닉스
+
+question_id: PC01
+question: 삼성전자와 SK하이닉스 2024 사업보고서 연결 매출액·영업이익을 비교해, 어느 쪽이 더 크고 매출·영업이익 차이는?
+
+listed_name: 삼성전자  # peer: SK하이닉스
+corp_name: 삼성전자
+peer_listed_name: SK하이닉스
+peer_corp_name: SK하이닉스
+
+sector_no: 1
+sector: 반도체·전자부품
+sector_focus: 메모리·파운드리 연결 손익 peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · financial_metric · comparative · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 삼성전자 2024 연결 매출·영업이익
+  - SK하이닉스 2024 연결 매출·영업이익
+  - 차이(파생) — 각사 표 숫자
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=삼성전자
+  manifest_b: corp_name=SK하이닉스
+
+negative_example: 단일 기업만 답 · 두사 숫자 혼동
+
+corpus_sketch: |
+  comparison_frame=cross_company · dual periodic retrieval.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

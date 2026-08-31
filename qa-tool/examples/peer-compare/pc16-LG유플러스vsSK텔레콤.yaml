@@ -1,0 +1,57 @@
+# 9. 통신 · LG유플러스 vs SK텔레콤
+
+question_id: PC16
+question: LG유플러스와 SK텔레콤 2024년 1·2·3분기 연결 매출액 추이에서 최고 분기 매출을 비교하면 어느 쪽이 더 커?
+
+listed_name: LG유플러스  # peer: SK텔레콤
+corp_name: LG유플러스
+peer_listed_name: SK텔레콤
+peer_corp_name: SK텔레콤
+
+sector_no: 9
+sector: 통신
+sector_focus: 분기 매출 peak peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+  - multi_doc  # 복수문서
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · quarter_timeseries · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 2024 Q1–Q3 매출
+  - 최고 분기(파생)
+  - 더 큰 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=LG유플러스
+  manifest_b: corp_name=SK텔레콤
+
+negative_example: annual 단일행만
+
+corpus_sketch: |
+  quarter peak across two telcos.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

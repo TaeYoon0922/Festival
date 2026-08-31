@@ -106,6 +106,39 @@ python -m http.server 8765
 | `hm07-supply-contract-ok.yaml` | follow-up 2025-05-28 양성 |
 | `sector-probes-batch.txt` | 20섹터 복합 질문 일괄 입력 |
 | `sector-probes/_generate.py` | 상세 SP 카드 재생성 (PROBES 데이터 수정 후 실행) |
+| `peer-compare-batch.txt` | 동일 산업 2사 peer 비교 질문 30개 일괄 입력 |
+| `peer-compare/_generate.py` | peer 비교 PC 카드 재생성 |
+
+### taeyoon 실제 `/answer` 파이프라인 (5단계 요약 아님)
+
+카드의 `related_pipeline (taeyoon)` 메모는 아래 순서를 기준으로 합니다.
+
+```text
+질문
+  → query_understanding (QueryPlan)
+  → query_validation (P0-D)     RESOLVED 아니면 retrieval 차단 · clarification
+  → [hcx_semantic_fallback]     최대 1회 · 재검증
+  → hybrid retrieval            lexical + vector → RRF → rerank
+  → [correction_expansion]      P0-A · retrieval 안
+  → [corporate_event_expansion] P0-B · retrieval 안
+  → multi_document_planner      P0-C · retrieval 이후 additive
+  → orchestrator                task_router → resolver → answer_composer
+  → answer_generator
+  → answerability_guard         P0-D
+  → hcx_verbalizer              실패 시 결정적 답변 유지
+```
+
+peer-compare 일괄 실행:
+
+```bash
+# 로컬 — DB 없이 P0-D·플래너·라우트만 (기본)
+python scripts/run_peer_compare_batch.py --mode routing
+
+# 서버 — Postgres·임베딩 연결 후 전체 E2E
+FESTIVAL_HCX_ENABLED=false python scripts/run_peer_compare_batch.py --mode e2e
+```
+
+결과: `qa-tool/output/peer-compare-probe-full.json` (routing) 또는 `peer-compare-e2e.json` (e2e).
 
 ---
 

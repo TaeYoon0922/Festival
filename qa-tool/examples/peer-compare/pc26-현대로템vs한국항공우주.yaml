@@ -1,0 +1,55 @@
+# 14. 방산·항공우주 · 현대로템 vs 한국항공우주
+
+question_id: PC26
+question: 현대로템과 한국항공우주 2024년 exchange 공급계약 수량·금액 중 더 큰 건은 어느 쪽이야?
+
+listed_name: 현대로템  # peer: 한국항공우주
+corp_name: 현대로템
+peer_listed_name: 한국항공우주
+peer_corp_name: 한국항공우주
+
+sector_no: 14
+sector: 방산·항공우주
+sector_focus: 방산 exchange qty·amount peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: exchange
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 해당없음
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · exchange_quantity_compare · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 수량·금액(파생)
+  - 더 큰 건
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=현대로템
+  manifest_b: corp_name=한국항공우주
+
+negative_example: 금액만 · 단일 프로그램
+
+corpus_sketch: |
+  rolling stock vs KAI contracts.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

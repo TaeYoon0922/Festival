@@ -1,0 +1,55 @@
+# 14. 방산·항공우주 · 한화에어로스페이스 vs LIG넥스원
+
+question_id: PC25
+question: 한화에어로스페이스와 LIG넥스원 2024 사업보고서 연결 영업이익·매출액 증가율 중 어느 방산사가 더 높아?
+
+listed_name: 한화에어로스페이스  # peer: LIG넥스원
+corp_name: 한화에어로스페이스
+peer_listed_name: LIG넥스원
+peer_corp_name: LIG디펜스앤에어로스페이스
+
+sector_no: 14
+sector: 방산·항공우주
+sector_focus: 방산 growth peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · compare_rates · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 매출·영업이익 증가율(파생)
+  - 더 높은 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=한화에어로스페이스
+  manifest_b: corp_name=LIG디펜스앤에어로스페이스
+
+negative_example: 수출 계약 단건으로 대체
+
+corpus_sketch: |
+  defense prime vs mid-tier.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

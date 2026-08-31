@@ -1,0 +1,55 @@
+# 5. 철강 · POSCO홀딩스 vs 세아베스틸지주
+
+question_id: PC10
+question: POSCO홀딩스와 세아베스틸지주 2024 사업보고서 연결 당기순이익 중 더 큰 쪽은?
+
+listed_name: POSCO홀딩스  # peer: 세아베스틸지주
+corp_name: POSCO홀딩스
+peer_listed_name: 세아베스틸지주
+peer_corp_name: 세아베스틸지주
+
+sector_no: 5
+sector: 철강
+sector_focus: 철강 순이익 peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · financial_metric · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 2024 연결 당기순이익
+  - 더 큰 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=POSCO홀딩스
+  manifest_b: corp_name=세아베스틸지주
+
+negative_example: 지주·제철 표 혼동
+
+corpus_sketch: |
+  holding vs integrated steel.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

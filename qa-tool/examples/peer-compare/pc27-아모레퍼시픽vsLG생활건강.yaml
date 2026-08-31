@@ -1,0 +1,55 @@
+# 15. 소비재·유통 · 아모레퍼시픽 vs LG생활건강
+
+question_id: PC27
+question: 아모레퍼시픽과 LG생활건강 2024 사업보고서 국내 vs 해외 매출 비중(%)을 비교하면 해외 비중이 더 높은 쪽은?
+
+listed_name: 아모레퍼시픽  # peer: LG생활건강
+corp_name: 아모레퍼시픽
+peer_listed_name: LG생활건강
+peer_corp_name: LG생활건강
+
+sector_no: 15
+sector: 소비재·유통
+sector_focus: K뷰티 해외비중 peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · breakdown_share · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 국내·해외 비중(파생)
+  - 해외 비중 더 높은 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=아모레퍼시픽
+  manifest_b: corp_name=LG생활건강
+
+negative_example: 총매출 단일행
+
+corpus_sketch: |
+  beauty overseas mix pair.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

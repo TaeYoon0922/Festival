@@ -1,0 +1,56 @@
+# 2. 자동차·모빌리티 · 현대차 vs 기아
+
+question_id: PC04
+question: 현대자동차와 기아 2024 사업보고서 연결 매출액 전기 대비 증감률을 비교하면 어느 브랜드가 더 높아?
+
+listed_name: 현대차  # peer: 기아
+corp_name: 현대자동차
+peer_listed_name: 기아
+peer_corp_name: 기아
+
+sector_no: 2
+sector: 자동차·모빌리티
+sector_focus: 완성차 매출 증감률 peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · derived_rate · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 현대차·기아 2024 연결 매출 전기·당기
+  - 각사 증감률(파생)
+  - 더 높은 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=현대자동차
+  manifest_b: corp_name=기아
+
+negative_example: 그룹 합산 · 단일 브랜드만
+
+corpus_sketch: |
+  YoY rate per OEM.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

@@ -1,0 +1,55 @@
+# 11. 바이오·제약 · 삼성바이오로직스 vs 셀트리온
+
+question_id: PC20
+question: 삼성바이오로직스와 셀트리온 2024년 exchange 공급계약 금액 합계를 비교하면 어느 쪽이 더 많아?
+
+listed_name: 삼성바이오로직스  # peer: 셀트리온
+corp_name: 삼성바이오로직스
+peer_listed_name: 셀트리온
+peer_corp_name: 셀트리온
+
+sector_no: 11
+sector: 바이오·제약
+sector_focus: 바이오 supply contract peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: exchange+periodic
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 연결
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · exchange_aggregate · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 2024 공급계약 합(파생)
+  - 더 큰 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=삼성바이오로직스
+  manifest_b: corp_name=셀트리온
+
+negative_example: 단일 계약 · R&D비 혼동
+
+corpus_sketch: |
+  exchange sum per biotech.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

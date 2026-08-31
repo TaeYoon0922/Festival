@@ -1,0 +1,55 @@
+# 12. 조선 · HD현대중공업 vs 삼성중공업
+
+question_id: PC23
+question: HD현대중공업과 삼성중공업 2024년 exchange 공급·수주 관련 계약금액 합계를 비교하면 어느 쪽이 더 커?
+
+listed_name: HD현대중공업  # peer: 삼성중공업
+corp_name: HD현대중공업
+peer_listed_name: 삼성중공업
+peer_corp_name: 삼성중공업
+
+sector_no: 12
+sector: 조선
+sector_focus: 조선 exchange contract peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: exchange
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 해당없음
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · exchange_aggregate · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 2024 계약금액 합(파생)
+  - 더 큰 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=HD현대중공업
+  manifest_b: corp_name=삼성중공업
+
+negative_example: 단일 yard · 건조进度 invent
+
+corpus_sketch: |
+  shipbuilder contract sum.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.

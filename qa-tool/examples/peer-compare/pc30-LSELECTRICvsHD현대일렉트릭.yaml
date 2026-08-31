@@ -1,0 +1,56 @@
+# 18. 전력기기 · LS ELECTRIC vs HD현대일렉트릭
+
+question_id: PC30
+question: LS ELECTRIC과 HD현대일렉트릭 2024년 신규시설투자 투자금액과 자기자본 대비 비율을 비교하면 어느 전력기기사가 더 커?
+
+listed_name: LS ELECTRIC  # peer: HD현대일렉트릭
+corp_name: 엘에스일렉트릭
+peer_listed_name: HD현대일렉트릭
+peer_corp_name: HD현대일렉트릭
+
+sector_no: 18
+sector: 전력기기
+sector_focus: 전력기기 capex·equity ratio peer compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_corp  # 복수기업
+
+doc_group: exchange
+report_nm · period: 각 corp manifest 확인 후 FY·분기 보완
+basis: 해당없음
+
+comparison_frame (기대): cross_company
+task_type (기대): cross_company · facility_investment · equity_compare · multi_corp
+
+expected_behavior: normal_answer  # 현재 cross_company → fail-closed/clarification 가능
+
+must_include_in_answer:
+  - 각사 2024 시설투자 금액
+  - 자기자본 대비 %(파생)
+  - 더 큰 쪽
+
+must_NOT_invent: 코퍼스 밖 invent · 두 기업 숫자 혼동 · 단일 corp만 답
+
+evidence:
+  manifest_a: corp_name=엘에스일렉트릭
+  manifest_b: corp_name=HD현대일렉트릭
+
+negative_example: 단일 변압기 건만
+
+corpus_sketch: |
+  grid equipment capex pair.
+
+related_agent_gaps:
+  - cross_company multi-corp execution
+
+improve_hint (참고): comparison_frame=cross_company · per-corp retrieval + side-by-side answer
+
+related_pipeline (taeyoon):
+  - query_validation comparison_frame=cross_company → P0-D fail-closed
+  - multi_document_planner REASON_UNSUPPORTED_CALCULATION (cross-company)
+  - per-corp answer compose + side-by-side render (미구현)
+
+notes: |
+  공시 확인 후 must_include·doc_id를 corp별로 보완.
