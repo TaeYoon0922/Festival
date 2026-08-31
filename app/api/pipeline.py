@@ -34,6 +34,18 @@ from app.reasoning.answerability import (
     AnswerabilityStatus,
     guarded_answer_text,
 )
+from app.reasoning.clarification_candidates import (
+    apply_resolved_candidate,
+    execution_clarification_request,
+    validation_clarification_request,
+)
+from app.reasoning.clarification_request import (
+    ClarificationDecision,
+    ClarificationState,
+    clarification_text,
+)
+from app.reasoning.clarification_resolver import ClarificationResolver
+from app.reasoning.hcx_clarification_classifier import HcxClarificationClassifier
 from app.reasoning.multi_document_evidence import (
     MultiDocumentEvidence,
     MultiDocumentEvidenceBuilder,
@@ -99,6 +111,7 @@ _HCX_NOT_CALLED = frozenset(
         SKIPPED_MULTI_EVENT_CLAIM,
         "skipped_query_not_resolved",
         "skipped_answerability_guard",
+        "skipped_clarification",
     }
 )
 
@@ -139,6 +152,7 @@ class AnswerPipeline:
         query_validator: QueryValidator | None = None,
         semantic_fallback: HcxSemanticQueryFallback | None = None,
         answerability_guard: AnswerabilityGuard | None = None,
+        clarification_resolver: ClarificationResolver | None = None,
     ) -> None:
         self.settings = settings or ApiSettings()
         self.understanding = understanding
@@ -158,6 +172,7 @@ class AnswerPipeline:
         self.query_validator = query_validator
         self.semantic_fallback = semantic_fallback
         self.answerability_guard = answerability_guard
+        self.clarification_resolver = clarification_resolver
         self._query_metrics = {
             "deterministic_resolved_count": 0,
             "hcx_fallback_count": 0,
@@ -260,16 +275,54 @@ class AnswerPipeline:
             ),
             semantic_fallback=HcxSemanticQueryFallback(hcx_settings),
             answerability_guard=AnswerabilityGuard(),
+            clarification_resolver=ClarificationResolver(
+                HcxClarificationClassifier(hcx_settings)
+            ),
         )
 
     def answer(self, question_id: str, question: str) -> dict[str, Any]:
         validation: QueryValidationResult | None = None
+        clarification_decision: ClarificationDecision | None = None
         if self.query_validator is None:
             plan, execution = self._retrieve(question)
         else:
             plan, validation = self._validated_understanding(question)
             if not validation.retrieval_allowed:
-                return self._blocked_response(question_id, question, validation)
+                request = (
+                    validation_clarification_request(question, validation)
+                    if self.clarification_resolver is not None
+                    else None
+                )
+                if request is not None:
+                    clarification_decision = self.clarification_resolver.resolve(request)
+                    if clarification_decision.state is ClarificationState.RESOLVED:
+                        updated_plan = apply_resolved_candidate(
+                            plan, request, clarification_decision
+                        )
+                        revalidated = self.query_validator.validate(updated_plan)
+                        if revalidated.retrieval_allowed:
+                            self._query_metrics["clarification_count"] = max(
+                                0, self._query_metrics["clarification_count"] - 1
+                            )
+                            plan, validation = revalidated.plan, revalidated
+                        else:
+                            clarification_decision = ClarificationDecision(
+                                state=ClarificationState.CLARIFY,
+                                reason="resolved_candidate_failed_revalidation",
+                                candidates=request.candidates,
+                                classifier_status=clarification_decision.classifier_status,
+                                truncated=request.truncated,
+                            )
+                    if not validation.retrieval_allowed:
+                        self._adjust_metrics_for_clarification(clarification_decision)
+                        return self._blocked_response(
+                            question_id,
+                            question,
+                            validation,
+                            clarification_decision=clarification_decision,
+                        )
+                if not validation.retrieval_allowed:
+                    return self._blocked_response(question_id, question, validation)
             try:
                 execution = self.executor.execute(plan)
             except Exception as error:  # noqa: BLE001 - sanitized at API boundary
@@ -302,6 +355,32 @@ class AnswerPipeline:
                 execution=evidence,
                 multi_document=multi,
             )
+        if self.clarification_resolver is not None:
+            request = execution_clarification_request(
+                question,
+                plan,
+                result,
+                execution,
+                multi_document=multi,
+            )
+            if request is not None:
+                post_decision = self.clarification_resolver.resolve(request)
+                if post_decision.state is not ClarificationState.RESOLVED:
+                    if post_decision.state is ClarificationState.CLARIFY:
+                        self._query_metrics["clarification_count"] += 1
+                    elif post_decision.state is ClarificationState.UNSUPPORTED:
+                        self._query_metrics["unsupported_count"] += 1
+                    return self._post_resolution_clarification_response(
+                        question_id,
+                        question,
+                        result=result,
+                        generated=generated,
+                        execution=execution,
+                        multi_document=multi,
+                        validation=validation,
+                        answerability=answerability,
+                        decision=post_decision,
+                    )
         if answerability is None or answerability.model_answer_allowed:
             outcome = self.verbalizer.verbalize(
                 generated,
@@ -337,6 +416,7 @@ class AnswerPipeline:
                 multi_document=multi,
                 query_validation=validation,
                 answerability=answerability,
+                clarification_decision=clarification_decision,
             ),
             "answer": _non_empty(outcome.text, generated.answer_text),
         }
@@ -396,9 +476,29 @@ class AnswerPipeline:
         question_id: str,
         question: str,
         validation: QueryValidationResult,
+        *,
+        clarification_decision: ClarificationDecision | None = None,
     ) -> dict[str, Any]:
         state = validation.state
-        if state in {QueryState.AMBIGUOUS, QueryState.INCOMPLETE}:
+        if (
+            clarification_decision is not None
+            and clarification_decision.state is ClarificationState.CLARIFY
+        ):
+            answer = clarification_text(clarification_decision)
+            route = "clarification"
+        elif (
+            clarification_decision is not None
+            and clarification_decision.state is ClarificationState.INSUFFICIENT_EVIDENCE
+        ):
+            answer = "요청하신 내용을 뒷받침할 공시 근거를 확인하지 못했습니다."
+            route = "insufficient_evidence"
+        elif (
+            clarification_decision is not None
+            and clarification_decision.state is ClarificationState.UNSUPPORTED
+        ):
+            answer = "현재 시스템이 지원하는 공시 의미로 요청을 해석할 수 없습니다."
+            route = "unsupported"
+        elif state in {QueryState.AMBIGUOUS, QueryState.INCOMPLETE}:
             answer = (
                 validation.clarification.question
                 if validation.clarification is not None
@@ -420,6 +520,10 @@ class AnswerPipeline:
         if validation.fallback_used:
             stages.append("hcx_semantic_fallback")
             stages.append("query_revalidation")
+        if clarification_decision is not None:
+            stages.append("clarification_resolver")
+            if _clarification_classifier_called(clarification_decision):
+                stages.append("hcx_clarification_classifier")
         return {
             "question_id": question_id,
             "question": question,
@@ -436,7 +540,72 @@ class AnswerPipeline:
                 "correction": None,
                 "query_understanding": validation.to_public_dict(),
                 "query_validation": validation.to_validation_dict(),
+                **(
+                    {"clarification": clarification_decision.to_public_dict()}
+                    if clarification_decision is not None
+                    else {}
+                ),
             },
+            "answer": answer,
+        }
+
+    def _adjust_metrics_for_clarification(
+        self, decision: ClarificationDecision
+    ) -> None:
+        if decision.state is ClarificationState.CLARIFY:
+            return
+        self._query_metrics["clarification_count"] = max(
+            0, self._query_metrics["clarification_count"] - 1
+        )
+        if decision.state is ClarificationState.UNSUPPORTED:
+            self._query_metrics["unsupported_count"] += 1
+
+    def _post_resolution_clarification_response(
+        self,
+        question_id: str,
+        question: str,
+        *,
+        result: Any,
+        generated: GeneratedAnswer,
+        execution: Any,
+        multi_document: Any,
+        validation: QueryValidationResult | None,
+        answerability: AnswerabilityResult | None,
+        decision: ClarificationDecision,
+    ) -> dict[str, Any]:
+        if decision.state is ClarificationState.CLARIFY:
+            answer = clarification_text(decision)
+            route = "clarification"
+        elif decision.state is ClarificationState.UNSUPPORTED:
+            answer = "현재 시스템이 지원하는 공시 의미로 요청을 해석할 수 없습니다."
+            route = "unsupported"
+        else:
+            answer = "요청하신 내용을 뒷받침할 공시 근거를 확인하지 못했습니다."
+            route = "insufficient_evidence"
+        outcome = VerbalizationOutcome(
+            answer,
+            "skipped_clarification",
+            decision.state.value,
+        )
+        trace = think_trace(
+            result,
+            generated,
+            outcome,
+            execution,
+            multi_document=multi_document,
+            query_validation=validation,
+            answerability=answerability,
+            clarification_decision=decision,
+        )
+        trace["route"] = route
+        trace["answerable"] = False
+        return {
+            "question_id": question_id,
+            "question": question,
+            # The semantic choice is unresolved, so no candidate's evidence is
+            # exposed as though it were the answer.
+            "retrieved_context": [],
+            "think_trace": trace,
             "answer": answer,
         }
 
@@ -665,6 +834,7 @@ def think_trace(
     multi_document: Any = None,
     query_validation: QueryValidationResult | None = None,
     answerability: AnswerabilityResult | None = None,
+    clarification_decision: ClarificationDecision | None = None,
 ) -> dict[str, Any]:
     """Summarize what the pipeline executed.
 
@@ -742,6 +912,11 @@ def think_trace(
         trace["answerable"] = (
             answerability.status is AnswerabilityStatus.ANSWERABLE
         )
+    if clarification_decision is not None:
+        stages.append("clarification_resolver")
+        if _clarification_classifier_called(clarification_decision):
+            stages.append("hcx_clarification_classifier")
+        trace["clarification"] = clarification_decision.to_public_dict()
     return trace
 
 
@@ -750,6 +925,15 @@ def _route(result: Any) -> str:
         if stage.endswith("_resolver"):
             return stage
     return "general_evidence"
+
+
+def _clarification_classifier_called(decision: ClarificationDecision) -> bool:
+    return decision.classifier_status not in {
+        "not_called",
+        "disabled",
+        "not_configured",
+        "not_needed",
+    }
 
 
 def _chunk_period(chunk: Mapping[str, Any]) -> dict[str, Any]:

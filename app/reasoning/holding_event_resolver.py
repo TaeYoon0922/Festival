@@ -90,6 +90,12 @@ _QUERY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     # "취득 수량", "취득수량", "취득 주식수", "취득주식수".
     "acquired_shares": (r"취득\s*수량", r"취득\s*주식\s*수"),
 }
+#: The unit price is acquisition language this module deliberately cannot
+#: answer: ``holding_acquisition`` keeps the "취득/처분단가" column out of every
+#: extracted quantity and method.  It is recognised here only so callers can
+#: tell that a question is about an acquisition, never as a requested field --
+#: which is why it is absent from ``_QUERY_FIELD_ALIASES`` above.
+_ACQUISITION_SEMANTIC_PATTERNS = (r"취득\s*(?:/\s*처분\s*)?단가",)
 _QUERY_FIELD_CANONICAL = {
     "direction": "change_direction",
     "보고자/보유자": "reporter",
@@ -800,6 +806,26 @@ def _requested_fields(question: str, plan: Mapping[str, Any]) -> tuple[str, ...]
         # publishes together, rather than guessing which half was meant.
         requested.extend(CURRENT_HOLDING_STATE_FIELDS)
     return tuple(requested)
+
+
+def has_acquisition_semantics(question: str, plan: Mapping[str, Any]) -> bool:
+    """Whether a question belongs to the holding acquisition family.
+
+    Wider than the acquisition fields this resolver can answer: it also covers
+    the acquisition unit price, which the row parser deliberately excludes from
+    every extracted quantity.  So a true result proves what the question is
+    about, never that the answer exists.  Callers use it as an intent firewall,
+    keeping acquisition wording from being reinterpreted as something else.
+
+    The answerable half is read through ``_requested_fields`` rather than a
+    second copy of its patterns, so this predicate cannot drift from it.
+    """
+
+    text = str(question or "")
+    if any(re.search(pattern, text) for pattern in _ACQUISITION_SEMANTIC_PATTERNS):
+        return True
+    requested = _requested_fields(text, dict(plan or {}))
+    return any(field in _ACQUISITION_FIELD_NAMES for field in requested)
 
 
 def _requested_direction(question: str) -> str | None:
