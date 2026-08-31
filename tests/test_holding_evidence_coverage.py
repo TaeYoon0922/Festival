@@ -14,6 +14,7 @@ from app.generation.answer_generator import CitationAwareAnswerGenerator
 from app.reasoning.answerability import AnswerabilityGuard
 from app.reasoning.holding_evidence_coverage import (
     ACQUISITION_PROOF,
+    ANCHOR_ACQUISITION_DOCUMENT,
     ANCHOR_MEDIUM,
     ANCHOR_STRONG,
     PROVENANCE_KEY,
@@ -1467,14 +1468,6 @@ class AcquisitionProofBoundsTests(unittest.TestCase):
 
         self.assertEqual(result.selected, ())
 
-    def test_unanchored_same_document_row_is_rejected(self) -> None:
-        summary = _summary(reference_date="2024년 02월 03일")
-        # Same filing, a different event: no shared rows and no shared date.
-        other_event = _acquisition_row("a1", reference_date="2024년 09월 09일")
-
-        result = _assess(_acquisition_plan(), [summary, other_event], [summary])
-
-        self.assertEqual(result.selected, ())
 
     def test_malformed_and_uncitable_rows_are_rejected(self) -> None:
         summary = _summary()
@@ -1534,3 +1527,128 @@ class AcquisitionRetrievalImmutabilityTests(unittest.TestCase):
         self.assertEqual(promoted.metadata_match[PROVENANCE_KEY],
                          {"selected_for": "holding_field_coverage"})
         self.assertEqual(result.anchors[0][1], ANCHOR_MEDIUM)
+
+
+class AcquisitionAnchorContractTests(unittest.TestCase):
+    """A transaction is older than the filing that reports it.
+
+    The generic anchor asks whether two items carry the same event date, which
+    is how a position projection and its raw table are shown to describe one
+    event.  An acquisition detail row is dated the day the shares changed
+    hands, while the report projection is dated the day the position was
+    reported, so the two legitimately differ -- and requiring them to match
+    refused the row that proves the acquisition.
+    """
+
+    REPORT_DATE = "2025년 02월 07일"
+    TRADE_DATE = "2025년 02월 05일"
+    EARLIER_TRADE = "2025년 02월 03일"
+
+    def test_generic_anchor_still_refuses_the_date_mismatch(self) -> None:
+        """The generic contract is unchanged, and still says no."""
+
+        summary, _served = _summary(reference_date=self.REPORT_DATE)
+        detail, _ = _acquisition_row("a1", reference_date=self.TRADE_DATE)
+
+        self.assertIsNone(anchor_tier(detail.chunk, summary.chunk, HOLDER))
+
+    def test_acquisition_lane_recovers_the_earlier_transaction(self) -> None:
+        summary = _summary(reference_date=self.REPORT_DATE)
+        detail = _acquisition_row("a1", reference_date=self.TRADE_DATE)
+
+        result = _assess(_acquisition_plan(), [summary, detail], [summary])
+
+        self.assertEqual([r.chunk_id for r in result.selected], ["a1"])
+        # Named for what it is: the filing was served, not the event matched.
+        self.assertEqual(result.anchors[0][1], ANCHOR_ACQUISITION_DOCUMENT)
+
+    def test_matching_dates_still_report_the_generic_tier(self) -> None:
+        """The lane does not depend on the dates differing."""
+
+        summary = _summary(reference_date=self.REPORT_DATE)
+        detail = _acquisition_row("a1", reference_date=self.REPORT_DATE)
+
+        result = _assess(_acquisition_plan(), [summary, detail], [summary])
+
+        self.assertEqual([r.chunk_id for r in result.selected], ["a1"])
+        self.assertEqual(result.anchors[0][1], ANCHOR_MEDIUM)
+
+    def test_two_transaction_dates_are_both_promoted(self) -> None:
+        """Which date the question meant is not this lane's decision."""
+
+        summary = _summary(reference_date=self.REPORT_DATE)
+        first = _acquisition_row(
+            "a1", reference_date=self.EARLIER_TRADE, change="1,000", row=2
+        )
+        second = _acquisition_row(
+            "a2", reference_date=self.TRADE_DATE, change="2,000", row=3
+        )
+
+        result = _assess(_acquisition_plan(), [summary, first, second], [summary])
+
+        self.assertEqual([r.chunk_id for r in result.selected], ["a1", "a2"])
+        # Neither date is preferred for being nearer the report date.
+        self.assertEqual(len(result.anchors), 2)
+
+    def test_a_different_filing_is_never_anchored(self) -> None:
+        summary = _summary(doc_id="d1", reference_date=self.REPORT_DATE)
+        elsewhere = _acquisition_row(
+            "a1", doc_id="d9", reference_date=self.TRADE_DATE
+        )
+
+        result = _assess(_acquisition_plan(), [summary, elsewhere], [summary])
+
+        self.assertEqual(result.selected, ())
+        self.assertEqual(result.status, STATUS_NO_ACQUISITION_PROOF)
+
+    def test_same_filing_wrong_holder_is_still_refused(self) -> None:
+        """Document identity is the last gate, never the authority."""
+
+        summary = _summary(reference_date=self.REPORT_DATE)
+        neighbour = _acquisition_row(
+            "a1", reporter=NEIGHBOUR_HOLDER, reference_date=self.TRADE_DATE
+        )
+
+        result = _assess(_acquisition_plan(), [summary, neighbour], [summary])
+
+        self.assertEqual(result.selected, ())
+
+    def test_same_filing_without_acquisition_proof_is_still_refused(self) -> None:
+        summary = _summary(reference_date=self.REPORT_DATE)
+        disposal = _acquisition_row(
+            "a1", method="장내매도(-)", change="-1,000",
+            reference_date=self.TRADE_DATE,
+        )
+
+        result = _assess(_acquisition_plan(), [summary, disposal], [summary])
+
+        self.assertEqual(result.selected, ())
+
+
+class OrdinaryAnchorUnaffectedTests(unittest.TestCase):
+    """The acquisition exception must not leak into ordinary coverage."""
+
+    def test_ordinary_candidate_with_a_different_date_gets_no_tier(self) -> None:
+        served, _ = _projection("s1", "d1", kind="holding_report",
+                                reference_date="2022년 12월 05일",
+                                after_ratio="7.10", event_row=2)
+        # Same filing and holder, a different event: no shared row, no shared
+        # date.  The generic contract still refuses, exactly as before.
+        candidate, _ = _projection("p1", "d1", kind="holding_detail_row",
+                                   reference_date="2022년 11월 01일",
+                                   event_row=7)
+
+        self.assertIsNone(anchor_tier(candidate.chunk, served.chunk, FUND))
+
+    def test_ordinary_rescue_still_declines_on_a_date_mismatch(self) -> None:
+        served = _table("t0", "d1", rank=1, event_row=2)
+        candidate = _projection("p1", "d1", kind="holding_detail_row",
+                                reference_date="2022년 11월 01일",
+                                event_row=7, rank=9)
+
+        result = _assess(_plan(HX12_Q), [served, candidate], [served])
+
+        # The acquisition lane is not active here, so nothing rescues a
+        # candidate that completes nothing served.
+        self.assertEqual(result.selected, ())
+        self.assertEqual(result.status, STATUS_NO_ANCHOR)

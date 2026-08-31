@@ -22,7 +22,13 @@ from app.reasoning.query_plan import QueryPlan
 from app.reasoning.holding_report_index import HoldingReportIndex, HoldingReportRecord
 from app.reasoning.holding_report_relative_execution import HoldingReportRelativeExecution
 from app.reasoning.holding_reporter import canonical_reporter_key
-from app.reasoning.holding_field_evidence import ACQUISITION_UNIT_PRICE
+from app.reasoning.holding_evidence_coverage import anchor_tier
+from app.reasoning.holding_field_evidence import (
+    ACQUISITION_UNIT_PRICE,
+    _selected_event,
+    holding_field_evidence,
+    requested_holding_fields,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import CorpusScope, QueryState, QueryValidator
 from app.retrieval.interfaces import CandidateChunk, MetadataMatch, RetrievalResult
@@ -604,6 +610,31 @@ def priced_acquisition_candidate(value, price: str) -> CandidateChunk:
     return CandidateChunk(base.chunk_id, base.doc_id, chunk, MetadataMatch())
 
 
+def dated_acquisition_candidate(
+    value, trade_date: str, *, price: str | None = None
+) -> CandidateChunk:
+    """The same row, dated the day the shares actually changed hands.
+
+    A holding report is filed after the transaction it reports, so the detail
+    row's date is ordinarily older than the report's own date.  That gap is the
+    shape this fixture exists to carry.
+    """
+
+    base = acquisition_candidate(value)
+    chunk = dict(base.chunk)
+    rows = [[dict(cell) for cell in row] for row in chunk["table_rows"]]
+    rows[0][2]["text"] = trade_date
+    if price is not None:
+        for cell in rows[0][8:10]:
+            cell["text"] = price
+        rows[0][10]["text"] = ""
+    chunk["table_rows"] = rows
+    fields = dict(chunk["projection_fields"])
+    fields["기준일/보고일"] = trade_date
+    chunk["projection_fields"] = fields
+    return CandidateChunk(base.chunk_id, base.doc_id, chunk, MetadataMatch())
+
+
 class FilerIdentityResolutionTests(unittest.TestCase):
     """Proving which of an issuer's own filers a question named.
 
@@ -847,14 +878,17 @@ class RecoveredAcquisitionEvidenceTests(unittest.TestCase):
     #: the corpus does.  ``record`` carries the compact rcept-style value that
     #: a projection label never holds, so the summary restates it here.
     REFERENCE = "2024.02.03"
+    #: A filing is dated after the transaction it reports.
+    REPORT_DATE = "2025.02.07"
+    TRADE_DATE = "2025.02.05"
 
-    def summary(self):
-        """The position projection, dated the way its own detail row is."""
+    def summary(self, reference=None):
+        """The position projection, dated the day the position was reported."""
 
         base = candidate(self.selected)
         chunk = dict(base.chunk)
         fields = dict(chunk["projection_fields"])
-        fields["기준일/보고일"] = self.REFERENCE
+        fields["기준일/보고일"] = reference or self.REFERENCE
         chunk["projection_fields"] = fields
         chunk["projection_field_refs"] = {
             label: [dict(SOURCE_REF)] for label in fields
@@ -968,6 +1002,80 @@ class RecoveredAcquisitionEvidenceTests(unittest.TestCase):
             self.assertNotEqual(field.value, neighbour)
         self.assertTrue(payload["think_trace"]["answerable"])
 
+
+
+    def test_transaction_older_than_its_report_is_answered(self) -> None:
+        """The measured shape: the filing is dated after the trade it reports.
+
+        Two things had to be true for this to work, and both are pinned here.
+        Coverage anchors the proof row on the filing rather than on a shared
+        event date, so the row arrives at all.  The producer then measures
+        ambiguity among the acquisitions rather than among every event, so the
+        position snapshot the filing also renders -- dated the day the position
+        was reported, proving no acquisition -- stops being treated as a rival
+        answer for a unit price it never carried.
+
+        The resolver still reports both facts truthfully, including the temporal
+        ambiguity between them.  Nothing here rewrites that.
+        """
+
+        summary = self.summary(reference=self.REPORT_DATE)
+        detail = dated_acquisition_candidate(self.selected, self.TRADE_DATE)
+
+        # The generic anchor, unchanged, still cannot bridge these two.
+        self.assertIsNone(anchor_tier(detail.chunk, summary.chunk, self.HOLDER))
+
+        result, payload = self._run((summary, detail), (summary,))
+
+        # The resolver's own account is untouched: two events, one ambiguity.
+        self.assertTrue(result.resolution.temporal_ambiguity)
+        self.assertEqual(result.resolution.matching_event_count, 2)
+        proven = [event for event in result.resolution.events
+                  if event.transaction_method is not None]
+        self.assertEqual(len(proven), 1)
+        self.assertEqual(proven[0].acquisition_date, "2025-02-05")
+
+        # The producer answers from the one acquisition among them.
+        self.assertEqual(len(result.field_evidence), 1)
+        field = result.field_evidence[0]
+        self.assertEqual(field.field, ACQUISITION_UNIT_PRICE)
+        self.assertIs(field.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(field.doc_id, self.selected.doc_id)
+        self.assertEqual(field.chunk_id, detail.chunk_id)
+        self.assertEqual(field.table_id, "t-acquisition")
+        self.assertEqual((field.row_start, field.row_end), (2, 2))
+
+        # Answerability decides through the ordinary FieldEvidence contract.
+        self.assertFalse(payload["think_trace"]["answerable"])
+        answerability = payload["think_trace"]["answerability"]
+        self.assertEqual(answerability["status"], "insufficient_evidence")
+        self.assertEqual(answerability["unavailable_fields"],
+                         [ACQUISITION_UNIT_PRICE])
+        self.assertEqual(
+            answerability["unavailable_evidence"][0]["chunk_id"], detail.chunk_id
+        )
+
+    def test_transaction_older_than_its_report_reads_a_stated_price(self) -> None:
+        """The same shape with the price actually stated."""
+
+        summary = self.summary(reference=self.REPORT_DATE)
+        detail = dated_acquisition_candidate(
+            self.selected, self.TRADE_DATE, price=self.PRICE
+        )
+
+        result, payload = self._run((summary, detail), (summary,))
+
+        self.assertEqual(len(result.field_evidence), 1)
+        field = result.field_evidence[0]
+        self.assertIs(field.status, FieldStatus.AVAILABLE)
+        self.assertEqual(field.value, self.PRICE)
+        self.assertEqual(field.chunk_id, detail.chunk_id)
+        self.assertEqual((field.row_start, field.row_end), (2, 2))
+        # No number the position snapshot carries may stand in for the price.
+        for neighbour in ("100", "2,000", "2,100", "1.00"):
+            self.assertNotEqual(field.value, neighbour)
+        self.assertTrue(payload["think_trace"]["answerable"])
+
     def test_baseline_served_order_survives_recovery(self) -> None:
         summary = self.summary()
         detail = acquisition_candidate(self.selected)
@@ -981,3 +1089,151 @@ class RecoveredAcquisitionEvidenceTests(unittest.TestCase):
         self.assertLess(served.index(summary.chunk_id),
                         served.index(detail.chunk_id))
         self.assertEqual(len(result.field_evidence), 1)
+
+
+def _event(
+    *,
+    method=None,
+    date=None,
+    shares=None,
+    matches=True,
+    conflict=False,
+    reporter="가상지주",
+):
+    """One resolved event, in the shape the frozen resolver reports it.
+
+    ``transaction_method`` is populated only for a row that proved its own
+    acquisition, so a snapshot and a disposal both arrive carrying ``None`` --
+    which is what these cases model.
+    """
+
+    return SimpleNamespace(
+        reporter=reporter,
+        transaction_method=method,
+        acquisition_date=date,
+        acquired_shares=shares,
+        matches_query=matches,
+        field_conflict=conflict,
+        field_provenance={},
+    )
+
+
+def _resolution(*events, ambiguity=None):
+    matching = [event for event in events if event.matches_query is True]
+    return SimpleNamespace(
+        events=tuple(events),
+        temporal_ambiguity=(len(matching) > 1) if ambiguity is None else ambiguity,
+        matching_event_count=len(matching),
+    )
+
+
+#: A proven acquisition, as the frozen parser reports one.
+_ACQUIRED = "장내매수(+)"
+#: An increase that explains nothing.  The frozen classifier reports only that
+#: it is not an acquisition, never that it is a disposal.
+_UNEXPLAINED = "기타(+)"
+
+
+class AcquisitionEventSelectionTests(unittest.TestCase):
+    """Which event may answer for an acquisition unit price.
+
+    A filing states a position on the day it was filed and the transactions
+    that moved it on the days they happened, so one filing legitimately yields
+    a snapshot dated later than the acquisition it reports.  Ambiguity between
+    those two is real and the resolver is right to report it -- but a snapshot
+    carries no unit price and was never a rival for this field.
+    """
+
+    def test_a_snapshot_does_not_rival_the_one_acquisition(self) -> None:
+        snapshot = _event()
+        acquisition = _event(method=_ACQUIRED, date="2025-02-05", shares="1,000")
+
+        resolution = _resolution(snapshot, acquisition)
+
+        # The ambiguity the resolver reports is left exactly as it found it.
+        self.assertTrue(resolution.temporal_ambiguity)
+        self.assertIs(_selected_event(resolution), acquisition)
+
+    def test_two_acquisitions_on_different_days_decline(self) -> None:
+        first = _event(method=_ACQUIRED, date="2025-02-03", shares="1,000")
+        second = _event(method=_ACQUIRED, date="2025-02-05", shares="2,000")
+
+        self.assertIsNone(_selected_event(_resolution(_event(), first, second)))
+
+    def test_two_acquisitions_on_one_day_still_decline(self) -> None:
+        """Two events are two events; one date does not make them one."""
+
+        first = _event(method=_ACQUIRED, date="2025-02-05", shares="1,000")
+        second = _event(method=_ACQUIRED, date="2025-02-05", shares="2,000")
+
+        self.assertIsNone(_selected_event(_resolution(first, second)))
+
+    def test_a_disposal_does_not_compete(self) -> None:
+        # The frozen resolver gives a disposal no method at all.
+        disposal = _event()
+        acquisition = _event(method=_ACQUIRED, date="2025-02-05", shares="1,000")
+
+        self.assertIs(_selected_event(_resolution(disposal, acquisition)),
+                      acquisition)
+
+    def test_an_unclassifiable_method_fails_closed(self) -> None:
+        """Not provably an acquisition is not provably harmless either."""
+
+        unexplained = _event(method=_UNEXPLAINED, date="2025-02-04", shares="500")
+        acquisition = _event(method=_ACQUIRED, date="2025-02-05", shares="1,000")
+
+        self.assertIsNone(_selected_event(_resolution(unexplained, acquisition)))
+
+    def test_a_position_only_resolution_declines(self) -> None:
+        self.assertIsNone(_selected_event(_resolution(_event())))
+        self.assertIsNone(_selected_event(_resolution()))
+
+    def test_a_conflicted_acquisition_declines(self) -> None:
+        conflicted = _event(method=_ACQUIRED, date="2025-02-05",
+                            shares="1,000", conflict=True)
+
+        self.assertIsNone(_selected_event(_resolution(conflicted)))
+
+    def test_an_unmatched_acquisition_does_not_compete(self) -> None:
+        unmatched = _event(method=_ACQUIRED, date="2025-02-01",
+                           shares="9,000", matches=False)
+        acquisition = _event(method=_ACQUIRED, date="2025-02-05", shares="1,000")
+
+        self.assertIs(_selected_event(_resolution(unmatched, acquisition)),
+                      acquisition)
+        # ...and alone it answers nothing.
+        self.assertIsNone(_selected_event(_resolution(unmatched)))
+
+    def test_another_holders_event_does_not_compete(self) -> None:
+        """A row the resolver did not match is not a rival for this field."""
+
+        other_holder = _event(method=_ACQUIRED, date="2025-02-05",
+                              shares="8,000", reporter="가상연금",
+                              matches=False)
+        acquisition = _event(method=_ACQUIRED, date="2025-02-05", shares="1,000")
+
+        self.assertIs(_selected_event(_resolution(other_holder, acquisition)),
+                      acquisition)
+
+    def test_ordinary_holding_questions_never_reach_this_producer(self) -> None:
+        """Only the acquisition unit price changed; nothing else asks here."""
+
+        for question in (
+            f"{ISSUER} 보유주식수는?",
+            f"{ISSUER} 보유비율은?",
+            f"{ISSUER} 증감주식수는?",
+            f"{ISSUER} 기준일은?",
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(requested_holding_fields(question), ())
+                self.assertEqual(
+                    holding_field_evidence(
+                        question=question,
+                        resolution=_resolution(
+                            _event(method=_ACQUIRED, date="2025-02-05",
+                                   shares="1,000")
+                        ),
+                        evidence_items=(),
+                    ),
+                    (),
+                )

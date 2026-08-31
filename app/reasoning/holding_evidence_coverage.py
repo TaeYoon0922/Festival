@@ -93,6 +93,24 @@ ANCHOR_MEDIUM = "medium"
 #: Strong outranks medium at the same served anchor.
 _ANCHOR_ORDER = {ANCHOR_STRONG: 0, ANCHOR_MEDIUM: 1}
 
+#: The acquisition lane's own anchor, and only its own.  A detail row's
+#: structural date is the day the shares changed hands; a report projection's
+#: is the day the position was reported, and a real acquisition normally
+#: precedes its own report.  The generic tiers compare those two dates to
+#: decide whether both items describe one event, which is right for completing
+#: a position and wrong here -- it would refuse nearly every acquisition for
+#: being older than the filing that reports it.  Named separately so a trace
+#: never reads an acquisition anchor as a generic one.
+ANCHOR_ACQUISITION_DOCUMENT = "acquisition_document"
+#: Preference within the acquisition lane.  A row that also satisfies a generic
+#: tier keeps saying so; the document anchor is the weakest and the fallback.
+#: Deliberately separate from ``_ANCHOR_ORDER``, which ordinary coverage owns.
+_ACQUISITION_ANCHOR_ORDER = {
+    ANCHOR_STRONG: 0,
+    ANCHOR_MEDIUM: 1,
+    ANCHOR_ACQUISITION_DOCUMENT: 2,
+}
+
 #: Projection labels that describe the holding event itself. A source ref is
 #: only an event anchor when it backs one of these; a ref backing document
 #: metadata such as the holding purpose is shared by every projection of a
@@ -601,21 +619,41 @@ def _acquisition_anchor(
     by_id: Mapping[str, CandidateChunk],
     reporter: str | None,
 ) -> tuple[str, int] | None:
-    """The firmest served item this proof row completes, if any.
+    """The served report this proof row belongs to, if retrieval served one.
 
-    Same anchoring rule the ordinary lane uses, so a proof row reaches the
-    resolver only by completing a document retrieval already served.
+    By the time this is asked, the caller has already proved three things about
+    the candidate: it is an eligible, citable holding projection; its holder
+    *is* the bound reporter on the frozen identity contract; and the frozen
+    parser reads an acquisition out of its own physical row.  What is left to
+    establish is only whether the filing it sits in is one baseline retrieval
+    actually served -- which is exact document identity, and nothing looser.
+    Same-document alone is never the authority here; it is the last of four
+    gates, and the other three are what keep another holder's row out.
+
+    The generic tiers are still preferred when they happen to apply, so a row
+    that really does complete a served item keeps saying so in the trace.  What
+    this no longer does is *require* one: the generic anchor asks whether two
+    items carry the same event date, and a detail row's date is when the shares
+    were acquired while the report's is when the position was reported.
+    Demanding they match would refuse every acquisition that preceded its own
+    filing, which is the ordinary case rather than the exception.
     """
 
     best: tuple[str, int] | None = None
     for result in served:
+        if str(result.doc_id or "") != str(candidate.doc_id or ""):
+            # Another filing is another report's acquisition.
+            continue
         served_chunk = by_id.get(result.chunk_id)
-        if served_chunk is None:
-            continue
-        tier = anchor_tier(candidate.chunk, served_chunk.chunk, reporter)
-        if tier is None:
-            continue
-        if best is None or _ANCHOR_ORDER[tier] < _ANCHOR_ORDER[best[0]]:
+        tier = (
+            anchor_tier(candidate.chunk, served_chunk.chunk, reporter)
+            if served_chunk is not None
+            else None
+        ) or ANCHOR_ACQUISITION_DOCUMENT
+        if (
+            best is None
+            or _ACQUISITION_ANCHOR_ORDER[tier] < _ACQUISITION_ANCHOR_ORDER[best[0]]
+        ):
             best = (tier, result.rank)
     return best
 

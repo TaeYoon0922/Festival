@@ -27,7 +27,11 @@ from app.reasoning.field_evidence import (
     FieldReason,
     FieldStatus,
 )
-from app.reasoning.holding_acquisition import DETAIL_PROJECTION, _cell_text
+from app.reasoning.holding_acquisition import (
+    DETAIL_PROJECTION,
+    _cell_text,
+    classify_transaction_method,
+)
 
 
 #: The one canonical holding field STEP 11-C answers.
@@ -143,31 +147,60 @@ class _Anchor:
         self.row_end = row_end
 
 
-def _selected_event(resolution: Any) -> Any | None:
-    """The one holding event this question is about, or nothing.
+def _is_acquisition_transaction(event: Any) -> bool:
+    """Whether this event is a proven acquisition, on the frozen classifier.
 
-    ``matches_query`` and ``temporal_ambiguity`` are the frozen resolver's own
-    verdict on which event was asked for.  Nothing here re-derives either, and
-    an ambiguity it reported is not resolved by picking one.
+    ``transaction_method`` is populated only from a detail row that proved its
+    own acquisition, so a position snapshot, a disposal and an unexplained
+    increase all arrive here carrying nothing.  The frozen classifier is asked
+    anyway rather than trusting that construction, so the one thing this
+    producer may answer for stays named by the same vocabulary everywhere.
+    """
+
+    method = _text(getattr(event, "transaction_method", None))
+    return bool(method) and classify_transaction_method(method) == "acquisition"
+
+
+def _selected_event(resolution: Any) -> Any | None:
+    """The one acquisition this question is about, or nothing.
+
+    ``matches_query`` is the frozen resolver's verdict on which events the
+    question reaches, and it is not re-derived here.  What this narrows is
+    *which of those* can answer for an acquisition unit price: a filing states
+    a position on the day it was filed and the transactions that moved it on
+    the days they happened, so one filing legitimately yields a snapshot dated
+    later than the acquisition it reports.  The resolver is right to call those
+    two events, and right to report the temporal ambiguity between them -- but a
+    snapshot proves no acquisition and so was never a rival for this field.
+    Ambiguity is therefore measured among the acquisitions themselves.
+
+    Two acquisitions still decline.  So does an event whose method is stated but
+    does not name an acquisition: the classifier reports only that it is not
+    one, never whether it is a disposal that could not compete or something
+    unread that might, and guessing between those is not this producer's to do.
     """
 
     events = tuple(getattr(resolution, "events", ()) or ())
     if not events:
         return None
-    if bool(getattr(resolution, "temporal_ambiguity", False)):
-        return None
     matching = [
         event for event in events
         if getattr(event, "matches_query", None) is True
     ]
-    if len(matching) != 1:
+    if any(
+        _text(getattr(event, "transaction_method", None))
+        and not _is_acquisition_transaction(event)
+        for event in matching
+    ):
+        # Unreachable from the frozen resolver, which populates a method only
+        # for a proven acquisition.  Kept because the safe reading of a method
+        # this producer cannot classify is to answer nothing.
         return None
-    event = matching[0]
+    acquisitions = [event for event in matching if _is_acquisition_transaction(event)]
+    if len(acquisitions) != 1:
+        return None
+    event = acquisitions[0]
     if bool(getattr(event, "field_conflict", False)):
-        return None
-    # Only a row whose own transaction method named an acquisition may answer
-    # for an acquisition unit price.
-    if not _text(getattr(event, "transaction_method", None)):
         return None
     return event
 
