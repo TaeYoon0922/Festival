@@ -381,6 +381,20 @@ class QueryUnderstanding:
             event_type=event_type,
             operation=operation,
         )
+        cross_domain_ratio = _cross_domain_ratio_from_query(
+            raw_query,
+            exchange_aggregate=exchange_aggregate,
+            years=mentioned_years,
+        )
+        if cross_domain_ratio and "periodic" not in routes:
+            routes = tuple(dict.fromkeys((*routes, "periodic")))
+            route_confidence["disclosure_route.periodic"] = max(
+                float(route_confidence.get("disclosure_route.periodic", 0.0)),
+                0.85,
+            )
+            route_evidence["disclosure_route.periodic"] = (
+                "cross_domain_ratio denominator retrieval"
+            )
 
         subtype = extracted["doc_subtype"]
         if not subtype:
@@ -432,6 +446,19 @@ class QueryUnderstanding:
             and period.period_type == "fiscal_year"
             and period.quarter is None
         )
+        section_boosts = _section_boosts(
+            metric,
+            periodic_intent,
+            event_type,
+            segment_ranking=segment_ranking,
+        )
+        if cross_domain_ratio:
+            section_boosts = {
+                **section_boosts,
+                "사업보고서": max(section_boosts.get("사업보고서", 0.0), 0.95),
+                "연결 손익": max(section_boosts.get("연결 손익", 0.0), 0.9),
+                "손익계산서": max(section_boosts.get("손익계산서", 0.0), 0.9),
+            }
         return QueryPlan(
             query=lexical_query,
             raw_query=raw_query,
@@ -450,12 +477,7 @@ class QueryUnderstanding:
             doc_subtype=subtype,
             section_path=section_path,
             date_basis=_date_basis_from_query(raw_query),
-            section_boosts=_section_boosts(
-                metric,
-                periodic_intent,
-                event_type,
-                segment_ranking=segment_ranking,
-            ),
+            section_boosts=section_boosts,
             route_confidence=route_confidence,
             route_evidence=route_evidence,
             top_k=top_k,
@@ -479,6 +501,7 @@ class QueryUnderstanding:
                 "metric_view": metric_view,
                 "derived_metric": derived_metric,
                 "exchange_aggregate": exchange_aggregate,
+                "cross_domain_ratio": cross_domain_ratio,
                 "correction_intent": correction_intent,
                 "correction_intent_evidence": correction_intent_evidence,
                 "comparison_frame": comparison_frame,
@@ -710,6 +733,31 @@ def _exchange_aggregate_from_query(
         else "contract_amount"
     )
     return {"field": field, "ops": ops}
+
+
+def _cross_domain_ratio_from_query(
+    query: str,
+    *,
+    exchange_aggregate: Mapping[str, Any] | None,
+    years: Sequence[int],
+) -> Mapping[str, Any] | None:
+    if not exchange_aggregate:
+        return None
+    compact = re.sub(r"\s+", "", query)
+    if not any(term in compact for term in ("대비", "비율")):
+        return None
+    if not any(term in compact for term in ("매출", "매출액", "영업수익")):
+        return None
+    ops = tuple(exchange_aggregate.get("ops") or ())
+    numerator_op = "average" if "average" in ops else "sum" if "sum" in ops else None
+    if numerator_op is None:
+        return None
+    year = years[-1] if years else None
+    return {
+        "denominator_metric": "매출액",
+        "year": year,
+        "numerator_op": numerator_op,
+    }
 
 
 def _periodic_intent_allowed(

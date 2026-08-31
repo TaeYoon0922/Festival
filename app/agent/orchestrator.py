@@ -15,6 +15,12 @@ from app.reasoning.answer_composer import (
     AnswerSection,
     EvidenceCitation,
 )
+from app.reasoning.cross_domain_ratio import (
+    compute_cross_domain_ratio,
+    cross_domain_config,
+    cross_domain_ratio_requested,
+    cross_domain_ratio_statement,
+)
 from app.reasoning.evidence_builder import EvidenceBuilder, EvidenceItem, EvidenceSet
 from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
@@ -507,13 +513,31 @@ def _compose_general_evidence(
         else ()
     )
     if facts is not None:
-        # Deterministic counts the model must state rather than derive. Placed
-        # first so the set-level claim leads, and absent entirely when P0-C did
-        # not engage -- which keeps every existing draft byte-identical.
+        summary = facts.statement()
+        extra: dict[str, Any] = {}
+        config = cross_domain_config(evidence.query_plan)
+        if (
+            config
+            and facts.aggregate is not None
+            and cross_domain_ratio_requested(evidence.query_plan)
+        ):
+            ratio = compute_cross_domain_ratio(
+                facts.aggregate,
+                config=config,
+                denominator_texts=[
+                    item.evidence_text
+                    for item in {
+                        item.chunk_id: item for item in citation_items
+                    }.values()
+                ],
+            )
+            if ratio is not None:
+                summary = f"{summary} {cross_domain_ratio_statement(ratio)}".strip()
+                extra["cross_domain_ratio"] = ratio.to_dict()
         sections = (
             AnswerSection(
                 title="계약 확인 결과",
-                content={"summary": facts.statement(), **facts.to_dict()},
+                content={"summary": summary, **facts.to_dict(), **extra},
                 supporting_evidence_ids=tuple(
                     item.chunk_id for item in multi_document_items
                 ),

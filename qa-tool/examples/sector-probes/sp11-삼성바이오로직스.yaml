@@ -35,12 +35,11 @@ evidence:
 negative_example: cross-domain ratio 미구현
 
 corpus_sketch: |
-  exchange sum + periodic denominator.
+  exchange sum + periodic denominator via cross_domain_ratio.
 
 related_agent_gaps:
-  - cross_domain_ratio
 
-improve_hint (참고): contract_amount sum / revenue
+improve_hint (참고): cross_domain_ratio (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

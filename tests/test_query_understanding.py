@@ -1547,6 +1547,18 @@ class QaCardRoutingTests(unittest.TestCase):
         )
         self.assertEqual(plan.evidence.get("derived_metric"), "compare_rates")
 
+    def test_sp11_cross_domain_ratio_intent(self) -> None:
+        plan = QueryUnderstanding({"삼성바이오로직스": {"삼성바이오로직스"}}).understand(
+            "삼성바이오로직스 2024년 공시한 단일판매·공급계약 금액 합과 2024 사업보고서 연결 매출액 대비 비율은?"
+        )
+        self.assertEqual(plan.event_type, "supply_contract")
+        self.assertIn("periodic", plan.disclosure_route)
+        ratio = plan.evidence.get("cross_domain_ratio")
+        self.assertIsInstance(ratio, dict)
+        assert isinstance(ratio, dict)
+        self.assertEqual(ratio.get("denominator_metric"), "매출액")
+        self.assertEqual(ratio.get("numerator_op"), "sum")
+
 
 if __name__ == "__main__":
     unittest.main()
