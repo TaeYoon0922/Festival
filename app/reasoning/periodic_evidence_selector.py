@@ -18,6 +18,7 @@ from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactSource,
 )
+from app.reasoning.periodic_derived_metrics import derived_metric_requested
 from app.reasoning.periodic_metric_view import (
     has_exact_metric_row,
     is_income_statement_section,
@@ -225,7 +226,12 @@ def select_periodic_evidence(
                 if is_income_statement_section(row[4].section_path)
             ]
             candidates = income_rows or exact_rows
-            selected_rows = candidates[:1]
+            keep_multi_period = derived_metric_requested(plan) or _is_period_comparison(
+                plan
+            )
+            selected_rows = (
+                candidates[:max_evidence] if keep_multi_period else candidates[:1]
+            )
             warnings_seed = ["periodic_metric_row_preferred"]
         else:
             selected_rows = candidates[:max_evidence]

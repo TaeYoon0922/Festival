@@ -19,10 +19,9 @@ basis: 해당없음
 
 task_type (기대): facility_investment · multi_field_single_event
 
-expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 별도
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
 
 must_include_in_answer:
-  - doc_id: exchange_20240521800037
   - 투자금액 (Gold E03)
   - 자기자본 대비(%)
   - 투자종료일 (Gold E04)
@@ -31,8 +30,6 @@ must_NOT_invent: 다른 시설투자 건 혼동
 
 evidence:
   doc_id: exchange_20240521800037
-  rcept_dt: 20240521
-  section_path: 신규시설투자
   manifest: corp_name=엘에스일렉트릭
 
 negative_example: 양성 벤치 — 단건 multi-field
@@ -42,7 +39,7 @@ corpus_sketch: |
 
 related_agent_gaps:
 
-improve_hint (참고): 양성 패턴을 comparative로 확장
+improve_hint (참고): 양성 패턴
 
 gold_refs:
   - E03

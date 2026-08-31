@@ -1,0 +1,48 @@
+# 7. 보험 · 삼성생명
+
+question_id: SP07
+question: 삼성생명 2024 사업보고서 연결 보험료수익(또는 영업수익)이 전기 대비 얼마나 변했는지 증감률까지
+
+listed_name: 삼성생명
+corp_name: 삼성생명
+
+sector_no: 7
+sector: 보험
+sector_focus: insurance revenue rate
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: manifest 확인 후 보완
+basis: 연결
+
+task_type (기대): periodic · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=삼성생명
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  insurance revenue rate
+
+related_agent_gaps:
+  - insurance revenue rate
+
+improve_hint (참고): insurance revenue rate
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

@@ -1,0 +1,49 @@
+# 3. 로봇·자동화 · 레인보우로보틱스
+
+question_id: SP03
+question: 레인보우로보틱스 2023년 1분기와 2024년 1분기 연결 매출액 중 어느 분기가 더 크고 차이는?
+
+listed_name: 레인보우로보틱스
+corp_name: 레인보우로보틱스
+
+sector_no: 3
+sector: 로봇·자동화
+sector_focus: 분기 매출 비교
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: 분기보고서 Q1 2023 · Q1 2024
+basis: 연결
+
+task_type (기대): periodic_fact · quarter_comparison
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 두 분기 연결 매출액
+  - 차이(파생)
+
+must_NOT_invent: annual 단일행만
+
+evidence:
+  manifest: corp_name=레인보우로보틱스, quarter
+
+negative_example: 단일 분기만
+
+corpus_sketch: |
+  multi-quarter column pick + delta.
+
+related_agent_gaps:
+  - quarter_comparison
+
+improve_hint (참고): period_comparison across quarters
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

@@ -334,6 +334,8 @@ class MultiDocumentPlan:
     #: execution; present so a plan that engaged through a fallback is
     #: identifiable in a trace.
     family_resolution: str | None = None
+    aggregate_field: str | None = None
+    aggregate_ops: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.plan_type).strip():
@@ -415,6 +417,8 @@ class MultiDocumentPlan:
             passes=changes.get("passes", self.passes),
             stop_reason=changes.get("stop_reason", self.stop_reason),
             family_resolution=changes.get("family_resolution", self.family_resolution),
+            aggregate_field=changes.get("aggregate_field", self.aggregate_field),
+            aggregate_ops=changes.get("aggregate_ops", self.aggregate_ops),
         )
 
     def slot(self, slot_id: str) -> EvidenceSlot | None:
@@ -424,7 +428,7 @@ class MultiDocumentPlan:
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "plan_type": self.plan_type,
             "applied": self.applied,
             "family_resolution": self.family_resolution,
@@ -433,6 +437,11 @@ class MultiDocumentPlan:
             "complete": self.complete,
             "stop_reason": self.stop_reason,
         }
+        if self.aggregate_field:
+            payload["aggregate_field"] = self.aggregate_field
+        if self.aggregate_ops:
+            payload["aggregate_ops"] = list(self.aggregate_ops)
+        return payload
 
 
 __all__ = [

@@ -369,6 +369,18 @@ class QueryUnderstanding:
         comparison = _comparison_from_query(
             raw_query, companies, mentioned_years, company_mentions
         )
+        derived_metric = _derived_metric_from_query(
+            raw_query,
+            comparison=comparison,
+            metric_view=metric_view,
+            task_type=task_type,
+            metric=metric,
+        )
+        exchange_aggregate = _exchange_aggregate_from_query(
+            raw_query,
+            event_type=event_type,
+            operation=operation,
+        )
 
         subtype = extracted["doc_subtype"]
         if not subtype:
@@ -465,6 +477,8 @@ class QueryUnderstanding:
                 "segment_ranking": segment_ranking,
                 "segment_ranking_evidence": segment_ranking_evidence,
                 "metric_view": metric_view,
+                "derived_metric": derived_metric,
+                "exchange_aggregate": exchange_aggregate,
                 "correction_intent": correction_intent,
                 "correction_intent_evidence": correction_intent_evidence,
                 "comparison_frame": comparison_frame,
@@ -633,6 +647,69 @@ def _metric_view_from_query(query: str) -> str | None:
     if any(term in compact for term in ("매출", "영업", "수익", "재화", "용역")):
         return "breakdown"
     return None
+
+
+def _derived_metric_from_query(
+    query: str,
+    *,
+    comparison: Mapping[str, Any] | None,
+    metric_view: str | None,
+    task_type: str,
+    metric: str | None,
+) -> str | None:
+    if task_type != "financial_metric":
+        return None
+    compact = re.sub(r"\s+", "", query)
+    if "%p" in compact or "몇%p" in compact:
+        if metric_view == "breakdown" or any(
+            term in compact for term in ("국내", "해외", "비중")
+        ):
+            return "delta_pp"
+        if "영업이익률" in compact or "÷" in compact:
+            return "ratio"
+    if any(term in compact for term in ("증가율", "증감률", "감소율")):
+        if sum(term in compact for term in ("매출", "영업이익")) >= 2 and any(
+            term in compact for term in ("더 높", "더큰", "어느쪽")
+        ):
+            return "compare_rates"
+        return "rate"
+    if metric_view == "breakdown":
+        return "breakdown_share"
+    if "영업이익률" in compact and "÷" in compact:
+        return "ratio"
+    if isinstance(comparison, Mapping) and comparison.get("type") in {
+        "period_comparison",
+        "year_over_year",
+    }:
+        if "률" in compact and metric:
+            return "rate"
+    return None
+
+
+def _exchange_aggregate_from_query(
+    query: str,
+    *,
+    event_type: str | None,
+    operation: str,
+) -> Mapping[str, Any] | None:
+    compact = re.sub(r"\s+", "", query)
+    if event_type not in {"supply_contract", "facility_investment"}:
+        return None
+    ops: list[str] = []
+    if any(term in compact for term in ("합계", "총액", "총합")):
+        ops.append("sum")
+    if any(term in compact for term in ("평균", "건당")):
+        ops.append("average")
+    if any(term in compact for term in ("건수", "몇건", "몇건")):
+        ops.append("count")
+    if not ops:
+        return None
+    field = (
+        "investment_amount"
+        if event_type == "facility_investment"
+        else "contract_amount"
+    )
+    return {"field": field, "ops": ops}
 
 
 def _periodic_intent_allowed(
@@ -1388,7 +1465,7 @@ def _operation_from_query(
             return "find_terminated"
         if any(
             term in compact
-            for term in ("몇건", "몇개", "모두", "전체", "목록", "나열")
+            for term in ("몇건", "몇개", "모두", "전체", "목록", "나열", "건수", "건당", "합계", "총액", "평균")
         ):
             return "enumerate"
         return "inspect_event"

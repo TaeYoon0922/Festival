@@ -1,0 +1,51 @@
+# 8. IT·플랫폼 · NAVER
+
+question_id: SP08
+question: NAVER 2023·2024 사업보고서 연결 영업이익을 비교해, 매출액 증가율과 영업이익 증가율 중 어느 쪽이 더 높아?
+
+listed_name: NAVER
+corp_name: NAVER
+
+sector_no: 8
+sector: IT·플랫폼
+sector_focus: dual growth-rate compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_doc  # 복수문서
+
+doc_group: periodic
+report_nm · period: 사업보고서 2023·2024
+basis: 연결
+
+task_type (기대): financial_metric · derived_metric · compare_rates
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 매출 증가율(파생)
+  - 영업이익 증가율(파생)
+  - 더 큰 쪽
+
+must_NOT_invent: 단일 지표만
+
+evidence:
+  section_path: 연결 손익계산서
+
+negative_example: compare_rates 미구현
+
+corpus_sketch: |
+  periodic_derived_metrics compare_rates.
+
+related_agent_gaps:
+  - compare_rates
+
+improve_hint (참고): derived_metric(compare_rates)
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

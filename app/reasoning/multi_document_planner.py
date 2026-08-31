@@ -57,6 +57,7 @@ _EVENT_TYPE_TO_FAMILY = {
     "contract_termination": "supply_contract",
     "treasury_share_trust_contract": "treasury_trust_contract",
     "treasury_share_trust_termination": "treasury_trust_contract",
+    "facility_investment": "facility_investment",
 }
 
 #: The disclosure metadata each family occupies, for the Tier 2 receipt-date
@@ -64,6 +65,7 @@ _EVENT_TYPE_TO_FAMILY = {
 _FAMILY_DOCUMENTS = {
     "supply_contract": ("exchange", "단일판매공급계약체결"),
     "treasury_trust_contract": ("major", None),
+    "facility_investment": ("exchange", "신규시설투자등"),
 }
 
 #: Ways a question asks for a *set* rather than a value.  Aggregation words are
@@ -84,13 +86,15 @@ _SET_INTENT_MARKERS = (
 _LIFECYCLE_MARKERS = ("해지", "종료", "취소")
 _EXISTENTIAL_MARKERS = ("있는가", "있나", "존재하는가", "존재하나", "있습니까", "없는가")
 
-#: Arithmetic P0-C v1 does not do.  These are recognized only so the planner can
-#: decline explicitly instead of enumerating and calling the result complete.
-#: A typed numeric fact layer is a separate step.
-_CALCULATION_MARKERS = (
-    "합계", "총액", "총합", "평균", "증감률", "증가율", "감소율",
+#: Field aggregation over an enumerated exchange set (sum / average).
+_AGGREGATION_MARKERS = ("합계", "총액", "총합", "평균", "건당")
+
+#: Ranking and growth intents P0-C still declines -- periodic derived compute
+#: handles financial_metric growth elsewhere.
+_COMPARATIVE_RANKING_MARKERS = (
     "더 큰", "더 작은", "가장 큰", "가장 작은", "최댓값", "최솟값",
 )
+_GROWTH_RATE_MARKERS = ("증감률", "증가율", "감소율")
 
 #: A question naming a contract without naming its family.  The official
 #: reference question ("2025년에 체결한 주요 계약") is exactly this shape.
@@ -148,13 +152,16 @@ class MultiDocumentPlanner:
     def plan(self, question: str, query_plan: Any) -> MultiDocumentPlan:
         text = _question_text(question, query_plan)
 
-        # Arithmetic is checked first: an aggregation question may well name a
-        # company, a family, and a year, and enumerating it would produce a
-        # confidently complete plan for a question P0-C cannot answer.
-        if _matches(text, _CALCULATION_MARKERS):
+        if _matches(text, _COMPARATIVE_RANKING_MARKERS):
+            return _declined(REASON_UNSUPPORTED_CALCULATION)
+        if _matches(text, _GROWTH_RATE_MARKERS) and getattr(
+            query_plan, "task_type", ""
+        ) != "financial_metric":
             return _declined(REASON_UNSUPPORTED_CALCULATION)
 
         intent = self._intent(text)
+        if intent is None and _aggregation_enables_enumeration(text, query_plan):
+            intent = MultiDocumentIntent.ENUMERATION
         if intent is None:
             return _declined(REASON_NO_SET_INTENT)
 
@@ -163,10 +170,13 @@ class MultiDocumentPlanner:
             return _declined(definition.reason)
 
         slots = self._slots(definition, intent)
+        aggregate_field, aggregate_ops = _aggregate_metadata(text, query_plan)
         return MultiDocumentPlan(
             plan_type=intent.value,
             slots=slots,
             family_resolution=definition.family_resolution,
+            aggregate_field=aggregate_field,
+            aggregate_ops=aggregate_ops,
         )
 
     # ------------------------------------------------------------------ intent
@@ -269,7 +279,9 @@ class MultiDocumentPlanner:
     def _slots(
         self, definition: _SetDefinition, intent: MultiDocumentIntent
     ) -> tuple[EvidenceSlot, ...]:
-        receipt = definition.date_basis is DateBasis.RECEIPT_DATE
+        receipt = definition.date_basis is DateBasis.RECEIPT_DATE or (
+            definition.event_family == "facility_investment"
+        )
         if receipt:
             # The receipt axis lives on ``disclosures``; the event timeline has
             # no receipt date of its own, so this is a Tier 2 plan even for a
@@ -321,6 +333,46 @@ def _question_text(question: str, query_plan: Any) -> str:
 
 def _matches(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
+
+
+def _aggregation_enables_enumeration(text: str, query_plan: Any) -> bool:
+    if not _matches(text, _AGGREGATION_MARKERS) and not _matches(
+        text, ("건수", "몇건", "몇 건", "건당")
+    ):
+        return False
+    event_type = str(getattr(query_plan, "event_type", "") or "")
+    if event_type in {"supply_contract", "facility_investment"}:
+        return True
+    if _matches(text, _BARE_CONTRACT_MARKERS):
+        return True
+    if _matches(text, ("건수", "몇건", "몇 건", "건당")):
+        return True
+    return False
+
+
+def _aggregate_metadata(
+    text: str, query_plan: Any
+) -> tuple[str | None, tuple[str, ...]]:
+    if not _matches(text, _AGGREGATION_MARKERS) and not _matches(
+        text, ("건수", "몇건", "몇 건", "건당")
+    ):
+        return None, ()
+    ops: list[str] = []
+    if _matches(text, ("합계", "총액", "총합")):
+        ops.append("sum")
+    if _matches(text, ("평균", "건당")):
+        ops.append("average")
+    if _matches(text, ("건수", "몇건", "몇 건")):
+        ops.append("count")
+    if not ops:
+        return None, ()
+    event_type = str(getattr(query_plan, "event_type", "") or "")
+    field = (
+        "investment_amount"
+        if event_type == "facility_investment"
+        else "contract_amount"
+    )
+    return field, tuple(dict.fromkeys(ops))
 
 
 def _declined(reason: str) -> MultiDocumentPlan:

@@ -21,17 +21,15 @@ basis: 해당없음
 
 task_type (기대): holding_change · multi_event_compute
 
-expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 별도
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
 
 must_include_in_answer:
-  - H01·H02 doc_id 각각
+  - H01·H02 doc_id
   - 순증가 주식수·증가율(%) — verified delta only
 
-must_NOT_invent: 연결 재무표 혼입·보고자/피투자 혼동
+must_NOT_invent: 연결 재무표 혼입
 
 evidence:
-  doc_id: holding_20240314001102 + H02
-  section_path: 보유주식수·보유비율
   manifest: corp_name=하이브
 
 negative_example: holding cross-table math

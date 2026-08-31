@@ -1,0 +1,48 @@
+# 6. 비철금속 · 고려아연
+
+question_id: SP06
+question: 고려아연 최근 신규시설투자 공시의 투자금액은 자기자본 대비 몇 %이고, 직전 시설투자 공시 대비 금액이 커졌어?
+
+listed_name: 고려아연
+corp_name: 고려아연
+
+sector_no: 6
+sector: 비철금속
+sector_focus: facility compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: exchange
+report_nm · period: manifest 확인 후 보완
+basis: 해당없음
+
+task_type (기대): exchange · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=고려아연
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  facility compare
+
+related_agent_gaps:
+  - facility compare
+
+improve_hint (참고): facility compare
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

@@ -13,8 +13,14 @@ own: the ids come from Step 4 and the filings come from the P0-B public API.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
+
+from app.reasoning.exchange_field_aggregate import (
+    ExchangeFieldAggregate,
+    aggregate_exchange_amounts,
+    aggregate_statement,
+)
 
 from app.reasoning.multi_document_plan import SlotStatus, SlotType
 from app.retrieval.interfaces import (
@@ -75,6 +81,9 @@ class MultiDocumentFacts:
     lifecycle_answer: str | None = None
     family_resolution: str | None = None
     stop_reason: str | None = None
+    aggregate_field: str | None = None
+    aggregate_ops: tuple[str, ...] = ()
+    aggregate: ExchangeFieldAggregate | None = None
 
     def statement(self) -> str:
         """The deterministic sentence the answer states, in Korean.
@@ -84,6 +93,11 @@ class MultiDocumentFacts:
         other: "checked and found none" and "could not finish checking" are
         different claims, and only the first may be phrased as a negative.
         """
+
+        if self.aggregate is not None:
+            aggregate_text = aggregate_statement(self.to_dict(), self.aggregate)
+            if aggregate_text:
+                return aggregate_text
 
         count = self.logical_count
         unresolved = self.unresolved_count
@@ -137,6 +151,12 @@ class MultiDocumentFacts:
             payload["family_resolution"] = self.family_resolution
         if self.stop_reason:
             payload["stop_reason"] = self.stop_reason
+        if self.aggregate_field:
+            payload["aggregate_field"] = self.aggregate_field
+        if self.aggregate_ops:
+            payload["aggregate_ops"] = list(self.aggregate_ops)
+        if self.aggregate is not None:
+            payload["aggregate"] = self.aggregate.to_dict()
         return payload
 
 
@@ -234,6 +254,8 @@ def build_facts(execution: Any) -> MultiDocumentFacts:
         lifecycle_answer=answer,
         family_resolution=plan.family_resolution,
         stop_reason=plan.stop_reason,
+        aggregate_field=getattr(plan, "aggregate_field", None),
+        aggregate_ops=tuple(getattr(plan, "aggregate_ops", ()) or ()),
     )
 
 
@@ -281,6 +303,7 @@ class MultiDocumentEvidenceBuilder:
         chunks, results = self._select_chunks(
             documents, plan=plan, start_rank=start_rank, execution=execution
         )
+        facts = self._attach_aggregate(facts, execution, chunks)
         return MultiDocumentEvidence(
             facts=facts,
             execution=execution,
@@ -289,7 +312,28 @@ class MultiDocumentEvidenceBuilder:
             added_doc_ids=tuple(document.doc_id for document in documents),
         )
 
-    # ------------------------------------------------------------- selection
+    def _attach_aggregate(
+        self,
+        facts: MultiDocumentFacts,
+        execution: Any,
+        chunks: Sequence[CandidateChunk],
+    ) -> MultiDocumentFacts:
+        plan = execution.plan
+        aggregate_ops = tuple(getattr(plan, "aggregate_ops", ()) or ())
+        if not aggregate_ops or "sum" not in aggregate_ops and "average" not in aggregate_ops:
+            return facts
+        field = getattr(plan, "aggregate_field", None) or "contract_amount"
+        seen_docs: set[str] = set()
+        texts: list[str] = []
+        for chunk in chunks:
+            doc_id = str(getattr(chunk, "doc_id", "") or "")
+            if doc_id and doc_id in seen_docs:
+                continue
+            if doc_id:
+                seen_docs.add(doc_id)
+            texts.append(str(getattr(chunk, "chunk", "") or ""))
+        aggregate = aggregate_exchange_amounts(texts, field, ops=aggregate_ops)
+        return replace(facts, aggregate=aggregate)
 
     def _ordered_doc_ids(self, execution: Any) -> list[str]:
         """Answer-critical filings first, then representative members.

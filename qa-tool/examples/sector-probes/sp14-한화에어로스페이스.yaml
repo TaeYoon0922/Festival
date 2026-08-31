@@ -1,0 +1,48 @@
+# 14. 방산 · 한화에어로스페이스
+
+question_id: SP14
+question: 한화에어로스페이스 2023년 호주 레드백 우선협상 수량과 2024년 공시 수주 계약 중 수량이 더 큰 건은?
+
+listed_name: 한화에어로스페이스
+corp_name: 한화에어로스페이스
+
+sector_no: 14
+sector: 방산
+sector_focus: order qty compare
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: exchange
+report_nm · period: manifest 확인 후 보완
+basis: 해당없음
+
+task_type (기대): exchange · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=한화에어로스페이스
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  order qty compare
+
+related_agent_gaps:
+  - order qty compare
+
+improve_hint (참고): order qty compare
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

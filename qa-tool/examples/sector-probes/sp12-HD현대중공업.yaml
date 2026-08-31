@@ -1,0 +1,48 @@
+# 12. 조선 · HD현대중공업
+
+question_id: SP12
+question: HD현대중공업 2025 사업보고서에서 수주잔고(또는 수주실적) 전기 대비 증감액과 증감률
+
+listed_name: HD현대중공업
+corp_name: HD현대중공업
+
+sector_no: 12
+sector: 조선
+sector_focus: order backlog delta
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: manifest 확인 후 보완
+basis: 연결
+
+task_type (기대): periodic · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=HD현대중공업
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  order backlog delta
+
+related_agent_gaps:
+  - order backlog delta
+
+improve_hint (참고): order backlog delta
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

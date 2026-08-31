@@ -1,0 +1,48 @@
+# 9. 통신 · SK텔레콤
+
+question_id: SP09
+question: SK텔레콤 2024년 1·2·3분기 연결 매출액 추이에서 가장 높은 분기와 최저 분기 차이는?
+
+listed_name: SK텔레콤
+corp_name: SK텔레콤
+
+sector_no: 9
+sector: 통신
+sector_focus: quarter timeseries
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: manifest 확인 후 보완
+basis: 연결
+
+task_type (기대): periodic · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=SK텔레콤
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  quarter timeseries
+
+related_agent_gaps:
+  - quarter timeseries
+
+improve_hint (참고): quarter timeseries
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

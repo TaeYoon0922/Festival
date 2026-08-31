@@ -1,0 +1,48 @@
+# 5. 철강 · POSCO홀딩스
+
+question_id: SP05
+question: POSCO홀딩스 2024 사업보고서 연결 부채총계와 자본총계로 부채비율(부채÷자본)을 전기·당기 각각 계산해줘
+
+listed_name: POSCO홀딩스
+corp_name: POSCO홀딩스
+
+sector_no: 5
+sector: 철강
+sector_focus: 부채비율 ratio
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: manifest 확인 후 보완
+basis: 연결
+
+task_type (기대): periodic · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=POSCO홀딩스
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  부채비율 ratio
+
+related_agent_gaps:
+  - 부채비율 ratio
+
+improve_hint (참고): 부채비율 ratio
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

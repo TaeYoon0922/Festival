@@ -1,0 +1,50 @@
+# 4. 2차전지 · LG에너지솔루션
+
+question_id: SP04
+question: LG에너지솔루션 2024년과 2025년에 공시한 신규시설투자 금액 합계를 비교하고, 2025년 합계가 자기자본 대비 더 큰지?
+
+listed_name: LG에너지솔루션
+corp_name: LG에너지솔루션
+
+sector_no: 4
+sector: 2차전지
+sector_focus: exchange 시설투자 집계
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+  - multi_doc  # 복수문서
+
+doc_group: exchange
+report_nm · period: 신규시설투자등 · FY2024·FY2025
+basis: 해당없음
+
+task_type (기대): facility_investment · exchange_aggregate · compare
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 2024·2025 투자금액 합계(파생)
+  - 자기자본 대비(%) per filing
+
+must_NOT_invent: 단일 시설투자 건만
+
+evidence:
+  manifest: corp_name=LG에너지솔루션, doc_subtype=신규시설투자등
+
+negative_example: 합계 미집계
+
+corpus_sketch: |
+  P0-C enumeration + investment_amount sum.
+
+related_agent_gaps:
+  - cross-year aggregate
+
+improve_hint (참고): exchange_field_aggregate
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

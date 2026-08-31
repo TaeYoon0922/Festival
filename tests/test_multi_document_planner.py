@@ -298,14 +298,17 @@ class UnsupportedCalculationTests(_PlannerCase):
     """§22 -- recognized so the planner declines explicitly, never enumerates
     and calls an arithmetic question complete."""
 
-    def test_sum_declines(self) -> None:
+    def test_sum_engages_with_bare_contract_fallback(self) -> None:
         plan = self.plan_for("삼성중공업이 2025년에 체결한 계약의 총액은 얼마인가?")
-        self.assertFalse(plan.applied)
-        self.assertEqual(plan.stop_reason, REASON_UNSUPPORTED_CALCULATION)
+        self.assertTrue(plan.applied)
+        self.assertIn("sum", plan.aggregate_ops)
 
-    def test_average_declines(self) -> None:
-        plan = self.plan_for("삼성중공업이 2025년에 체결한 계약금액의 평균은?")
-        self.assertEqual(plan.stop_reason, REASON_UNSUPPORTED_CALCULATION)
+    def test_average_engages_with_supply_contract(self) -> None:
+        plan = self.plan_for(
+            "삼성중공업 2025년에 공시한 공급계약 건당 평균 계약금액은?"
+        )
+        self.assertTrue(plan.applied)
+        self.assertIn("average", plan.aggregate_ops)
 
     def test_cross_company_comparison_declines(self) -> None:
         plan = self.plan_for(

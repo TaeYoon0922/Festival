@@ -1,0 +1,50 @@
+# 15. 소비재 · 아모레퍼시픽
+
+question_id: SP15
+question: 아모레퍼시픽 2024 사업보고서 국내 vs 해외 매출 비중(%)을 계산하고, 전기 대비 해외 비중이 몇 %p 늘었는지
+
+listed_name: 아모레퍼시픽
+corp_name: 아모레퍼시픽
+
+sector_no: 15
+sector: 소비재
+sector_focus: 국내/해외 비중·%p
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: 사업보고서 (2024.12)
+basis: 연결
+
+task_type (기대): financial_metric · breakdown_share · delta_pp
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 국내·해외 비중(파생)
+  - 해외 비중 %p 변화(파생)
+
+must_NOT_invent: 총매출 단일행만
+
+evidence:
+  section_path: 매출 구분/지역별
+
+negative_example: breakdown_share 미구현
+
+corpus_sketch: |
+  metric_view=breakdown + delta_pp.
+
+related_agent_gaps:
+  - breakdown_share
+  - delta_pp
+
+improve_hint (참고): periodic_derived_metrics
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

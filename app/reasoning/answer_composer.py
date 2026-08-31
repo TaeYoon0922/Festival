@@ -384,6 +384,7 @@ def _periodic_request(query_plan: Mapping[str, Any] | None) -> dict[str, Any]:
         "raw_query": plan.get("raw_query"),
         "segment_ranking": bool(evidence.get("segment_ranking")),
         "metric_view": evidence.get("metric_view"),
+        "derived_metric": evidence.get("derived_metric"),
         "evidence": copy.deepcopy(evidence),
     }
 

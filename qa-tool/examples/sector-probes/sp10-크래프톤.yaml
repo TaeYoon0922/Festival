@@ -1,0 +1,48 @@
+# 10. 게임 · 크래프톤
+
+question_id: SP10
+question: 크래프톤 2024년 4개 분기 연결 영업이익 합계와 2024 사업보고서 연결 영업이익이 같은지, 차이 있으면 얼마야?
+
+listed_name: 크래프톤
+corp_name: 크래프톤
+
+sector_no: 10
+sector: 게임
+sector_focus: quarter sum vs annual
+
+reasoning_types:
+  - compare  # 비교
+  - compute  # 연산
+
+doc_group: periodic
+report_nm · period: manifest 확인 후 보완
+basis: 연결
+
+task_type (기대): periodic · complex_reasoning
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - must_include·doc_id는 corpus 확인 후 보완
+
+must_NOT_invent: 코퍼스 밖 invent
+
+evidence:
+  manifest: corp_name=크래프톤
+
+negative_example: partial / answerable_false 변형 병행
+
+corpus_sketch: |
+  quarter sum vs annual
+
+related_agent_gaps:
+  - quarter sum vs annual
+
+improve_hint (참고): quarter sum vs annual
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

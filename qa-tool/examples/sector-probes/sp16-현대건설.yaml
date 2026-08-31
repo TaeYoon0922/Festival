@@ -1,0 +1,49 @@
+# 16. 건설 · 현대건설
+
+question_id: SP16
+question: 현대건설 2024년 exchange 공급계약 공시 건수와 2024 연결 매출액 대비, 건당 평균 계약금액은?
+
+listed_name: 현대건설
+corp_name: 현대건설
+
+sector_no: 16
+sector: 건설
+sector_focus: 공급계약 건수·평균
+
+reasoning_types:
+  - compute  # 연산
+  - multi_doc  # 복수문서
+
+doc_group: exchange+periodic
+report_nm · period: exchange 2024 + annual 2024
+basis: 연결
+
+task_type (기대): supply_contract · exchange_aggregate · average
+
+expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 건수
+  - 건당 평균 계약금액(파생)
+
+must_NOT_invent: 단일 계약만
+
+evidence:
+  manifest: exchange supply_contract 2024
+
+negative_example: count without average
+
+corpus_sketch: |
+  P0-C count + contract_amount average.
+
+related_agent_gaps:
+  - average
+
+improve_hint (참고): exchange_field_aggregate average
+
+related_pipeline (taeyoon):
+  - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)
+  - clarification → think_trace.query_understanding (P0-D)
+
+notes: |
+  공시 확인 후 must_include·doc_id 보완.

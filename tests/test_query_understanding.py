@@ -1531,6 +1531,22 @@ class QaCardRoutingTests(unittest.TestCase):
         self.assertTrue(plan.evidence.get("segment_ranking"))
         self.assertIn("사업부문", plan.section_boosts)
 
+    def test_sp16_exchange_aggregate_intent(self) -> None:
+        plan = QueryUnderstanding({"현대건설": {"현대건설"}}).understand(
+            "현대건설 2024년 exchange 공급계약 공시 건수와 2024 연결 매출액 대비, 건당 평균 계약금액은?"
+        )
+        self.assertEqual(plan.event_type, "supply_contract")
+        aggregate = plan.evidence.get("exchange_aggregate")
+        self.assertIsInstance(aggregate, dict)
+        assert isinstance(aggregate, dict)
+        self.assertIn("average", aggregate.get("ops", []))
+
+    def test_sp08_derived_compare_rates(self) -> None:
+        plan = QueryUnderstanding({"NAVER": {"NAVER"}}).understand(
+            "NAVER 2023·2024 사업보고서 연결 영업이익을 비교해, 매출액 증가율과 영업이익 증가율 중 어느 쪽이 더 높아?"
+        )
+        self.assertEqual(plan.evidence.get("derived_metric"), "compare_rates")
+
 
 if __name__ == "__main__":
     unittest.main()
