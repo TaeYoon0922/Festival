@@ -317,7 +317,7 @@ class MultiDocumentEvidenceBuilder:
         chunks, results = self._select_chunks(
             documents, plan=plan, start_rank=start_rank, execution=execution
         )
-        facts = self._attach_aggregate(facts, execution, chunks)
+        facts = self._attach_aggregate(facts, execution, chunks, plan=plan)
         facts = self._attach_recent_pair(facts, execution, chunks, plan=plan)
         return MultiDocumentEvidence(
             facts=facts,
@@ -332,12 +332,27 @@ class MultiDocumentEvidenceBuilder:
         facts: MultiDocumentFacts,
         execution: Any,
         chunks: Sequence[CandidateChunk],
+        *,
+        plan: Any = None,
     ) -> MultiDocumentFacts:
-        plan = execution.plan
-        aggregate_ops = tuple(getattr(plan, "aggregate_ops", ()) or ())
-        if not aggregate_ops or "sum" not in aggregate_ops and "average" not in aggregate_ops:
+        active_plan = plan or execution.plan
+        execution_plan = execution.plan
+        aggregate_ops = tuple(getattr(execution_plan, "aggregate_ops", ()) or ())
+        if not aggregate_ops or not any(
+            op in aggregate_ops for op in ("sum", "average", "max")
+        ):
             return facts
-        field = getattr(plan, "aggregate_field", None) or "contract_amount"
+        field = getattr(execution_plan, "aggregate_field", None) or "contract_amount"
+        evidence = getattr(active_plan, "evidence", None)
+        if not isinstance(evidence, dict):
+            evidence = {}
+        year_compare = evidence.get("exchange_year_compare") or {}
+        quantity_compare = evidence.get("exchange_quantity_compare") or {}
+        include_equity_ratio = bool(
+            isinstance(year_compare, dict) and year_compare.get("equity_compare")
+        )
+        if isinstance(quantity_compare, dict) and quantity_compare.get("field"):
+            field = str(quantity_compare["field"])
         seen_docs: set[str] = set()
         texts: list[str] = []
         doc_ids: list[str] = []
@@ -354,7 +369,8 @@ class MultiDocumentEvidenceBuilder:
             field,
             ops=aggregate_ops,
             doc_ids=doc_ids,
-            years=tuple(getattr(plan, "aggregate_years", ()) or ()),
+            years=tuple(getattr(execution_plan, "aggregate_years", ()) or ()),
+            include_equity_ratio=include_equity_ratio,
         )
         return replace(facts, aggregate=aggregate)
 

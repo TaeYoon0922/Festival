@@ -162,6 +162,8 @@ class MultiDocumentPlanner:
         intent = self._intent(text)
         if intent is None and _recent_pair_enables_enumeration(query_plan):
             intent = MultiDocumentIntent.ENUMERATION
+        if intent is None and _quantity_compare_enables_enumeration(query_plan):
+            intent = MultiDocumentIntent.ENUMERATION
         if intent is None and _aggregation_enables_enumeration(text, query_plan):
             intent = MultiDocumentIntent.ENUMERATION
         if intent is None:
@@ -173,6 +175,10 @@ class MultiDocumentPlanner:
 
         slots = self._slots(definition, intent)
         aggregate_field, aggregate_ops = _aggregate_metadata(text, query_plan)
+        quantity_field = _quantity_compare_field(query_plan)
+        if quantity_field:
+            aggregate_field = quantity_field
+            aggregate_ops = tuple(dict.fromkeys((*aggregate_ops, "max")))
         recent_pair_limit = _recent_pair_limit(query_plan)
         recent_pair_equity_ratio = _recent_pair_equity_ratio(query_plan)
         aggregate_years = _aggregate_years(query_plan)
@@ -397,7 +403,8 @@ def _multi_year_exchange_range(query_plan: Any) -> tuple[str | None, str | None]
     if not isinstance(evidence, dict):
         return None, None
     if not evidence.get("exchange_aggregate") and not evidence.get("exchange_year_compare"):
-        return None, None
+        if not evidence.get("exchange_quantity_compare"):
+            return None, None
     years = evidence.get("mentioned_years") or list(getattr(query_plan, "years", ()) or ())
     if not isinstance(years, list):
         years = list(years)
@@ -414,22 +421,43 @@ def _aggregate_years(query_plan: Any) -> tuple[int, ...]:
     evidence = getattr(query_plan, "evidence", None) or {}
     if not isinstance(evidence, dict):
         return ()
-    year_compare = evidence.get("exchange_year_compare")
-    if not isinstance(year_compare, dict):
-        return ()
-    years = year_compare.get("years") or []
-    parsed: list[int] = []
-    for value in years:
-        try:
-            parsed.append(int(value))
-        except (TypeError, ValueError):
+    for key in ("exchange_year_compare", "exchange_quantity_compare"):
+        year_compare = evidence.get(key)
+        if not isinstance(year_compare, dict):
             continue
-    return tuple(sorted(set(parsed)))
+        years = year_compare.get("years") or []
+        parsed: list[int] = []
+        for value in years:
+            try:
+                parsed.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if parsed:
+            return tuple(sorted(set(parsed)))
+    return ()
+
+
+def _quantity_compare_enables_enumeration(query_plan: Any) -> bool:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict):
+        return False
+    return bool(evidence.get("exchange_quantity_compare"))
+
+
+def _quantity_compare_field(query_plan: Any) -> str | None:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict):
+        return None
+    quantity_compare = evidence.get("exchange_quantity_compare")
+    if not isinstance(quantity_compare, dict):
+        return None
+    field = quantity_compare.get("field")
+    return str(field) if field else None
 
 
 def _aggregation_enables_enumeration(text: str, query_plan: Any) -> bool:
     if not _matches(text, _AGGREGATION_MARKERS) and not _matches(
-        text, ("건수", "몇건", "몇 건", "건당")
+        text, ("건수", "몇건", "몇 건", "건당", "최대", "최고")
     ):
         return False
     event_type = str(getattr(query_plan, "event_type", "") or "")
@@ -446,7 +474,7 @@ def _aggregate_metadata(
     text: str, query_plan: Any
 ) -> tuple[str | None, tuple[str, ...]]:
     if not _matches(text, _AGGREGATION_MARKERS) and not _matches(
-        text, ("건수", "몇건", "몇 건", "건당")
+        text, ("건수", "몇건", "몇 건", "건당", "최대", "최고")
     ):
         return None, ()
     ops: list[str] = []
@@ -456,6 +484,8 @@ def _aggregate_metadata(
         ops.append("average")
     if _matches(text, ("건수", "몇건", "몇 건")):
         ops.append("count")
+    if _matches(text, ("최대", "최고")):
+        ops.append("max")
     if not ops:
         return None, ()
     event_type = str(getattr(query_plan, "event_type", "") or "")

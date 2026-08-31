@@ -57,6 +57,14 @@ def project_derived_metric_display(
         return None
     if kind == "balance_ratio":
         return _append_balance_sheet_ratio(text)
+    if kind == "segment_rate":
+        return _append_segment_rate(text, raw_query=raw_query, metric=metric)
+    if kind == "quarter_timeseries":
+        return _append_quarter_timeseries(text, raw_query=raw_query, metric=metric)
+    if kind == "quarter_sum_vs_annual":
+        return _append_quarter_sum_vs_annual(text, raw_query=raw_query, metric=metric)
+    if kind == "sign_flip":
+        return _append_sign_flip(text, metric=metric)
     fallback = _metric_fallback(request)
     base = project_periodic_metric_table(
         text,
@@ -235,6 +243,149 @@ def _append_compare_rates(
 
 def _append_breakdown_delta_pp(table: str, *, raw_query: str | None) -> str | None:
     return _append_breakdown_share(table, raw_query=raw_query)
+
+
+def _append_sign_flip(table: str, *, metric: str | None) -> str | None:
+    values = _metric_row_values(table)
+    if len(values) < 2:
+        return None
+    old_value, new_value = values[-2], values[-1]
+    old_label = _sign_label(old_value)
+    new_label = _sign_label(new_value)
+    if old_label == new_label:
+        verdict = f"{new_label} 지속"
+    elif old_label == "적자" and new_label == "흑자":
+        verdict = "흑자 전환"
+    elif old_label == "흑자" and new_label == "적자":
+        verdict = "적자 전환"
+    else:
+        verdict = f"{old_label} → {new_label}"
+    label = metric or "당기순이익"
+    return (
+        f"{table}\n"
+        f"({label} 부호(파생): 전기 {_format_amount(old_value)}({old_label}) · "
+        f"당기 {_format_amount(new_value)}({new_label}) · 판정: {verdict})"
+    )
+
+
+def _sign_label(value: float) -> str:
+    if value > 0:
+        return "흑자"
+    if value < 0:
+        return "적자"
+    return "0"
+
+
+def _segment_labels_from_query(raw_query: str | None) -> list[str]:
+    if not raw_query:
+        return []
+    match = re.search(r"([^(]+)\(또는([^)]+)\)", raw_query)
+    if not match:
+        return []
+    return [
+        re.sub(r"\s+", "", match.group(1)).casefold(),
+        re.sub(r"\s+", "", match.group(2)).casefold(),
+    ]
+
+
+def _append_segment_rate(
+    table: str,
+    *,
+    raw_query: str | None,
+    metric: str | None,
+) -> str | None:
+    labels = _segment_labels_from_query(raw_query)
+    rows = _data_rows(table)
+    if not rows:
+        return None
+    for row in rows:
+        row_label = re.sub(r"\s+", "", row[0]).casefold()
+        if labels and not any(label in row_label for label in labels):
+            continue
+        values = [
+            value
+            for value in (_parse_amount(cell) for cell in row[1:])
+            if value is not None
+        ]
+        if len(values) < 2:
+            continue
+        rate = _pct_change(values[-2], values[-1])
+        if rate is None:
+            continue
+        label = metric or row[0].strip() or "segment"
+        return (
+            f"{table}\n"
+            f"({label} 증감률(파생): {_format_pct(rate)} — "
+            f"{_format_amount(values[-2])} → {_format_amount(values[-1])})"
+        )
+    return None
+
+
+def _append_quarter_timeseries(
+    table: str,
+    *,
+    raw_query: str | None,
+    metric: str | None,
+) -> str | None:
+    values = _metric_row_values(table)
+    headers = _table_column_headers(table)
+    if len(values) < 3:
+        return None
+    max_value = max(values)
+    min_value = min(values)
+    max_index = values.index(max_value)
+    min_index = values.index(min_value)
+    max_label = headers[max_index] if max_index < len(headers) else f"#{max_index + 1}"
+    min_label = headers[min_index] if min_index < len(headers) else f"#{min_index + 1}"
+    delta = max_value - min_value
+    label = metric or "매출액"
+    return (
+        f"{table}\n"
+        f"({label} 분기 추이(파생): 최고 {max_label} {_format_amount(max_value)} · "
+        f"최저 {min_label} {_format_amount(min_value)} · "
+        f"차이 {_format_amount(delta)})"
+    )
+
+
+def _append_quarter_sum_vs_annual(
+    table: str,
+    *,
+    raw_query: str | None,
+    metric: str | None,
+) -> str | None:
+    values = _metric_row_values(table)
+    headers = _table_column_headers(table)
+    if len(values) < 2:
+        return None
+    quarter_indices = [
+        index
+        for index, header in enumerate(headers)
+        if "분기" in str(header)
+    ]
+    if len(quarter_indices) >= 2:
+        quarter_sum = sum(values[index] for index in quarter_indices)
+        annual_indices = [
+            index
+            for index, header in enumerate(headers)
+            if "분기" not in str(header) and re.search(r"\d{4}", str(header))
+        ]
+        annual_value = values[annual_indices[-1]] if annual_indices else values[-1]
+    elif len(values) >= 5:
+        quarter_sum = sum(values[:-1])
+        annual_value = values[-1]
+    else:
+        return None
+    delta = quarter_sum - annual_value
+    same = abs(delta) < 1e-6
+    label = metric or "영업이익"
+    verdict = "일치" if same else "불일치"
+    return (
+        f"{table}\n"
+        f"({label} 분기 합 vs annual(파생): "
+        f"분기 합 {_format_amount(quarter_sum)} · "
+        f"annual {_format_amount(annual_value)} · "
+        f"차이 {_format_amount(delta)} · {verdict})"
+    )
 
 
 def _metric_row_values(table: str) -> list[float]:

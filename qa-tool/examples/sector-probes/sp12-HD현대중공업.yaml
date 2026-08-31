@@ -15,30 +15,30 @@ reasoning_types:
   - compute  # 연산
 
 doc_group: periodic
-report_nm · period: manifest 확인 후 보완
+report_nm · period: 사업보고서 (2025.12)
 basis: 연결
 
-task_type (기대): periodic · complex_reasoning
+task_type (기대): financial_metric · derived_rate · metric_fallback
 
 expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
 
 must_include_in_answer:
-  - must_include·doc_id는 corpus 확인 후 보완
+  - 수주잔고/수주실적
+  - 증감액·증감률(파생)
 
-must_NOT_invent: 코퍼스 밖 invent
+must_NOT_invent: 단일 연도만
 
 evidence:
   manifest: corp_name=HD현대중공업
 
-negative_example: partial / answerable_false 변형 병행
+negative_example: 수주잔고 metric 미지원
 
 corpus_sketch: |
-  order backlog delta
+  metric alias + derived rate.
 
 related_agent_gaps:
-  - order backlog delta
 
-improve_hint (참고): order backlog delta
+improve_hint (참고): 수주잔고 metric + derived_metric(rate) (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

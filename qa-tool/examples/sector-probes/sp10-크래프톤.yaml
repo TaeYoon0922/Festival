@@ -13,32 +13,34 @@ sector_focus: quarter sum vs annual
 reasoning_types:
   - compare  # 비교
   - compute  # 연산
+  - multi_doc  # 복수문서
 
 doc_group: periodic
-report_nm · period: manifest 확인 후 보완
+report_nm · period: 분기보고서 Q1–Q4 + annual 2024
 basis: 연결
 
-task_type (기대): periodic · complex_reasoning
+task_type (기대): periodic_fact · quarter_sum_vs_annual
 
 expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
 
 must_include_in_answer:
-  - must_include·doc_id는 corpus 확인 후 보완
+  - 4분기 합(파생)
+  - annual 영업이익
+  - 일치/불일치(파생)
 
-must_NOT_invent: 코퍼스 밖 invent
+must_NOT_invent: 단일 분기만
 
 evidence:
-  manifest: corp_name=크래프톤
+  manifest: corp_name=크래프톤, quarter+annual
 
-negative_example: partial / answerable_false 변형 병행
+negative_example: quarter_sum_vs_annual 미구현
 
 corpus_sketch: |
-  quarter sum vs annual
+  quarter column sum vs annual cell.
 
 related_agent_gaps:
-  - quarter sum vs annual
 
-improve_hint (참고): quarter sum vs annual
+improve_hint (참고): derived_metric(quarter_sum_vs_annual) (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

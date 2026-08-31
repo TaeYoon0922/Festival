@@ -13,32 +13,34 @@ sector_focus: supply count max
 reasoning_types:
   - compare  # 비교
   - compute  # 연산
+  - multi_doc  # 복수문서
 
 doc_group: exchange
-report_nm · period: manifest 확인 후 보완
+report_nm · period: exchange supply_contract 2024·2025
 basis: 해당없음
 
-task_type (기대): exchange · complex_reasoning
+task_type (기대): supply_contract · exchange_aggregate · count · max
 
 expected_behavior: normal_answer  # partial 또는 answerable_false 변형 카드 병행
 
 must_include_in_answer:
-  - must_include·doc_id는 corpus 확인 후 보완
+  - 건수
+  - 연도별 최대 계약금액(파생)
+  - 연도 비교
 
-must_NOT_invent: 코퍼스 밖 invent
+must_NOT_invent: 단일 계약만
 
 evidence:
-  manifest: corp_name=두산에너빌리티
+  manifest: corp_name=두산에너빌리티, supply_contract
 
-negative_example: partial / answerable_false 변형 병행
+negative_example: max aggregate 미구현
 
 corpus_sketch: |
-  supply count max
+  P0-C count + amount_max by year.
 
 related_agent_gaps:
-  - supply count max
 
-improve_hint (참고): supply count max
+improve_hint (참고): exchange_field_aggregate max (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

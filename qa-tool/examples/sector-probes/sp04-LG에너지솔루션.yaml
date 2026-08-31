@@ -39,7 +39,7 @@ corpus_sketch: |
 
 related_agent_gaps:
 
-improve_hint (참고): exchange_year_compare (implemented)
+improve_hint (참고): exchange_year_compare + equity_compare (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

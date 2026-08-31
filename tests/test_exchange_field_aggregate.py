@@ -53,6 +53,35 @@ class ExchangeFieldAggregateTests(unittest.TestCase):
         self.assertEqual(by_year[2024], 10_000_000_000.0)
         self.assertEqual(by_year[2025], 25_000_000_000.0)
 
+    def test_aggregate_max_by_year(self) -> None:
+        texts = [
+            "계약금액 100,000,000원",
+            "계약금액 300,000,000원",
+            "계약금액 200,000,000원",
+        ]
+        doc_ids = [
+            "exchange_20240115800001",
+            "exchange_20250115800002",
+            "exchange_20250120800003",
+        ]
+        result = aggregate_exchange_amounts(
+            texts,
+            "contract_amount",
+            ops=("max",),
+            doc_ids=doc_ids,
+            years=(2024, 2025),
+        )
+        self.assertEqual(result.amount_max, 300_000_000.0)
+        by_year = {item.year: item.amount_max for item in result.by_year}
+        self.assertEqual(by_year[2024], 100_000_000.0)
+        self.assertEqual(by_year[2025], 300_000_000.0)
+
+    def test_parse_contract_quantity(self) -> None:
+        parsed = parse_labeled_amount("우선협상수량 120", "contract_quantity")
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.value, 120.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,9 +38,8 @@ corpus_sketch: |
   Gold H01/H02.
 
 related_agent_gaps:
-  - holding multi-event math
 
-improve_hint (참고): holding_event aggregate
+improve_hint (참고): holding_event_aggregate (implemented)
 
 gold_refs:
   - H01

@@ -192,6 +192,14 @@ def _holding_sections(
             for value in _string_list(section.content.get("requested_fields"))
         ]
     )
+    holding_aggregate = next(
+        (
+            _text(section.content.get("holding_aggregate"))
+            for section in draft.answer_sections
+            if section.content.get("holding_aggregate")
+        ),
+        None,
+    )
     single_event = len(events) == 1 and not draft.ambiguity.get("temporal_ambiguity")
     markers = [
         registry.ids_for(_string_list(event.get("evidence_chunk_ids")))
@@ -205,6 +213,8 @@ def _holding_sections(
         # answer would make two events look like different kinds of fact.
         compact = _holding_compact_lines(events, markers)
     if compact is not None:
+        if holding_aggregate:
+            compact = [*compact, holding_aggregate]
         return (
             _holding_section_list(draft, compact, [id for ids in markers for id in ids]),
             [],
@@ -239,6 +249,9 @@ def _holding_sections(
             continue
         lines.extend(factual_lines)
         section_citations.extend(citation_ids)
+
+    if holding_aggregate:
+        lines.append(holding_aggregate)
 
     return _holding_section_list(draft, lines, section_citations), warnings, supported
 

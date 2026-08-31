@@ -84,6 +84,60 @@ class PeriodicDerivedMetricsTests(unittest.TestCase):
         self.assertIn("더 큰 쪽", display)
         self.assertIn("20000", display.replace(",", ""))
 
+    def test_quarter_timeseries_projection(self) -> None:
+        table = "\n".join(
+            [
+                "| 구분 | 2024년 1분기 | 2024년 2분기 | 2024년 3분기 |",
+                "| --- | --- | --- | --- |",
+                "| 매출액 | 100,000 | 150,000 | 120,000 |",
+            ]
+        )
+        display = project_derived_metric_display(
+            table,
+            metric="매출액",
+            request={"derived_metric": "quarter_timeseries"},
+            raw_query="1·2·3분기 추이에서 최고와 최저 차이",
+        )
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertIn("분기 추이(파생)", display)
+        self.assertIn("50000", display.replace(",", ""))
+
+    def test_sign_flip_projection(self) -> None:
+        table = "\n".join(
+            [
+                "| 구분 | 2023년 | 2024년 |",
+                "| --- | --- | --- |",
+                "| 당기순이익 | -10,000 | 5,000 |",
+            ]
+        )
+        display = project_derived_metric_display(
+            table,
+            metric="당기순이익",
+            request={"derived_metric": "sign_flip"},
+        )
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertIn("흑자 전환", display)
+
+    def test_segment_rate_projection(self) -> None:
+        table = "\n".join(
+            [
+                "| 구분 | 전기 | 당기 |",
+                "| --- | --- | --- |",
+                "| 태양광 segment | 100,000 | 120,000 |",
+            ]
+        )
+        display = project_derived_metric_display(
+            table,
+            metric="매출액",
+            request={"derived_metric": "segment_rate"},
+            raw_query="태양광(또는 Qcells) segment 매출",
+        )
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertIn("증감률(파생)", display)
+
 
 if __name__ == "__main__":
     unittest.main()

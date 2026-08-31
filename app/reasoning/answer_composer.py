@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import EvidenceItem, EvidenceSet
+from app.reasoning.holding_event_aggregate import aggregate_holding_change_statement
 from app.reasoning.holding_event_resolver import HoldingEvent, HoldingResolution
 from app.reasoning.holding_event_selection import (
     EXACT,
@@ -131,6 +132,10 @@ def compose_holding_answer(
     for index, event in enumerate(reported_events, start=1):
         citation_builder.add_holding_event(index, event)
         event_rows.append(_holding_event_content(event))
+    holding_aggregate: str | None = None
+    evidence = evidence_set.query_plan.get("evidence") if evidence_set.query_plan else {}
+    if isinstance(evidence, dict) and evidence.get("holding_multi_event_compute"):
+        holding_aggregate = aggregate_holding_change_statement(event_rows)
     evidence_ids = _unique_text(
         chunk_id for event in reported_events for chunk_id in event.evidence_chunk_ids
     )
@@ -141,6 +146,11 @@ def compose_holding_answer(
                 content={
                     "events": event_rows,
                     "requested_fields": list(resolution.requested_fields),
+                    **(
+                        {"holding_aggregate": holding_aggregate}
+                        if holding_aggregate
+                        else {}
+                    ),
                 },
                 supporting_evidence_ids=evidence_ids,
             ),

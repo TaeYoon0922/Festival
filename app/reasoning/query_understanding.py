@@ -25,6 +25,7 @@ _FINANCIAL_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("자본총계", ("자본총계", "총자본")),
     ("재고자산", ("재고자산", "연결재고자산", "재고")),
     ("주당순이익", ("주당순이익", "EPS")),
+    ("수주잔고", ("수주잔고", "수주실적")),
 )
 _FINANCIAL_METRIC_SEARCH_TERMS = {
     "당기순이익": ("분기순이익", "연결분기순이익", "당기순손익", "분기순손익"),
@@ -405,6 +406,15 @@ class QueryUnderstanding:
             years=mentioned_years,
             exchange_aggregate=exchange_aggregate,
         )
+        exchange_quantity_compare = _exchange_quantity_compare_from_query(
+            raw_query,
+            event_type=event_type,
+            years=mentioned_years,
+        )
+        holding_multi_event_compute = _holding_multi_event_from_query(
+            raw_query,
+            task_type=task_type,
+        )
         if cross_domain_ratio and "periodic" not in routes:
             routes = tuple(dict.fromkeys((*routes, "periodic")))
             route_confidence["disclosure_route.periodic"] = max(
@@ -537,6 +547,8 @@ class QueryUnderstanding:
                 "derived_metric": derived_metric,
                 "exchange_aggregate": exchange_aggregate,
                 "exchange_year_compare": exchange_year_compare,
+                "exchange_quantity_compare": exchange_quantity_compare,
+                "holding_multi_event_compute": holding_multi_event_compute,
                 "cross_domain_ratio": cross_domain_ratio,
                 "exchange_recent_pair": exchange_recent_pair,
                 "corpus_receipt_from": corpus_receipt_from,
@@ -758,6 +770,35 @@ def _derived_metric_from_query(
             )
         ):
             return "quarter_compare"
+    if any(term in compact for term in ("추이",)) and re.search(
+        r"[1-4]\s*[·,.]\s*[1-4]", query
+    ):
+        if any(term in compact for term in ("최고", "최대", "최저", "최소", "차이")):
+            return "quarter_timeseries"
+    if "4개분기" in compact or (
+        "분기" in compact and "사업보고서" in compact and "같" in compact
+    ):
+        return "quarter_sum_vs_annual"
+    if any(term in compact for term in ("흑자", "적자", "전환")):
+        if metric in {"당기순이익", "순이익"} and isinstance(comparison, Mapping):
+            return "sign_flip"
+    if any(
+        term in compact.casefold()
+        for term in ("segment", "부문", "사업부", "사업부문")
+    ):
+        if any(term in compact for term in ("증감률", "증가율", "감소율", "변했")):
+            if not any(
+                term in compact
+                for term in (
+                    "가장큰",
+                    "가장많",
+                    "가장높",
+                    "최대",
+                    "큰부분",
+                    "차지한",
+                )
+            ):
+                return "segment_rate"
     if "%p" in compact or "몇%p" in compact:
         if metric_view == "breakdown" or any(
             term in compact for term in ("국내", "해외", "비중")
@@ -800,6 +841,8 @@ def _exchange_aggregate_from_query(
         ops.append("average")
     if any(term in compact for term in ("건수", "몇건", "몇건")):
         ops.append("count")
+    if any(term in compact for term in ("최대", "최고")):
+        ops.append("max")
     if not ops:
         return None
     field = (
@@ -815,8 +858,11 @@ def _metric_fallback_from_query(query: str, *, metric: str | None) -> str | None
     if not match:
         return None
     alt_metric, alt_evidence = _find_financial_metric(match.group(1))
-    if not alt_metric or alt_metric == metric:
-        return None
+    if not alt_metric:
+        alt_text = match.group(1).strip()
+        return alt_text or None
+    if alt_metric == metric:
+        return alt_evidence or match.group(1).strip()
     return alt_evidence or alt_metric
 
 
@@ -836,7 +882,47 @@ def _exchange_year_compare_from_query(
         return None
     if not any(term in compact for term in ("비교", "더큰", "더 큰", "대비")):
         return None
-    return {"years": sorted(int(year) for year in years)}
+    payload: dict[str, Any] = {"years": sorted(int(year) for year in years)}
+    if "자기자본" in compact:
+        payload["equity_compare"] = True
+    return payload
+
+
+def _exchange_quantity_compare_from_query(
+    query: str,
+    *,
+    event_type: str | None,
+    years: Sequence[int],
+) -> dict[str, Any] | None:
+    if event_type != "supply_contract" or len(years) < 2:
+        return None
+    compact = re.sub(r"\s+", "", query)
+    if "수량" not in compact:
+        return None
+    if not any(term in compact for term in ("비교", "더큰", "더 큰", "어느")):
+        return None
+    return {
+        "years": sorted(int(year) for year in years),
+        "field": "contract_quantity",
+    }
+
+
+def _holding_multi_event_from_query(
+    query: str,
+    *,
+    task_type: str,
+) -> dict[str, Any] | None:
+    if task_type != "holding_change":
+        return None
+    compact = re.sub(r"\s+", "", query)
+    if not any(term in compact for term in ("합쳐", "합산", "순증가", "더해", "더해서")):
+        return None
+    if not any(
+        term in compact
+        for term in ("증감주식", "주식수", "증가율", "순증가")
+    ):
+        return None
+    return {"compute": "net_change_shares"}
 
 
 def _exchange_recent_pair_from_query(
