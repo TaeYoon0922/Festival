@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from app.agent.orchestrator import AgentOrchestrator, _holding_reporter_scope
 from app.api.pipeline import AnswerPipeline
 from app.reasoning.answerability import AnswerabilityGuard
+from app.reasoning.field_evidence import FieldReason, FieldStatus
 from app.reasoning.holding_company_role_resolution import (
     ROLE_PROVENANCE_KEY,
     HoldingCompanyRoleResolver,
@@ -14,6 +15,7 @@ from app.reasoning.query_plan import QueryPlan
 from app.reasoning.holding_report_index import HoldingReportIndex, HoldingReportRecord
 from app.reasoning.holding_report_relative_execution import HoldingReportRelativeExecution
 from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.holding_field_evidence import ACQUISITION_UNIT_PRICE
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import CorpusScope, QueryState, QueryValidator
 from app.retrieval.interfaces import CandidateChunk, MetadataMatch, RetrievalResult
@@ -77,6 +79,76 @@ def candidate(value: HoldingReportRecord) -> CandidateChunk:
     )
 
 
+def acquisition_candidate(value: HoldingReportRecord) -> CandidateChunk:
+    """A production-shaped acquisition row with an explicitly omitted price."""
+
+    headers = [
+        "성명(명칭)", "생년월일 또는사업자등록번호 등", "변동일*", "취득/처분방법",
+        "주식등의종류", "변동 내역 / 변동전", "변동 내역 / 증감",
+        "변동 내역 / 변동후", "취득/처분단가**", "취득/처분단가**", "비 고",
+    ]
+    row = [
+        value.raw_reporter, "120-00-00000", "2024.02.03", "장내매수(+)",
+        "의결권있는 주식", "2,000", "100", "2,100", "-", "-",
+        "최초 보고이므로 취득단가 미기재",
+    ]
+    source_ref = {"table_id": "t-acquisition", "row_start": 2, "row_end": 2}
+    fields = {
+        "보고자/보유자": row[0],
+        "기준일/보고일": row[2],
+        "직전 보유주식수": row[5],
+        "증감주식수": row[6],
+        "보유주식수": row[7],
+    }
+    chunk_id = f"{value.doc_id}:acquisition"
+    return CandidateChunk(
+        chunk_id,
+        value.doc_id,
+        {
+            "chunk_id": chunk_id,
+            "doc_id": value.doc_id,
+            "doc_group": "holding",
+            "projection_type": "holding_detail_row",
+            "chunk_type": "table_projection",
+            "corp_code": value.issuer_corp_code,
+            "corp_name": ISSUER,
+            "report_nm": "주식등의대량보유상황보고서",
+            "rcept_dt": value.receipt_date,
+            "reporter": value.raw_reporter,
+            "reference_date": value.reference_date,
+            "section_path": ["세부변동내역"],
+            "content": "세부 변동 내역",
+            "retrieval_text": "장내매수 취득단가 미기재",
+            "table_id": "t-acquisition",
+            "source_table_id": "t-acquisition",
+            "row_start": 2,
+            "row_end": 2,
+            "column_headers": headers,
+            "header_rows": [[
+                *[
+                    {"text": header, "colspan": 1, "rowspan": 1,
+                     "is_header": True}
+                    for header in headers[:8]
+                ],
+                {"text": "취득/처분단가**", "colspan": 2, "rowspan": 1,
+                 "is_header": True},
+                {"text": "비 고", "colspan": 1, "rowspan": 1,
+                 "is_header": True},
+            ]],
+            "table_rows": [[
+                {"text": cell, "colspan": 1, "rowspan": 1, "is_header": False}
+                for cell in row
+            ]],
+            "source_refs": [dict(source_ref)],
+            "projection_fields": fields,
+            "projection_field_refs": {
+                label: [dict(source_ref)] for label in fields
+            },
+        },
+        MetadataMatch(),
+    )
+
+
 def ranked(value: CandidateChunk, rank: int) -> RetrievalResult:
     return RetrievalResult(
         value.chunk_id,
@@ -103,6 +175,16 @@ class StaticExecutor:
             chunks=list(self.chunks),
             results=list(self.results),
         )
+
+
+class RecordingOrchestrator:
+    def __init__(self, delegate: AgentOrchestrator) -> None:
+        self.delegate = delegate
+        self.result = None
+
+    def run(self, *args, **kwargs):
+        self.result = self.delegate.run(*args, **kwargs)
+        return self.result
 
 
 class HoldingCompanyRoleExecutionTests(unittest.TestCase):
@@ -171,6 +253,107 @@ class HoldingCompanyRoleExecutionTests(unittest.TestCase):
         self.assertNotIn(self.wrong.doc_id, payload["answer"])
         self.assertNotIn("999", payload["answer"])
         self.assertIn("holding_reporter_scope", payload["think_trace"]["stages"])
+
+    def test_raw_acquisition_unit_price_runs_the_production_holding_path(self) -> None:
+        question = (
+            f"{REPORTER}가 {ISSUER} 주식을 취득할 때의 취득단가는 얼마였어?"
+        )
+        index = HoldingReportIndex(
+            (self.correct,), complete=True, correction_finality_available=True
+        )
+        resolver = HoldingCompanyRoleResolver(index)
+        validator = QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=resolver,
+        )
+        orchestrator = AgentOrchestrator(
+            report_relative_execution=HoldingReportRelativeExecution(index=index),
+            holding_company_role_resolver=resolver,
+        )
+        recording = RecordingOrchestrator(orchestrator)
+        detail = acquisition_candidate(self.correct)
+        # A higher-ranked generic holding projection for another reporter is
+        # retrieval noise; corpus-proved role scope must keep it from deciding.
+        generic = candidate(self.wrong)
+        executor = StaticExecutor(
+            (generic, detail), (ranked(generic, 1), ranked(detail, 2))
+        )
+
+        understood = self.understanding.understand(question)
+        self.assertEqual(understood.task_type, "holding_change")
+        self.assertEqual(understood.metric, ACQUISITION_UNIT_PRICE)
+        self.assertEqual(understood.disclosure_route, ("holding",))
+        self.assertEqual(understood.doc_group, "holding")
+        self.assertEqual(understood.evidence["operation"], "lookup_holding")
+
+        validated = validator.validate(understood)
+        self.assertIs(validated.state, QueryState.RESOLVED)
+        self.assertEqual(validated.plan.company, ISSUER)
+        self.assertEqual(validated.plan.reporter, REPORTER)
+        self.assertTrue(has_role_provenance(validated.plan))
+
+        payload = AnswerPipeline(
+            understanding=self.understanding,
+            executor=executor,
+            orchestrator=recording,
+            query_validator=validator,
+            answerability_guard=AnswerabilityGuard(),
+        ).answer("ACQUISITION-UNIT-PRICE", question)
+
+        self.assertEqual(executor.plan.task_type, "holding_change")
+        self.assertEqual(executor.plan.metric, ACQUISITION_UNIT_PRICE)
+        self.assertEqual(executor.plan.company, ISSUER)
+        self.assertEqual(executor.plan.reporter, REPORTER)
+        self.assertIsNotNone(recording.result)
+        self.assertEqual(recording.result.resolution.matching_event_count, 1)
+        self.assertIn("holding_event_resolver", recording.result.execution_trace)
+        self.assertEqual(len(recording.result.field_evidence), 1)
+        field = recording.result.field_evidence[0]
+        self.assertIs(field.status, FieldStatus.UNAVAILABLE)
+        self.assertIs(field.reason, FieldReason.OMITTED)
+        self.assertEqual(field.doc_id, self.correct.doc_id)
+        self.assertEqual(field.chunk_id, detail.chunk_id)
+        self.assertEqual(field.table_id, "t-acquisition")
+        self.assertEqual((field.row_start, field.row_end), (2, 2))
+
+        answerability = payload["think_trace"]["answerability"]
+        self.assertFalse(payload["think_trace"]["answerable"])
+        self.assertEqual(answerability["status"], "insufficient_evidence")
+        self.assertEqual(answerability["unavailable_fields"],
+                         [ACQUISITION_UNIT_PRICE])
+        self.assertTrue(answerability["citable"])
+        self.assertEqual(
+            answerability["unavailable_evidence"][0]["chunk_id"], detail.chunk_id
+        )
+        self.assertIn("query_understanding", payload["think_trace"]["stages"])
+        self.assertIn("query_validation", payload["think_trace"]["stages"])
+        self.assertIn("holding_event_resolver", payload["think_trace"]["stages"])
+        self.assertIn("field_evidence", payload["think_trace"]["stages"])
+        self.assertNotIn(
+            self.wrong.doc_id,
+            [context["doc_id"] for context in payload["retrieved_context"]],
+        )
+        self.assertIn("[", payload["answer"])
+
+    def test_acquisition_unit_price_role_ambiguity_fails_closed(self) -> None:
+        question = (
+            f"{REPORTER}가 {ISSUER} 주식을 매수한 단가는 얼마였어?"
+        )
+        empty_index = HoldingReportIndex(
+            (), complete=True, correction_finality_available=True
+        )
+        validator = QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=HoldingCompanyRoleResolver(empty_index),
+        )
+
+        understood = self.understanding.understand(question)
+        validated = validator.validate(understood)
+
+        self.assertEqual(understood.metric, ACQUISITION_UNIT_PRICE)
+        self.assertIs(validated.state, QueryState.AMBIGUOUS)
+        self.assertFalse(validated.retrieval_allowed)
+        self.assertIsNone(validated.plan.reporter)
 
     def test_pipeline_uses_one_shared_index_dependency(self) -> None:
         self.assertIs(self.orchestrator.report_relative_execution.index, self.index)

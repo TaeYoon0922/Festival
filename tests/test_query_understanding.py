@@ -641,6 +641,57 @@ class BoundedOwnershipIntentTests(unittest.TestCase):
         self.assertEqual(ratio.evidence["metric"], "지분 비율")
         self.assertIsNone(ambiguous.evidence["metric"])
 
+    def test_directed_acquisition_unit_price_activates_holding(self) -> None:
+        for query in (
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가는 얼마였어?",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 매수한 단가는 얼마야?",
+        ):
+            with self.subTest(query=query):
+                plan = self.assert_bounded_holding(
+                    query,
+                    metric="acquisition_unit_price",
+                    family="company_acquires_company_shares",
+                )
+                self.assertEqual(plan.evidence["operation"], "lookup_holding")
+                self.assertIn("단가", plan.evidence["metric"])
+                self.assertEqual(route_task(query, plan).task_type, "holding_event")
+
+    def test_acquisition_unit_price_activation_stays_narrow(self) -> None:
+        queries = (
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 처분할 때의 처분단가는 얼마야?",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득했어?",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득한 가액은 얼마야?",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertNotEqual(plan.metric, "acquisition_unit_price")
+                self.assertNotEqual(
+                    plan.evidence["holding_ownership_intent"],
+                    "company_acquires_company_shares",
+                )
+
+    def test_acquisition_unit_price_respects_comparison_and_cardinality_gates(
+        self,
+    ) -> None:
+        comparison = self.plan(
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때와 "
+            "매수할 때의 단가를 비교해줘"
+        )
+        three_company = self.plan(
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가와 "
+            f"{self.THIRD} 관련 공시도 알려줘"
+        )
+
+        self.assertIn(
+            comparison.evidence["comparison_frame"], {"cross_company", "uncertain"}
+        )
+        self.assertNotEqual(comparison.metric, "acquisition_unit_price")
+        self.assertIsNone(comparison.evidence["holding_ownership_intent"])
+        self.assertEqual(len(three_company.companies), 3)
+        self.assertNotEqual(three_company.metric, "acquisition_unit_price")
+        self.assertIsNone(three_company.evidence["holding_ownership_intent"])
+
     def test_new_ownership_reference_date_keeps_the_exact_holding_axis(self) -> None:
         plan = self.assert_bounded_holding(
             f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 "

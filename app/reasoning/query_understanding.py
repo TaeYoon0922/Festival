@@ -530,6 +530,18 @@ def _find_bounded_ownership_intent(
     tail = re.sub(r"\s+", "", query[second_end:])
 
     family: str | None = None
+    acquisition_unit_price = (
+        _directed_acquisition_unit_price(tail)
+        if re.fullmatch(r"[이가]", gap)
+        else None
+    )
+    if acquisition_unit_price:
+        return (
+            True,
+            "acquisition_unit_price",
+            "company_acquires_company_shares",
+            acquisition_unit_price,
+        )
     if re.fullmatch(r"[이가]보유한", gap) and re.match(
         r"^주식(?:은|는|이|가|을|를)?", tail
     ):
@@ -554,6 +566,20 @@ def _find_bounded_ownership_intent(
     if shares:
         return True, "holding_shares", family, shares.group(0)
     return True, None, family, None
+
+
+def _directed_acquisition_unit_price(tail: str) -> str | None:
+    """Match only a directed shares-acquisition request for a unit price."""
+
+    if not re.match(r"^주식(?:은|는|이|가|을|를)?", tail):
+        return None
+    # A source column can be labelled 취득/처분단가, but a disposal question is
+    # a different intent.  Query understanding activates only the acquisition
+    # side before the row-level producer interprets any source header.
+    if re.search(r"(?:처분|매도|양도).{0,12}?단가", tail):
+        return None
+    match = re.search(r"(?:취득|매수).{0,24}?단가", tail)
+    return match.group(0) if match else None
 
 
 def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
