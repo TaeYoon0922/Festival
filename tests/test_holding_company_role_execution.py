@@ -6,7 +6,14 @@ from app.api.pipeline import AnswerPipeline
 from app.reasoning.answerability import AnswerabilityGuard
 from app.reasoning.field_evidence import FieldReason, FieldStatus
 from app.reasoning.holding_company_role_resolution import (
+    AMBIGUOUS_FILER,
+    INCOMPLETE_INDEX,
+    NO_INDEX,
+    RESOLVED,
+    ROLE_PATH_FILER,
     ROLE_PROVENANCE_KEY,
+    STALE_INDEX,
+    UNKNOWN_FILER,
     HoldingCompanyRoleResolver,
     has_role_provenance,
     role_provenance,
@@ -581,3 +588,242 @@ class HoldingCompanyRoleExecutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def priced_acquisition_candidate(value, price: str) -> CandidateChunk:
+    """The same production-shaped row, with the unit price actually stated."""
+
+    base = acquisition_candidate(value)
+    chunk = dict(base.chunk)
+    rows = [[dict(cell) for cell in row] for row in chunk["table_rows"]]
+    for cell in rows[0][8:10]:
+        cell["text"] = price
+    rows[0][10]["text"] = ""
+    chunk["table_rows"] = rows
+    chunk["retrieval_text"] = f"장내매수 취득단가 {price}"
+    return CandidateChunk(base.chunk_id, base.doc_id, chunk, MetadataMatch())
+
+
+class FilerIdentityResolutionTests(unittest.TestCase):
+    """Proving which of an issuer's own filers a question named.
+
+    ``resolve`` compares two canonical companies because both are in the
+    company universe.  A holding report's filer usually is not, so the surface
+    a question used is checked against the holders this issuer actually has.
+    Every outcome other than exactly one holder fails closed: naming the wrong
+    one states some other holder's position as this one's.
+    """
+
+    HOLDER = "가상지주"
+    HOLDER_LEGAL_FORM = "(주)가상지주"
+    PENSION = "가상연금"
+    PENSION_AGENCY = "가상연금공단"
+    PENSION_FUND = "가상연금기금"
+    OTHER_ISSUER_CODE = "00000009"
+
+    def record(
+        self,
+        reporter: str,
+        suffix: str,
+        *,
+        issuer_code: str = ISSUER_CODE,
+        reference: str = "20240203",
+    ) -> HoldingReportRecord:
+        return HoldingReportRecord(
+            issuer_corp_code=issuer_code,
+            reporter_key=canonical_reporter_key(reporter),
+            raw_reporter=reporter,
+            doc_id=f"holding_{suffix}",
+            projection_chunk_id=f"holding_{suffix}:projection",
+            reference_date=reference,
+            receipt_date="20240205",
+            after_shares="100",
+            after_ratio="1.00",
+        )
+
+    def resolver(self, *records, **over) -> HoldingCompanyRoleResolver:
+        settings = dict(complete=True, correction_finality_available=True)
+        settings.update(over)
+        return HoldingCompanyRoleResolver(HoldingReportIndex(records, **settings))
+
+    def resolve(self, surface: str, *records, **over):
+        return self.resolver(*records, **over).resolve_filer(
+            ISSUER, ISSUER_CODE, surface
+        )
+
+    def test_resolve_filer_binds_unique_issuer_reporter(self) -> None:
+        result = self.resolve(self.HOLDER, self.record(self.HOLDER, "a1"))
+
+        self.assertEqual(result.status, RESOLVED)
+        self.assertEqual(result.reporter, self.HOLDER)
+        self.assertEqual(result.issuer_corp_code, ISSUER_CODE)
+
+    def test_resolve_filer_unknown_fails_closed(self) -> None:
+        result = self.resolve(self.HOLDER, self.record(REPORTER, "a1"))
+
+        self.assertEqual(result.status, UNKNOWN_FILER)
+        self.assertIsNone(result.reporter)
+
+    def test_resolve_filer_ambiguous_fails_closed(self) -> None:
+        # Two holders answer to one name through the frozen family-suffix rule
+        # and neither is the name itself.  Two holders are not one holder
+        # written twice, so neither may be picked.
+        result = self.resolve(
+            self.PENSION,
+            self.record(self.PENSION_AGENCY, "a1"),
+            self.record(self.PENSION_FUND, "a2"),
+        )
+
+        self.assertEqual(result.status, AMBIGUOUS_FILER)
+        self.assertIsNone(result.reporter)
+
+    def test_exact_canonical_key_wins_over_family_suffix(self) -> None:
+        result = self.resolve(
+            self.PENSION,
+            self.record(self.PENSION, "a1"),
+            self.record(self.PENSION_AGENCY, "a2"),
+        )
+
+        self.assertEqual(result.status, RESOLVED)
+        self.assertEqual(result.reporter, self.PENSION)
+
+    def test_same_holder_spelled_two_ways_is_not_ambiguous(self) -> None:
+        result = self.resolve(
+            self.HOLDER,
+            self.record(self.HOLDER, "a1"),
+            self.record(self.HOLDER_LEGAL_FORM, "a2", reference="20240301"),
+        )
+
+        self.assertEqual(result.status, RESOLVED)
+        self.assertEqual(
+            canonical_reporter_key(result.reporter),
+            canonical_reporter_key(self.HOLDER),
+        )
+
+    def test_resolve_filer_never_crosses_issuers(self) -> None:
+        result = self.resolve(
+            self.HOLDER,
+            self.record(self.HOLDER, "b1", issuer_code=self.OTHER_ISSUER_CODE),
+        )
+
+        self.assertEqual(result.status, UNKNOWN_FILER)
+        self.assertIsNone(result.reporter)
+
+    def test_unusable_index_fails_closed(self) -> None:
+        holder = self.record(self.HOLDER, "a1")
+        stale = HoldingCompanyRoleResolver(
+            HoldingReportIndex(
+                (holder,), complete=True, identity={"corpus_manifest_sha256": "one"}
+            ),
+            active_corpus_identity={"corpus_manifest_sha256": "two"},
+        )
+        for label, resolver, expected in (
+            ("absent", HoldingCompanyRoleResolver(None), NO_INDEX),
+            ("incomplete", self.resolver(holder, complete=False), INCOMPLETE_INDEX),
+            ("stale", stale, STALE_INDEX),
+        ):
+            with self.subTest(index=label):
+                result = resolver.resolve_filer(ISSUER, ISSUER_CODE, self.HOLDER)
+                self.assertEqual(result.status, expected)
+                self.assertIsNone(result.reporter)
+
+
+class DirectedFilerAcquisitionEndToEndTests(unittest.TestCase):
+    """The whole path for an acquirer no company universe can name.
+
+    The question names a filer, the corpus proves which holder that is, the
+    frozen resolver selects that holder's acquisition row, and the row's blank
+    unit price is reported as an absence with a citation rather than filled in
+    from whatever else retrieval happened to return.
+    """
+
+    HOLDER = "가상지주"
+    RIVAL_PRICE = "77,777"
+
+    def setUp(self) -> None:
+        self.selected = record(self.HOLDER, "selected", "100")
+        self.rival = record(WRONG_REPORTER, "rival", "999")
+        self.index = HoldingReportIndex(
+            (self.selected, self.rival),
+            complete=True,
+            correction_finality_available=True,
+        )
+        self.resolver = HoldingCompanyRoleResolver(self.index)
+        # The acquirer is deliberately absent from the universe: that absence
+        # is the structural shape this whole path exists for.
+        self.scope = CorpusScope(
+            companies={ISSUER: (ISSUER, ISSUER_CODE)},
+            receipt_from="2020-01-01",
+            receipt_to="2030-12-31",
+        )
+        self.understanding = QueryUnderstanding(self.scope.company_aliases())
+        self.validator = QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=self.resolver,
+        )
+        self.orchestrator = AgentOrchestrator(
+            report_relative_execution=HoldingReportRelativeExecution(index=self.index),
+            holding_company_role_resolver=self.resolver,
+        )
+
+    def test_blank_acquisition_unit_price_is_unavailable_with_grounded_source(
+        self,
+    ) -> None:
+        question = (
+            f"{self.HOLDER}가 {ISSUER} 주식을 "
+            "취득할 때의 취득단가는 얼마야?"
+        )
+
+        understood = self.understanding.understand(question)
+        self.assertEqual(understood.companies, (ISSUER,))
+        self.assertIsNone(understood.reporter)
+        self.assertEqual(understood.metric, ACQUISITION_UNIT_PRICE)
+
+        validated = self.validator.validate(understood)
+        self.assertIs(validated.state, QueryState.RESOLVED)
+        self.assertEqual(validated.plan.reporter, self.HOLDER)
+        self.assertTrue(has_role_provenance(validated.plan))
+        self.assertEqual(
+            validated.plan.evidence[ROLE_PROVENANCE_KEY]["path"], ROLE_PATH_FILER
+        )
+
+        detail = acquisition_candidate(self.selected)
+        # Another holder's row, priced and ranked first: proving the answer
+        # comes from the selected holder means proving this cannot supply it.
+        rival = priced_acquisition_candidate(self.rival, self.RIVAL_PRICE)
+        executor = StaticExecutor(
+            (rival, detail), (ranked(rival, 1), ranked(detail, 2))
+        )
+        recording = RecordingOrchestrator(self.orchestrator)
+
+        payload = AnswerPipeline(
+            understanding=self.understanding,
+            executor=executor,
+            orchestrator=recording,
+            query_validator=self.validator,
+            answerability_guard=AnswerabilityGuard(),
+        ).answer("DIRECTED-FILER-UNIT-PRICE", question)
+
+        self.assertEqual(len(recording.result.field_evidence), 1)
+        field = recording.result.field_evidence[0]
+        self.assertIs(field.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(field.doc_id, self.selected.doc_id)
+        self.assertEqual(field.chunk_id, detail.chunk_id)
+        self.assertEqual(field.table_id, "t-acquisition")
+        self.assertEqual((field.row_start, field.row_end), (2, 2))
+
+        self.assertFalse(payload["think_trace"]["answerable"])
+        answerability = payload["think_trace"]["answerability"]
+        self.assertEqual(answerability["status"], "insufficient_evidence")
+        self.assertEqual(
+            answerability["unavailable_fields"], [ACQUISITION_UNIT_PRICE]
+        )
+        self.assertEqual(
+            answerability["unavailable_evidence"][0]["chunk_id"], detail.chunk_id
+        )
+        # No other holder's price may stand in for the one that was omitted.
+        self.assertNotIn(self.RIVAL_PRICE, payload["answer"])
+        self.assertNotIn(
+            self.rival.doc_id,
+            [context["doc_id"] for context in payload["retrieved_context"]],
+        )

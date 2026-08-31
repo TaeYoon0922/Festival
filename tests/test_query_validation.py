@@ -6,18 +6,27 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from app.reasoning.holding_company_role_resolution import HoldingCompanyRoleResolver
+from app.reasoning.holding_company_role_resolution import (
+    ROLE_PATH_FILER,
+    ROLE_PROVENANCE_KEY,
+    HoldingCompanyRoleResolver,
+)
 from app.reasoning.holding_report_index import HoldingReportIndex, HoldingReportRecord
 from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
 from app.reasoning.query_plan import QueryPlan
 from app.reasoning.query_understanding import QueryUnderstanding
+from app.reasoning.query_understanding import (
+    ACTOR_SOURCE_DIRECTED_HOLDER,
+    HOLDING_ACTOR_CANDIDATE_KEY,
+)
 from app.reasoning.query_validation import (
     CorpusScope,
     QuerySlotSource,
     QueryState,
     QueryValidator,
     _holding_company_role_resolution_allowed,
+    _holding_filer_resolution_allowed,
 )
 
 
@@ -734,3 +743,180 @@ class HoldingCompanyRoleValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectedFilerBindingValidationTests(unittest.TestCase):
+    """Binding a named acquirer to a holder the corpus proves it is.
+
+    Query understanding can show that a surface stood in the actor slot; only
+    the corpus can say whether that surface is one of this issuer's holders.
+    So this stage asks exactly that one question, and every answer other than
+    a unique holder leaves the plan exactly as it arrived.
+    """
+
+    ISSUER = "가상발행사"
+    ISSUER_CODE = "00000001"
+    HOLDER = "가상지주"
+    PENSION = "가상연금"
+    PENSION_AGENCY = "가상연금공단"
+    PENSION_FUND = "가상연금기금"
+    OTHER_HOLDER = "가상제삼사"
+
+    def setUp(self) -> None:
+        # An issuer-scoped universe: the acquirer is not in it, which is the
+        # whole reason a corpus-backed filer lookup has to exist.
+        self.scope = CorpusScope(
+            companies={self.ISSUER: (self.ISSUER, self.ISSUER_CODE)},
+            receipt_from="2020-01-01",
+            receipt_to="2030-12-31",
+        )
+        self.understanding = QueryUnderstanding(self.scope.company_aliases())
+
+    def record(self, reporter: str, suffix: str) -> HoldingReportRecord:
+        return HoldingReportRecord(
+            issuer_corp_code=self.ISSUER_CODE,
+            reporter_key=canonical_reporter_key(reporter),
+            raw_reporter=reporter,
+            doc_id=f"holding_{suffix}",
+            projection_chunk_id=f"holding_{suffix}:projection",
+            reference_date="20240203",
+            receipt_date="20240205",
+            after_shares="100",
+            after_ratio="1.00",
+        )
+
+    def validator(self, *records) -> QueryValidator:
+        return QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=HoldingCompanyRoleResolver(
+                HoldingReportIndex(
+                    records, complete=True, correction_finality_available=True
+                )
+            ),
+        )
+
+    def directed(self) -> str:
+        return (
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 "
+            "취득할 때의 취득단가는 얼마야?"
+        )
+
+    def bound_plan(self, query: str, *records) -> QueryPlan:
+        return self.validator(*records).validate(
+            self.understanding.understand(query)
+        ).plan
+
+    def holding_plan(self, **overrides) -> QueryPlan:
+        base = dict(
+            query="취득단가",
+            raw_query=self.directed(),
+            companies=(self.ISSUER,),
+            corp_codes=(self.ISSUER_CODE,),
+            task_type="holding_change",
+            disclosure_route=("holding",),
+            metric="acquisition_unit_price",
+            evidence={
+                HOLDING_ACTOR_CANDIDATE_KEY: {
+                    "surface": self.HOLDER,
+                    "reporter_key": canonical_reporter_key(self.HOLDER),
+                    "source": ACTOR_SOURCE_DIRECTED_HOLDER,
+                    "resolved": False,
+                }
+            },
+        )
+        base.update(overrides)
+        return QueryPlan(**base)
+
+    def test_named_filer_binds_with_filer_path_provenance(self) -> None:
+        plan = self.bound_plan(self.directed(), self.record(self.HOLDER, "a1"))
+
+        self.assertEqual(plan.reporter, self.HOLDER)
+        marker = plan.evidence[ROLE_PROVENANCE_KEY]
+        self.assertTrue(marker["resolved"])
+        # The path says which corpus question proved it, without either party
+        # having to be restated inside the provenance.
+        self.assertEqual(marker["path"], ROLE_PATH_FILER)
+        self.assertNotIn(self.HOLDER, str(marker))
+        self.assertNotIn(self.ISSUER, str(marker))
+
+    def test_unknown_and_ambiguous_filers_leave_plan_unbound(self) -> None:
+        cases = (
+            ("unknown", (self.record(self.OTHER_HOLDER, "a1"),), self.HOLDER),
+            (
+                "ambiguous",
+                (
+                    self.record(self.PENSION_AGENCY, "a1"),
+                    self.record(self.PENSION_FUND, "a2"),
+                ),
+                self.PENSION,
+            ),
+        )
+        for label, records, surface in cases:
+            with self.subTest(filer=label):
+                query = (
+                    f"{surface}가 {self.ISSUER} 주식을 "
+                    "취득할 때의 취득단가는 얼마야?"
+                )
+                plan = self.bound_plan(query, *records)
+
+                # Inventing a holder would answer with someone else's position.
+                self.assertIsNone(plan.reporter)
+                self.assertNotIn(ROLE_PROVENANCE_KEY, plan.evidence)
+
+    def test_asker_supplied_reporter_is_never_overwritten(self) -> None:
+        plan = self.holding_plan(reporter=self.OTHER_HOLDER)
+
+        bound = self.validator(self.record(self.HOLDER, "a1"))._bind_named_filer(plan)
+
+        self.assertEqual(bound.reporter, self.OTHER_HOLDER)
+        self.assertNotIn(ROLE_PROVENANCE_KEY, bound.evidence)
+
+    def test_disclosure_lookup_plan_cannot_be_promoted_by_filer_binding(self) -> None:
+        plan = self.holding_plan(
+            task_type="disclosure_lookup", disclosure_route=(), metric=None
+        )
+
+        bound = self.validator(self.record(self.HOLDER, "a1"))._bind_named_filer(plan)
+
+        # Binding is binding.  It may not decide what kind of question this is.
+        self.assertEqual(bound.task_type, "disclosure_lookup")
+        self.assertEqual(bound.disclosure_route, ())
+        self.assertIsNone(bound.reporter)
+        self.assertNotIn(ROLE_PROVENANCE_KEY, bound.evidence)
+
+    def test_filer_binding_requires_holding_route_and_single_company(self) -> None:
+        self.assertTrue(_holding_filer_resolution_allowed(self.holding_plan()))
+        for label, overrides in (
+            ("wrong task type", dict(task_type="disclosure_lookup")),
+            ("no holding route", dict(disclosure_route=())),
+            ("event type present", dict(event_type="supply_contract")),
+            ("reporter already known", dict(reporter=self.HOLDER)),
+            (
+                "two companies",
+                dict(
+                    companies=(self.ISSUER, self.OTHER_HOLDER),
+                    corp_codes=(self.ISSUER_CODE, "00000003"),
+                ),
+            ),
+            ("no actor candidate", dict(evidence={})),
+        ):
+            with self.subTest(gate=label):
+                self.assertFalse(
+                    _holding_filer_resolution_allowed(self.holding_plan(**overrides))
+                )
+
+    def test_comparison_input_cannot_receive_filer_binding(self) -> None:
+        query = (
+            f"{self.HOLDER}와 다른 회사의 {self.ISSUER} 주식 "
+            "취득단가를 비교해줘"
+        )
+        understood = self.understanding.understand(query)
+        plan = self.bound_plan(query, self.record(self.HOLDER, "a1"))
+
+        # The comparison never reaches the holding lane, so there is no single
+        # holder for this binding to be about.
+        self.assertNotEqual(understood.task_type, "holding_change")
+        self.assertIsNone(understood.evidence[HOLDING_ACTOR_CANDIDATE_KEY])
+        self.assertFalse(_holding_filer_resolution_allowed(understood))
+        self.assertIsNone(plan.reporter)
+        self.assertNotIn(ROLE_PROVENANCE_KEY, plan.evidence)

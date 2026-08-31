@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from app.reasoning.holding_report_index import HoldingReportIndex
-from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.holding_reporter import canonical_reporter_key, reporter_matches
 
 
 #: ``plan.evidence`` key recording that this plan's reporter was produced by
@@ -26,6 +26,18 @@ INVALID_PAIR = "invalid_pair"
 NO_DIRECTION = "no_direction"
 BIDIRECTIONAL = "bidirectional"
 INDEX_ERROR = "index_error"
+#: No holder of this issuer answers to the name the question used.
+UNKNOWN_FILER = "unknown_filer"
+#: More than one holder of this issuer answers to it, and nothing separates
+#: them.  Two holders are not one holder written twice.
+AMBIGUOUS_FILER = "ambiguous_filer"
+
+#: Which corpus fact proved a role.  Both paths read the same index and both
+#: earn the same provenance source; the path says which question the index was
+#: asked.  ``two_company_relation`` compared both directed relationships;
+#: ``filer_identity`` matched a named holder against this issuer's own filers.
+ROLE_PATH_RELATION = "two_company_relation"
+ROLE_PATH_FILER = "filer_identity"
 
 
 @dataclass(frozen=True)
@@ -168,6 +180,89 @@ class HoldingCompanyRoleResolver:
             direction_2_report_count=count_2,
         )
 
+    def resolve_filer(
+        self, issuer: str, issuer_corp_code: str, surface: str
+    ) -> HoldingCompanyRoleResolution:
+        """Prove which of an issuer's own filers a question named.
+
+        The other ``resolve`` compares two canonical companies because both are
+        in the company universe.  A holding report's filer usually is not: the
+        universe is issuer-scoped, so a question naming a filer hands this
+        stage a *surface* and nothing else.  What makes it resolvable anyway is
+        that the corpus records every filer of every issuer, so the surface is
+        checked against that list instead of against an alias table.
+
+        Matching is the frozen ``reporter_matches`` and nothing wider, and an
+        exact canonical key wins outright: a corpus that records both 국민연금
+        and 국민연금공단 for one issuer keeps them as the two holders they are.
+        Anything else that matches more than one holder is refused, because
+        picking either would state one holder's position as the other's.
+        """
+
+        name = str(issuer or "").strip()
+        code = str(issuer_corp_code or "").strip()
+        named = str(surface or "").strip()
+        key = canonical_reporter_key(named)
+        if not name or not code or not key:
+            return HoldingCompanyRoleResolution(
+                INVALID_PAIR, reason="an issuer and a named filer are both required"
+            )
+        if self.index is None:
+            return HoldingCompanyRoleResolution(
+                NO_INDEX, reason="holding report index is unavailable"
+            )
+        if not self.index.complete:
+            return HoldingCompanyRoleResolution(
+                INCOMPLETE_INDEX, reason="holding report index is incomplete"
+            )
+        if (
+            self.active_corpus_identity is not None
+            and not self.index.matches_corpus(self.active_corpus_identity)
+        ):
+            return HoldingCompanyRoleResolution(
+                STALE_INDEX,
+                reason="holding report index does not match the active corpus",
+            )
+
+        try:
+            filers = self.index.enumerate_reporters(code)
+            matches = [filer for filer in filers if reporter_matches(filer, named)]
+            exact = [
+                filer for filer in matches if canonical_reporter_key(filer) == key
+            ]
+            chosen = exact or matches
+            reports = {
+                canonical_reporter_key(filer): len(
+                    self.index.enumerate_reports(code, filer)
+                )
+                for filer in chosen
+            }
+        except Exception:  # noqa: BLE001 - corpus lookup must fail closed
+            return HoldingCompanyRoleResolution(
+                INDEX_ERROR, reason="holding filer lookup failed"
+            )
+
+        if not chosen:
+            return HoldingCompanyRoleResolution(
+                UNKNOWN_FILER,
+                reason="no holder of this issuer answers to the name given",
+            )
+        if len(reports) > 1:
+            return HoldingCompanyRoleResolution(
+                AMBIGUOUS_FILER,
+                direction_1_report_count=sum(reports.values()),
+                reason="more than one holder of this issuer answers to the name given",
+            )
+        filer = chosen[0]
+        return HoldingCompanyRoleResolution(
+            RESOLVED,
+            issuer=name,
+            issuer_corp_code=code,
+            reporter=filer,
+            reporter_key=canonical_reporter_key(filer),
+            direction_1_report_count=next(iter(reports.values())),
+        )
+
     def document_ids(
         self, issuer_corp_code: str, reporter: str
     ) -> frozenset[str] | None:
@@ -196,17 +291,24 @@ class HoldingCompanyRoleResolver:
         return frozenset(record.doc_id for record in records)
 
 
-def role_provenance(resolution: HoldingCompanyRoleResolution) -> dict[str, Any]:
+def role_provenance(
+    resolution: HoldingCompanyRoleResolution,
+    *,
+    path: str = ROLE_PATH_RELATION,
+) -> dict[str, Any]:
     """Bounded provenance for one resolved direction.
 
     Deliberately carries no issuer or reporter value.  Exactly one direction is
     non-empty for a resolved result, so its report count is the informative
-    half and the other is zero.
+    half and the other is zero.  ``path`` records which corpus question proved
+    it, so a reader can tell a two-company relation from a named filer without
+    either one having to restate the parties.
     """
 
     return {
         "source": ROLE_PROVENANCE_SOURCE,
         "resolved": True,
+        "path": path,
         "direction_report_count": max(
             resolution.direction_1_report_count,
             resolution.direction_2_report_count,
@@ -229,9 +331,12 @@ def has_role_provenance(plan: Any) -> bool:
 
 
 __all__ = [
+    "AMBIGUOUS_FILER",
     "BIDIRECTIONAL",
     "HoldingCompanyRoleResolution",
     "HoldingCompanyRoleResolver",
+    "ROLE_PATH_FILER",
+    "ROLE_PATH_RELATION",
     "ROLE_PROVENANCE_KEY",
     "ROLE_PROVENANCE_SOURCE",
     "has_role_provenance",
@@ -243,4 +348,5 @@ __all__ = [
     "NO_INDEX",
     "RESOLVED",
     "STALE_INDEX",
+    "UNKNOWN_FILER",
 ]

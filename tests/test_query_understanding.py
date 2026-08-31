@@ -9,6 +9,11 @@ from app.reasoning import (
     QueryRouter,
     QueryUnderstanding,
 )
+from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.query_understanding import (
+    ACTOR_SOURCE_DIRECTED_HOLDER,
+    HOLDING_ACTOR_CANDIDATE_KEY,
+)
 from app.retrieval.interfaces import (
     CandidateChunk,
     CandidateDocument,
@@ -1550,3 +1555,150 @@ class ComparisonFrameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectedUnresolvableHolderIntentTests(unittest.TestCase):
+    """A directed acquisition whose acquirer no alias map can name.
+
+    The company universe is scoped to issuers, so the filer a holding report
+    belongs to is usually absent from it.  A real directed acquisition question
+    therefore names one company this stage can canonicalize -- the issuer whose
+    shares were bought -- and one it never will.  These cases prove the lane
+    activates on that structure alone, and that nothing wider rides along.
+    """
+
+    ISSUER = "가상발행사"
+    HOLDER = "가상지주"
+
+    def setUp(self) -> None:
+        # Only the issuer is recognizable, exactly as an issuer-scoped universe
+        # behaves for a holding-report filer.
+        self.understanding = QueryUnderstanding({self.ISSUER: {self.ISSUER}})
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def directed(self) -> str:
+        return f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가는 얼마야?"
+
+    def assert_ordinary_lookup(self, query: str) -> None:
+        plan = self.plan(query)
+        self.assertEqual(plan.task_type, "disclosure_lookup")
+        self.assertEqual(plan.disclosure_route, ())
+        self.assertNotEqual(plan.metric, "acquisition_unit_price")
+        self.assertIsNone(plan.evidence["holding_ownership_intent"])
+        self.assertIsNone(plan.evidence[HOLDING_ACTOR_CANDIDATE_KEY])
+
+    def test_directed_acquisition_with_unresolvable_holder_activates_holding(
+        self,
+    ) -> None:
+        query = self.directed()
+        plan = self.plan(query)
+
+        self.assertEqual(plan.task_type, "holding_change")
+        self.assertEqual(plan.evidence["operation"], "lookup_holding")
+        self.assertEqual(plan.metric, "acquisition_unit_price")
+        self.assertEqual(plan.disclosure_route, ("holding",))
+        self.assertEqual(
+            plan.evidence["holding_ownership_intent"],
+            "company_acquires_company_shares",
+        )
+        # The acquirer is read for structure and written nowhere: the issuer
+        # stays the only company, and who the filer is remains validation's
+        # question because only the corpus can answer it.
+        self.assertEqual(plan.companies, (self.ISSUER,))
+        self.assertIsNone(plan.reporter)
+        self.assertEqual(route_task(query, plan).task_type, "holding_event")
+
+    def test_actor_candidate_is_carried_unresolved(self) -> None:
+        candidate = self.plan(self.directed()).evidence[HOLDING_ACTOR_CANDIDATE_KEY]
+
+        self.assertEqual(candidate["surface"], self.HOLDER)
+        self.assertEqual(
+            candidate["reporter_key"], canonical_reporter_key(self.HOLDER)
+        )
+        self.assertEqual(candidate["source"], ACTOR_SOURCE_DIRECTED_HOLDER)
+        # Syntax proved a surface stood in the actor slot; it cannot prove the
+        # surface names a holder this corpus knows, and must not claim to.
+        self.assertFalse(candidate["resolved"])
+
+    def test_directed_acquisition_subject_guards(self) -> None:
+        for label, subject in (
+            ("issuer itself", f"{self.ISSUER}가"),
+            ("bare temporal", "2024년이"),
+            ("generic noun", "회사가"),
+            ("no subject", ""),
+        ):
+            with self.subTest(subject=label):
+                self.assert_ordinary_lookup(
+                    f"{subject} {self.ISSUER} 주식을 "
+                    "취득할 때의 취득단가는 얼마야?".strip()
+                )
+
+    def test_ordinary_acquisition_language_is_not_over_routed(self) -> None:
+        for query in (
+            f"{self.ISSUER}가 토지를 취득한 공시는?",
+            f"{self.ISSUER}가 자산을 취득한 공시는?",
+            f"{self.ISSUER}가 자기주식을 취득한 공시는?",
+            f"{self.ISSUER} 주식의 단가는?",
+            "취득단가는 얼마야?",
+        ):
+            with self.subTest(query=query):
+                self.assert_ordinary_lookup(query)
+
+    def test_single_mention_comparison_is_blocked(self) -> None:
+        # ``_comparison_frame`` needs two canonical mentions to bind an
+        # operator, and an unresolved acquirer gives it only one.  Comparative
+        # vocabulary must therefore decline outright rather than pass an
+        # unchecked comparison into a single-holder binding.
+        for query in (
+            f"{self.HOLDER}와 다른 회사의 {self.ISSUER} 주식 취득단가를 비교해줘",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때와 "
+            "매수할 때의 취득단가 차이는?",
+        ):
+            with self.subTest(query=query):
+                self.assert_ordinary_lookup(query)
+
+
+class TwoMentionUnitPriceAlignmentTests(unittest.TestCase):
+    """Both parties recognizable: the reviewed metric alignment, pinned.
+
+    ``holding_field_evidence`` already answered these questions from the
+    question text alone while the plan reported no metric.  Recording the
+    metric makes the plan agree with the producer that was already active, so
+    the agreement is asserted here rather than left to be dropped by accident.
+    """
+
+    HOLDER = "가상투자사"
+    ISSUER = "가상발행사"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.HOLDER, self.ISSUER)}
+        )
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def test_two_mention_unit_price_alignment_is_intentional(self) -> None:
+        for query in (
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 취득 단가는?",
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 매수 단가는?",
+        ):
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertEqual(plan.task_type, "holding_change")
+                self.assertEqual(plan.metric, "acquisition_unit_price")
+                self.assertEqual(plan.disclosure_route, ("holding",))
+
+    def test_neighbouring_fields_are_not_a_unit_price(self) -> None:
+        for label, query in (
+            ("disposal price", f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 처분 단가는?"),
+            ("total amount", f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 총 취득금액은?"),
+            ("share count", f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 몇 주야?"),
+            ("ownership ratio", f"{self.HOLDER}가 보유한 {self.ISSUER} 지분 비율은?"),
+        ):
+            with self.subTest(field=label):
+                self.assertNotEqual(
+                    self.plan(query).metric, "acquisition_unit_price"
+                )

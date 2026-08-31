@@ -9,6 +9,7 @@ from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
 from app.reasoning import holding_report_relative
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -282,6 +283,15 @@ class QueryUnderstanding:
                 ),
             )
         reporter = _find_reporter(raw_query)
+        # Syntax's half of the role question: which surface stood in the actor
+        # slot.  Whether that surface names a holder of this issuer is a corpus
+        # question, and validation is where the corpus is readable.
+        actor_candidate = (
+            directed_holder_candidate(raw_query, company_mentions[0])
+            if ownership_evidence == "company_acquires_company_shares"
+            and len(company_mentions) == 1
+            else None
+        )
 
         if holding_metric or ownership_intent:
             task_type = "holding_change"
@@ -430,6 +440,7 @@ class QueryUnderstanding:
                 "event_type": event_evidence,
                 "operation": operation,
                 "holding_ownership_intent": ownership_evidence,
+                HOLDING_ACTOR_CANDIDATE_KEY: actor_candidate,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
                 "correction_intent": correction_intent,
@@ -501,6 +512,43 @@ def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+#: A directed acquisition question names its acquirer in subject position.  The
+#: acquirer is matched as the *whole* subject and as a single token: anything
+#: else in front of the recognized company is structure this stage cannot bound.
+#: A leading legal form is part of the token, and ``canonical_reporter_key``
+#: removes it, so ``(주)가상인수자``, ``㈜가상인수자`` and ``가상인수자`` reduce to one acquirer.
+_HOLDER_SUBJECT = re.compile(
+    r"\s*(?P<holder>[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{1,31})"
+    r"\s*[이가]\s*"
+)
+#: Words that fill the subject slot without naming anybody.  Compared against
+#: the canonical holder key, never against raw text.
+_NON_HOLDER_SUBJECTS = frozenset(
+    {
+        "회사", "기업", "법인", "당사", "본사", "상대방",
+        "취득자", "매수자", "인수자", "보유자", "주주",
+        "어디", "누구", "그곳", "이곳", "어느곳",
+    }
+)
+#: A date or a quantity standing where an acquirer should.
+_BARE_PERIOD_SUBJECT = re.compile(r"\d+(?:년|월|일|분기|기|주)?")
+#: ``plan.evidence`` key carrying the actor a directed acquisition named, before
+#: anything corpus-aware has confirmed that such a holder exists.  Read by
+#: validation, which owns the identity question; never a reporter by itself.
+HOLDING_ACTOR_CANDIDATE_KEY = "holding_actor_candidate"
+#: What produced that candidate.  A consumer that cannot read this provenance
+#: has no business acting on the candidate.
+ACTOR_SOURCE_DIRECTED_HOLDER = "directed_holder_syntax"
+#: An acquisition unit price named outright: the price word bound directly to
+#: the acquisition word with nothing between them.  ``취득가액``, ``총 취득금액``
+#: and a bare ``단가`` all fail this on purpose.
+_ACQUISITION_UNIT_PRICE = re.compile(r"(?:취득|매수)단가")
+#: A disposal price is a different field.  A source column can be labelled
+#: 취득/처분단가, but only the row-level producer reads that header; a question
+#: that asks for the disposal side is asking a different question.
+_DISPOSAL_UNIT_PRICE = re.compile(r"(?:처분|매도|양도).{0,12}?단가")
+
+
 def _find_bounded_ownership_intent(
     query: str,
     companies: tuple[str, ...],
@@ -509,20 +557,26 @@ def _find_bounded_ownership_intent(
     comparison_frame: str | None,
     conflicting_intent: bool,
 ) -> tuple[bool, str | None, str | None, str | None]:
-    """Recognize closed two-company securities-ownership constructions.
+    """Recognize closed securities-ownership constructions.
 
     This classifier determines only the holding task family and, when the
     wording is explicit, its metric.  The canonical company tuple remains
     untouched: issuer/reporter direction belongs to validation and cannot be
     inferred from mention order here.
+
+    Two canonical mentions are the ordinary case.  A directed acquisition is
+    the one construction that also runs on a single mention, because the
+    acquirer it names is a holding-report filer and the company universe is
+    scoped to issuers -- see ``_directed_acquisition_from_unresolved_holder``.
     """
 
-    if (
-        len(companies) != 2
-        or len(mentions) != 2
-        or comparison_frame in {"cross_company", "uncertain"}
-        or conflicting_intent
-    ):
+    if comparison_frame in {"cross_company", "uncertain"} or conflicting_intent:
+        return False, None, None, None
+
+    if len(companies) == 1 and len(mentions) == 1:
+        return _directed_acquisition_from_unresolved_holder(query, mentions[0])
+
+    if len(companies) != 2 or len(mentions) != 2:
         return False, None, None, None
 
     (_first_start, first_end, _first), (second_start, second_end, _second) = mentions
@@ -565,7 +619,106 @@ def _find_bounded_ownership_intent(
     shares = re.search(r"몇\s*주|주식\s*수(?:량)?|보유\s*수량", query)
     if shares:
         return True, "holding_shares", family, shares.group(0)
+    # The holding family is already established, so an explicit acquisition
+    # unit-price noun phrase names the answer unit the same way 몇 주 and 지분율
+    # do above.  It stays a noun phrase: the price word has to be bound to the
+    # acquisition word, which is what separates it from 취득가액, 총 취득금액 and
+    # a bare 단가.
+    unit_price = _acquisition_unit_price_phrase(tail)
+    if unit_price:
+        return True, "acquisition_unit_price", family, unit_price
     return True, None, family, None
+
+
+def _directed_acquisition_from_unresolved_holder(
+    query: str,
+    mention: tuple[int, int, str],
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Recognize a directed acquisition whose acquirer no alias map can name.
+
+    The company universe is issuer-scoped, and a holding report's filer is an
+    asset manager, a fund, an individual or a foreign entity far more often
+    than it is one of those issuers.  So a real directed acquisition question
+    names one company this stage can canonicalize -- the issuer whose shares
+    were bought -- and one it never will.  Demanding two canonical mentions
+    asks this stage for corpus knowledge it does not have.
+
+    The acquirer is therefore bounded by *shape*, never resolved: it is the
+    whole subject of the sentence, and it is carried onward only as the
+    candidate ``directed_holder_candidate`` builds.  No company, no reporter
+    and no role is written from it, so issuer/reporter direction still belongs
+    entirely to validation.
+    """
+
+    _start, end, _canonical = mention
+    if directed_holder_candidate(query, mention) is None:
+        return False, None, None, None
+    evidence = _directed_acquisition_unit_price(re.sub(r"\s+", "", query[end:]))
+    if not evidence:
+        return False, None, None, None
+    return (
+        True,
+        "acquisition_unit_price",
+        "company_acquires_company_shares",
+        evidence,
+    )
+
+
+def directed_holder_candidate(
+    query: str,
+    mention: tuple[int, int, str],
+) -> dict[str, Any] | None:
+    """The acquirer a directed acquisition names, as syntax alone can see it.
+
+    Deliberately a *candidate*.  Syntax can prove that a surface stood in the
+    actor slot of a directed acquisition; it cannot prove that the surface is a
+    holder this corpus knows, and it must not claim to.  ``resolved`` stays
+    false until something that can read the corpus says otherwise.
+    """
+
+    start, _end, _canonical = mention
+    if start == 0:
+        return None
+    # ``_comparison_frame`` needs two canonical mentions to bind an operator,
+    # and an unresolved acquirer gives it only one.  Comparative or set
+    # vocabulary anywhere in the question therefore declines outright rather
+    # than passing an unchecked comparison into the holding lane.
+    if _has_comparison_vocabulary(query):
+        return None
+    subject = _HOLDER_SUBJECT.fullmatch(query[:start])
+    if subject is None:
+        return None
+    surface = subject.group("holder").strip()
+    key = canonical_reporter_key(surface)
+    if (
+        len(key) < 2
+        or key in _NON_HOLDER_SUBJECTS
+        or _BARE_PERIOD_SUBJECT.fullmatch(key)
+    ):
+        return None
+    return {
+        "surface": surface,
+        "reporter_key": key,
+        "source": ACTOR_SOURCE_DIRECTED_HOLDER,
+        "resolved": False,
+    }
+
+
+def _has_comparison_vocabulary(query: str) -> bool:
+    """Any wording ``_comparison_frame`` would weigh, read without operands."""
+
+    compact = re.sub(r"\s+", "", query)
+    return any(
+        term in compact
+        for group in (
+            _EXPLICIT_COMPARISON,
+            _CHOICE_MARKERS,
+            _ENUMERATION_MARKERS,
+            _COMPARATIVE_PREDICATES,
+            _COMPARISON_OPERATORS,
+        )
+        for term in group
+    )
 
 
 def _directed_acquisition_unit_price(tail: str) -> str | None:
@@ -573,12 +726,25 @@ def _directed_acquisition_unit_price(tail: str) -> str | None:
 
     if not re.match(r"^주식(?:은|는|이|가|을|를)?", tail):
         return None
-    # A source column can be labelled 취득/처분단가, but a disposal question is
-    # a different intent.  Query understanding activates only the acquisition
-    # side before the row-level producer interprets any source header.
-    if re.search(r"(?:처분|매도|양도).{0,12}?단가", tail):
+    # Query understanding activates only the acquisition side before the
+    # row-level producer interprets any source header.
+    if _DISPOSAL_UNIT_PRICE.search(tail):
         return None
     match = re.search(r"(?:취득|매수).{0,24}?단가", tail)
+    return match.group(0) if match else None
+
+
+def _acquisition_unit_price_phrase(tail: str) -> str | None:
+    """The acquisition unit price named as a noun phrase, if the tail names it.
+
+    Used where the holding family is already established by the construction
+    itself, so no acquisition verb has to carry the reading.  Only adjacency
+    counts: the price word bound to the acquisition word and nothing else.
+    """
+
+    if _DISPOSAL_UNIT_PRICE.search(tail):
+        return None
+    match = _ACQUISITION_UNIT_PRICE.search(tail)
     return match.group(0) if match else None
 
 
