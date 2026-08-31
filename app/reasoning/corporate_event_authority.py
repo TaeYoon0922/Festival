@@ -65,6 +65,19 @@ class SelectedCorporateMember:
 
 
 @dataclass(frozen=True)
+class CorporateSelectionIntent:
+    """The one query-selection distinction field authority needs.
+
+    P0-A still owns correction finality.  This flag only says that retrieval
+    selected one filing by an exact receipt date and the question did not ask
+    for a corrected/latest view, so the served mapping key is the filing whose
+    field must be read.
+    """
+
+    exact_historical_receipt_date: bool = False
+
+
+@dataclass(frozen=True)
 class CorporateAuthority:
     """What P0-B could say about this request.
 
@@ -88,6 +101,7 @@ def selected_corporate_member(
     corp_code: str | None,
     served_doc_ids: Sequence[str],
     candidate_doc_ids: Sequence[str] = (),
+    selection_intent: CorporateSelectionIntent | None = None,
 ) -> CorporateAuthority:
     """Read P0-B's verdict for the filings this answer was served.
 
@@ -113,7 +127,7 @@ def selected_corporate_member(
     served = {str(doc_id) for doc_id in served_doc_ids if str(doc_id)}
     wanted_corp = str(corp_code or "").strip()
     candidates = [
-        state
+        (doc_id, state)
         for doc_id, state in states.items()
         if doc_id in served
         and str(state.get("member_role") or "") == ROLE_CONTRACT
@@ -123,7 +137,7 @@ def selected_corporate_member(
         return _DECLINED
 
     unaccounted = _unaccounted_candidates(
-        execution, states, candidate_doc_ids, candidates
+        execution, states, candidate_doc_ids, [state for _doc_id, state in candidates]
     )
     if unaccounted:
         # A served filing that could answer this field, which P0-B did not
@@ -133,39 +147,65 @@ def selected_corporate_member(
         # retrieval's seed window kept.
         return CorporateAuthority(conflict=True, reason="incomplete_corporate_authority")
 
-    event_ids = {str(state.get("event_id") or "") for state in candidates}
+    event_ids = {str(state.get("event_id") or "") for _doc_id, state in candidates}
     if len(event_ids) != 1:
         # Two contracts, and P0-B places them on different lifecycles.  Which
         # one the question meant is not a choice this may make.
         return CorporateAuthority(conflict=True, reason="multiple_corporate_events")
 
-    canonical = {str(state.get("canonical_doc_id") or "") for state in candidates}
+    canonical = {
+        str(state.get("canonical_doc_id") or "") for _doc_id, state in candidates
+    }
     canonical.discard("")
     if len(canonical) != 1:
         return CorporateAuthority(conflict=True, reason="multiple_canonical_members")
 
     if any(
         str(state.get("correction_resolution_status") or "") in {AMBIGUOUS, UNRESOLVED}
-        for state in candidates
+        for _doc_id, state in candidates
     ):
         # P0-A saw a correction group and could not say which filing is final.
         # Reading either end would be inventing the finality it declined to
         # assert.
         return CorporateAuthority(conflict=True, reason="correction_finality_unresolved")
 
-    authoritative = next(iter(canonical))
-    first = candidates[0]
+    historical = bool(
+        selection_intent and selection_intent.exact_historical_receipt_date
+    )
+    if historical:
+        field_bearing = {
+            str(value) for value in candidate_doc_ids if str(value)
+        }
+        field_candidates = {
+            doc_id
+            for doc_id, _state in candidates
+            if doc_id in field_bearing
+        }
+        if len(field_candidates) != 1:
+            return CorporateAuthority(
+                conflict=True, reason="historical_field_authority_ambiguous"
+            )
+        # The repository mapping key is the asked document identity.  Its state
+        # value may deliberately describe the chain's canonical/latest member.
+        authoritative = next(iter(field_candidates))
+        superseded = frozenset(
+            doc_id for doc_id, _state in candidates if doc_id != authoritative
+        )
+    else:
+        authoritative = next(iter(canonical))
+        superseded = frozenset(
+            str(state.get("doc_id") or "")
+            for _doc_id, state in candidates
+            if str(state.get("doc_id") or "") != authoritative
+        )
+    first = candidates[0][1]
     return CorporateAuthority(
         member=SelectedCorporateMember(
             event_id=next(iter(event_ids)),
             corp_code=str(first.get("corp_code") or ""),
             authoritative_doc_id=authoritative,
             member_role=ROLE_CONTRACT,
-            superseded_doc_ids=frozenset(
-                str(state.get("doc_id") or "")
-                for state in candidates
-                if str(state.get("doc_id") or "") != authoritative
-            ),
+            superseded_doc_ids=superseded,
         ),
         reason="selected_corporate_member",
     )
@@ -300,6 +340,7 @@ def _carried_states(execution: Any) -> dict[str, Mapping[str, Any]]:
 
 __all__ = [
     "CorporateAuthority",
+    "CorporateSelectionIntent",
     "SelectedCorporateMember",
     "selected_corporate_member",
 ]

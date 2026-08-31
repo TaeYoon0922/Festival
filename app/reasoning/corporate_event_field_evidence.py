@@ -26,7 +26,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from app.reasoning.corporate_event_authority import selected_corporate_member
+from app.reasoning.corporate_event_authority import (
+    CorporateSelectionIntent,
+    selected_corporate_member,
+)
 from app.reasoning.corporate_event_graph import _AMOUNT_LABELS
 from app.reasoning.correction_graph import _cells, _compact, _label_key
 from app.reasoning.field_evidence import (
@@ -108,6 +111,7 @@ def corporate_event_field_evidence(
         # requiring authority for it would fail closed on ordinary neighbouring
         # evidence rather than on a real rival.
         candidate_doc_ids=_field_bearing_docs(evidence_items),
+        selection_intent=_selection_intent(plan),
     )
     if authority.conflict:
         return tuple(_conflict(field, authority.reason) for field in fields)
@@ -122,6 +126,42 @@ def corporate_event_field_evidence(
     for field in fields:
         records.extend(readers[field](member, evidence_items=evidence_items))
     return tuple(records)
+
+
+def _selection_intent(plan: Any) -> CorporateSelectionIntent:
+    """Reduce the plan to the one authority distinction this producer needs."""
+
+    period = getattr(plan, "period", None)
+    exact = bool(
+        period is not None
+        and getattr(period, "from_date", None)
+        and getattr(period, "from_date", None) == getattr(period, "to_date", None)
+        and getattr(period, "period_type", None) == "receipt_date"
+    )
+    date_basis = getattr(plan, "date_basis", None)
+    date_basis = getattr(date_basis, "value", date_basis)
+
+    evidence = getattr(plan, "evidence", None)
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    route_evidence = getattr(plan, "route_evidence", None)
+    route_evidence = route_evidence if isinstance(route_evidence, Mapping) else {}
+    correction_intent = str(evidence.get("correction_intent") or "")
+    correction_policy = str(getattr(plan, "correction_policy", "") or "")
+    explicit_latest_or_corrected = (
+        correction_intent in {"latest", "history"}
+        or correction_policy == "corrected_only"
+        or (
+            correction_policy == "latest_preferred"
+            and bool(route_evidence.get("is_correction"))
+        )
+    )
+    return CorporateSelectionIntent(
+        exact_historical_receipt_date=(
+            exact
+            and date_basis == "receipt_date"
+            and not explicit_latest_or_corrected
+        )
+    )
 
 
 def _field_bearing_docs(evidence_items: Sequence[Any]) -> tuple[str, ...]:

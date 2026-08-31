@@ -265,16 +265,55 @@ def _unrelated_chunk(chunk_id: str, doc_id: str, *, rcept_dt: str = RECEIPT):
     }
 
 
-def _corporate_plan(question: str, *, corp_code: str | None = CORP) -> QueryPlan:
+def _corporate_plan(
+    question: str,
+    *,
+    corp_code: str | None = CORP,
+    exact_receipt: bool = True,
+    correction_intent: str | None = None,
+) -> QueryPlan:
+    correction_policy = "any"
+    correction_route_evidence = {}
+    plan_correction_intent = correction_intent
+    if correction_intent == "latest":
+        correction_policy = "latest_preferred"
+        correction_route_evidence = {"is_correction": "explicit latest"}
+    elif correction_intent == "corrected":
+        correction_policy = "corrected_only"
+        correction_route_evidence = {"is_correction": "explicit corrected"}
+        plan_correction_intent = None
     return QueryPlan(
         query=question,
         raw_query=question,
         task_type="disclosure_lookup",
         corp_code=corp_code,
         event_type="supply_contract",
-        date_basis=DateBasis.RECEIPT_DATE,
-        period=QueryPeriod(from_date=RECEIPT, to_date=RECEIPT,
-                           period_type="receipt_date"),
+        date_basis=(
+            DateBasis.RECEIPT_DATE if exact_receipt else DateBasis.UNSPECIFIED
+        ),
+        period=(
+            QueryPeriod(from_date=RECEIPT, to_date=RECEIPT,
+                        period_type="receipt_date")
+            if exact_receipt
+            else None
+        ),
+        correction_policy=correction_policy,
+        route_evidence=correction_route_evidence,
+        evidence={"correction_intent": plan_correction_intent},
+    )
+
+
+def _repository_shaped_execution(states_by_asked_doc):
+    """Carry the repository's asked-key/canonical-value state shape verbatim."""
+
+    return SimpleNamespace(
+        event_expansion={
+            "event_member_states": {
+                asked_doc_id: state.to_dict()
+                for asked_doc_id, state in states_by_asked_doc.items()
+            }
+        },
+        correction_expansion={},
     )
 
 
@@ -406,10 +445,186 @@ class CorporateFieldEvidenceTests(unittest.TestCase):
             if "계약금액" not in str(row[0]["text"])
         ]
 
-        records = _corporate_evidence(self.QUESTION, (chunk,), states=(_state("d1"),))
+        records = _corporate_evidence(
+            self.QUESTION,
+            (chunk,),
+            states=(_state("d1"),),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
+        )
 
         self.assertIs(records[0].status, FieldStatus.MISSING)
         self.assertIsNone(records[0].chunk_id)
+
+
+class CorporateHistoricalReceiptAuthorityTests(unittest.TestCase):
+    """An exact receipt date reads the filing selected by that date."""
+
+    QUESTION = "2024년 5월 20일 공시된 공급계약의 계약금액은 얼마인가요?"
+
+    def _run(self, served, states_by_asked_doc, *, plan=None, unserved=()):
+        all_chunks = [*served, *unserved]
+        candidates = [
+            CandidateChunk(str(chunk["chunk_id"]), str(chunk["doc_id"]), chunk,
+                           MetadataMatch())
+            for chunk in all_chunks
+        ]
+        results = [
+            RetrievalResult(str(chunk["chunk_id"]), str(chunk["doc_id"]),
+                            1.0 / index, index, {})
+            for index, chunk in enumerate(served, start=1)
+        ]
+        selected_plan = plan or _corporate_plan(self.QUESTION)
+        carried = _repository_shaped_execution(states_by_asked_doc)
+        execution = SimpleNamespace(
+            plan=selected_plan,
+            chunks=candidates,
+            results=results,
+            event_expansion=carried.event_expansion,
+            correction_expansion=carried.correction_expansion,
+        )
+        result = AgentOrchestrator().run(self.QUESTION, selected_plan, execution)
+        generated = generate_answer(result.answer_draft)
+        verdict = AnswerabilityGuard().evaluate(
+            generated,
+            plan=selected_plan,
+            agent_result=result,
+            execution=SimpleNamespace(results=result.evidence_results),
+        )
+        return result, generated, verdict, guarded_answer_text(
+            verdict, generated.answer_text
+        )
+
+    def test_d1_historical_mapping_key_is_citable_field_authority(self) -> None:
+        historical = _contract_chunk(
+            "historical-amount", "historical-contract", amount="-",
+            extra_rows=(_row("8. 비고", "계약금액은 유보기한 종료 후 공시 예정"),),
+        )
+        corrected = _contract_chunk(
+            "corrected-amount", "corrected-contract", amount="205,000,000,000",
+            rcept_dt=LATER_RECEIPT, table_id="t0002",
+        )
+        termination = _contract_chunk(
+            "termination-amount", "contract-termination", amount="99,000,000,000",
+            rcept_dt=LATER_RECEIPT, table_id="t0003",
+            section="단일판매ㆍ공급계약해지",
+        )
+        states = {
+            # This is the real repository shape: the asked key is historical,
+            # while both identity fields in its value name the chain latest.
+            "historical-contract": _state(
+                "corrected-contract", canonical="corrected-contract", group="chain-1",
+                correction_status=RESOLVED, member_count=2,
+            ),
+            "contract-termination": _state(
+                "contract-termination", role=ROLE_TERMINATION
+            ),
+        }
+
+        result, generated, verdict, answer = self._run(
+            (historical, termination), states, unserved=(corrected,)
+        )
+
+        self.assertEqual(len(result.field_evidence), 1)
+        found = result.field_evidence[0]
+        self.assertEqual(found.doc_id, "historical-contract")
+        self.assertEqual(found.chunk_id, "historical-amount")
+        self.assertIs(found.status, FieldStatus.UNAVAILABLE)
+        self.assertIs(found.reason, FieldReason.WITHHELD_OR_DEFERRED)
+        self.assertFalse(verdict.answerable)
+        self.assertEqual(verdict.unavailable_fields, (CONTRACT_AMOUNT,))
+        self.assertIsNotNone(verdict.refusal_citation)
+        self.assertIn(verdict.refusal_citation, answer)
+        citations = {citation.citation_id: citation.chunk_id
+                     for citation in generated.citations}
+        self.assertEqual(citations[verdict.refusal_citation], "historical-amount")
+        self.assertNotIn("205,000,000,000", answer)
+        self.assertNotIn("99,000,000,000", answer)
+
+    def test_d1_explicit_latest_or_corrected_keeps_canonical_authority(self) -> None:
+        historical = _contract_chunk(
+            "historical-amount", "historical-contract", amount="100,000,000"
+        )
+        corrected = _contract_chunk(
+            "corrected-amount", "corrected-contract", amount="205,000,000,000",
+            rcept_dt=LATER_RECEIPT, table_id="t0002",
+        )
+        final = _state(
+            "corrected-contract", canonical="corrected-contract", group="chain-1",
+            correction_status=RESOLVED, member_count=2,
+        )
+
+        for intent in ("latest", "corrected"):
+            with self.subTest(intent=intent):
+                result, _generated_answer, verdict, _answer = self._run(
+                    (historical, corrected),
+                    {"historical-contract": final, "corrected-contract": final},
+                    plan=_corporate_plan(self.QUESTION, correction_intent=intent),
+                )
+
+                authoritative = [record for record in result.field_evidence
+                                 if record.authoritative]
+                self.assertEqual(len(authoritative), 1)
+                self.assertEqual(authoritative[0].doc_id, "corrected-contract")
+                self.assertEqual(authoritative[0].value, "205,000,000,000")
+                self.assertTrue(verdict.answerable)
+
+    def test_d1_unresolved_finality_still_fails_closed(self) -> None:
+        historical = _contract_chunk(
+            "historical-amount", "historical-contract", amount="184,000,000,000"
+        )
+        state = _state(
+            "corrected-contract", canonical="corrected-contract", group="chain-1",
+            correction_status=UNRESOLVED, member_count=2,
+        )
+
+        result, _generated_answer, verdict, _answer = self._run(
+            (historical,), {"historical-contract": state}
+        )
+
+        self.assertEqual([record.status for record in result.field_evidence],
+                         [FieldStatus.CONFLICT])
+        self.assertFalse(verdict.answerable)
+
+    def test_d1_multiple_events_still_fail_closed(self) -> None:
+        first = _contract_chunk("amount-a", "contract-a", amount="100,000,000")
+        second = _contract_chunk(
+            "amount-b", "contract-b", amount="200,000,000", table_id="t0002"
+        )
+
+        result, _generated_answer, verdict, _answer = self._run(
+            (first, second),
+            {
+                "contract-a": _state("contract-a", event_id="event-a"),
+                "contract-b": _state("contract-b", event_id="event-b"),
+            },
+        )
+
+        self.assertEqual([record.status for record in result.field_evidence],
+                         [FieldStatus.CONFLICT])
+        self.assertFalse(verdict.answerable)
+
+    def test_d2_numeric_historical_amount_uses_the_formal_row(self) -> None:
+        historical = _contract_chunk(
+            "historical-amount", "historical-contract", amount="184,000,000,000"
+        )
+        state = _state(
+            "corrected-contract", canonical="corrected-contract", group="chain-1",
+            correction_status=RESOLVED, member_count=2,
+        )
+
+        result, _generated_answer, verdict, _answer = self._run(
+            (historical,), {"historical-contract": state}
+        )
+
+        self.assertEqual(len(result.field_evidence), 1)
+        found = result.field_evidence[0]
+        self.assertIs(found.status, FieldStatus.AVAILABLE)
+        self.assertEqual(found.value, "184,000,000,000")
+        self.assertEqual(found.chunk_id, "historical-amount")
+        self.assertEqual((found.row_start, found.row_end), (2, 2))
+        self.assertNotEqual(found.value, "1,482,000,000,000")
+        self.assertNotEqual(found.value, "12.4")
+        self.assertTrue(verdict.answerable)
 
 
 class CorporateProducerDeclineTests(unittest.TestCase):
@@ -605,6 +820,7 @@ class P1_2_CorrectionAbsenceTests(unittest.TestCase):
                 _state("dROOT", canonical="dLATEST", group="g1",
                        correction_status=RESOLVED, member_count=2),
             ),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
         )
 
         authoritative = [record for record in records if record.authoritative]
@@ -657,6 +873,7 @@ class P1_3_CorrectionMiddleLinkTests(unittest.TestCase):
             self.QUESTION,
             (_contract_chunk("cMID", "dMID", amount="100,000,000"),),
             states=self._chain("dMID"),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
         )
 
         authoritative = [record for record in records if record.authoritative]
@@ -673,6 +890,7 @@ class P1_3_CorrectionMiddleLinkTests(unittest.TestCase):
             self.QUESTION,
             (_contract_chunk("cROOT", "dROOT", amount="100,000,000"),),
             states=self._chain("dROOT"),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
         )
 
         self.assertTrue(all(
@@ -689,6 +907,7 @@ class P1_3_CorrectionMiddleLinkTests(unittest.TestCase):
                                 table_id="t0002"),
             ),
             states=self._chain("dMID", "dLATEST"),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
         )
 
         authoritative = [record for record in records if record.authoritative]
@@ -905,6 +1124,7 @@ class P1_A_AuthorityCompletenessTests(unittest.TestCase):
                            correction_status=RESOLVED, member_count=2),),
             seeds=["dROOT"],
             expanded_events=({"event_id": EVENT, "target_doc_ids": ["dLATEST"]},),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
         )
 
         authoritative = [record for record in records if record.authoritative]
@@ -1037,6 +1257,7 @@ class P1_A_AuthorityCompletenessTests(unittest.TestCase):
                            correction_status=RESOLVED, member_count=2),),
             seeds=["dROOT"],
             expanded_events=({"event_id": EVENT, "target_doc_ids": ["dLATEST"]},),
+            plan=_corporate_plan(self.QUESTION, exact_receipt=False),
         )
 
         authoritative = [record for record in records if record.authoritative]
@@ -1076,7 +1297,7 @@ class P1_A_AuthorityCompletenessTests(unittest.TestCase):
             )
             for i, c in enumerate(served, start=1)
         ]
-        plan = _corporate_plan(self.QUESTION)
+        plan = _corporate_plan(self.QUESTION, exact_receipt=False)
         execution = SimpleNamespace(
             plan=plan, chunks=[candidate for candidate, _ in pairs],
             results=[result for _, result in pairs],
@@ -1259,7 +1480,7 @@ class OrdinaryQuestionEndToEndTests(unittest.TestCase):
             )
             for i, c in enumerate(chunks, start=1)
         ]
-        plan = _corporate_plan(self.QUESTION)
+        plan = _corporate_plan(self.QUESTION, exact_receipt=False)
         seeds = [str(c["doc_id"]) for c in chunks]
         execution = SimpleNamespace(
             plan=plan,
