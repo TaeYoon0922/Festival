@@ -38,9 +38,8 @@ corpus_sketch: |
   recent-two compare; no explicit date in question → partial.
 
 related_agent_gaps:
-  - recent_event_ranking
 
-improve_hint (참고): receipt_date nearest pair
+improve_hint (참고): exchange_recent_pair (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

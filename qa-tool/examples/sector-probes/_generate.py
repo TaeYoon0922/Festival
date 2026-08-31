@@ -77,7 +77,7 @@ PROBES = [
         "evidence": {"section_path": "연결 재무상태표", "manifest": "corp_name=POSCO홀딩스"},
         "negative": "부채총계 단일행",
         "notes": "two-row ratio from balance sheet.",
-        "gaps": ["derived_ratio multi-row"], "improve": "periodic_derived_metrics ratio",
+        "gaps": [], "improve": "periodic_derived_metrics balance_ratio (implemented)",
     },
     {
         "id": "SP06", "slug": "고려아연", "sector_no": 6, "sector": "비철금속",
@@ -91,7 +91,7 @@ PROBES = [
         "evidence": {"manifest": "corp_name=고려아연, doc_subtype=신규시설투자등"},
         "negative": "단일 filing만",
         "notes": "recent-two compare; no explicit date in question → partial.",
-        "gaps": ["recent_event_ranking"], "improve": "receipt_date nearest pair",
+        "gaps": [], "improve": "exchange_recent_pair (implemented)",
     },
     {
         "id": "SP07", "slug": "삼성생명", "sector_no": 7, "sector": "보험",

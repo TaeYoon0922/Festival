@@ -46,6 +46,8 @@ def project_derived_metric_display(
     kind = _derived_kind(request)
     if not kind or not str(text or "").strip():
         return None
+    if kind == "balance_ratio":
+        return _append_balance_sheet_ratio(text)
     base = project_periodic_metric_table(
         text,
         metric=metric,
@@ -86,6 +88,28 @@ def _append_rate(table: str, *, metric: str | None) -> str | None:
         f"({label} 증가율(파생): {_format_pct(rate)} — "
         f"{_format_amount(old_value)} → {_format_amount(new_value)})"
     )
+
+
+def _append_balance_sheet_ratio(table: str) -> str | None:
+    liability = _metric_values_from_table(table, ("부채총계", "총부채", "부채"))
+    equity = _metric_values_from_table(table, ("자본총계", "총자본", "자기자본"))
+    if not liability or not equity:
+        return None
+    lines = [table]
+    period_labels = ("전기", "당기")
+    for index in range(min(len(liability), len(equity))):
+        ratio = _safe_ratio(liability[index], equity[index])
+        if ratio is None:
+            continue
+        label = period_labels[index] if index < len(period_labels) else f"#{index + 1}"
+        lines.append(
+            f"(부채비율(파생) {label}: {_format_ratio_pct(ratio)} — "
+            f"부채 {_format_amount(liability[index])} ÷ "
+            f"자본 {_format_amount(equity[index])})"
+        )
+    if len(lines) == 1:
+        return None
+    return "\n".join(lines)
 
 
 def _append_operating_margin_delta_pp(table: str, *, raw_query: str | None) -> str | None:
@@ -227,6 +251,14 @@ def _safe_ratio(numerator: float, denominator: float) -> float | None:
     if denominator == 0:
         return None
     return numerator / denominator
+
+
+def _format_ratio_pct(ratio: float) -> str:
+    pct = ratio * 100.0
+    rounded = round(pct, 2)
+    if float(rounded).is_integer():
+        return f"{int(rounded)}%"
+    return f"{rounded:.2f}%"
 
 
 def _format_pct(value: float) -> str:

@@ -38,9 +38,8 @@ corpus_sketch: |
   two-row ratio from balance sheet.
 
 related_agent_gaps:
-  - derived_ratio multi-row
 
-improve_hint (참고): periodic_derived_metrics ratio
+improve_hint (참고): periodic_derived_metrics balance_ratio (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

@@ -15,6 +15,7 @@ ROUTING_MODULES = (
     ROOT / "app/reasoning/exchange_field_aggregate.py",
     ROOT / "app/reasoning/periodic_derived_metrics.py",
     ROOT / "app/reasoning/cross_domain_ratio.py",
+    ROOT / "app/reasoning/exchange_recent_pair.py",
     ROOT / "app/reasoning/periodic_segment_ranking.py",
     ROOT / "app/agent/orchestrator.py",
 )
@@ -64,6 +65,36 @@ class RoutingGeneralizationTests(unittest.TestCase):
             plan = QueryUnderstanding(_aliases(corp)).understand(template.format(corp=corp))
             values.append(plan.evidence.get("derived_metric"))
         self.assertEqual(set(values), {"compare_rates"})
+
+    def test_sp05_balance_ratio_intent_is_company_agnostic(self) -> None:
+        template = (
+            "{corp} 2024 사업보고서 연결 부채총계와 자본총계로 "
+            "부채비율(부채÷자본)을 전기·당기 각각 계산해줘"
+        )
+        values = []
+        for corp in ("POSCO홀딩스", "현대제철", "가상철강사"):
+            plan = QueryUnderstanding(_aliases(corp)).understand(template.format(corp=corp))
+            values.append(plan.evidence.get("derived_metric"))
+        self.assertEqual(set(values), {"balance_ratio"})
+
+    def test_sp06_recent_pair_intent_is_company_agnostic(self) -> None:
+        template = (
+            "{corp} 최근 신규시설투자 공시의 투자금액은 자기자본 대비 몇 %이고, "
+            "직전 시설투자 공시 대비 금액이 커졌어?"
+        )
+        signatures: list[tuple[Any, ...]] = []
+        for corp in ("고려아연", "풍산", "가상비철금속"):
+            plan = QueryUnderstanding(_aliases(corp)).understand(template.format(corp=corp))
+            signatures.append(
+                (
+                    plan.event_type,
+                    plan.date_basis.value,
+                    (plan.evidence.get("exchange_recent_pair") or {}).get("limit"),
+                )
+            )
+        self.assertEqual(len(set(signatures)), 1)
+        self.assertEqual(signatures[0][0], "facility_investment")
+        self.assertEqual(signatures[0][1], "receipt_date")
 
     def test_routing_modules_do_not_hardcode_card_companies(self) -> None:
         for path in ROUTING_MODULES:

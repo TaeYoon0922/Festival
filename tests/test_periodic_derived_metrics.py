@@ -14,6 +14,15 @@ TABLE = "\n".join(
     ]
 )
 
+BALANCE_TABLE = "\n".join(
+    [
+        "| 구분 | 전기 | 당기 |",
+        "| --- | --- | --- |",
+        "| 부채총계 | 100,000 | 120,000 |",
+        "| 자본총계 | 200,000 | 240,000 |",
+    ]
+)
+
 
 class PeriodicDerivedMetricsTests(unittest.TestCase):
     def test_rate_projection(self) -> None:
@@ -37,6 +46,19 @@ class PeriodicDerivedMetricsTests(unittest.TestCase):
         self.assertIsNotNone(display)
         assert display is not None
         self.assertIn("영업이익 증가율", display)
+
+    def test_balance_ratio_projection(self) -> None:
+        display = project_derived_metric_display(
+            BALANCE_TABLE,
+            metric="부채총계",
+            request={"derived_metric": "balance_ratio"},
+        )
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertIn("부채비율(파생)", display)
+        self.assertIn("전기", display)
+        self.assertIn("당기", display)
+        self.assertIn("50%", display)
 
 
 if __name__ == "__main__":

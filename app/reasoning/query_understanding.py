@@ -386,6 +386,10 @@ class QueryUnderstanding:
             exchange_aggregate=exchange_aggregate,
             years=mentioned_years,
         )
+        exchange_recent_pair = _exchange_recent_pair_from_query(
+            raw_query,
+            event_type=event_type,
+        )
         if cross_domain_ratio and "periodic" not in routes:
             routes = tuple(dict.fromkeys((*routes, "periodic")))
             route_confidence["disclosure_route.periodic"] = max(
@@ -459,6 +463,18 @@ class QueryUnderstanding:
                 "연결 손익": max(section_boosts.get("연결 손익", 0.0), 0.9),
                 "손익계산서": max(section_boosts.get("손익계산서", 0.0), 0.9),
             }
+        date_basis = _date_basis_from_query(raw_query)
+        if exchange_recent_pair and date_basis == "unspecified":
+            date_basis = "receipt_date"
+        corpus_receipt_from: str | None = None
+        corpus_receipt_to: str | None = None
+        if exchange_recent_pair:
+            from app.reasoning.query_validation import CorpusScope
+
+            scope = CorpusScope.repository_default()
+            if scope is not None:
+                corpus_receipt_from = scope.receipt_from
+                corpus_receipt_to = scope.receipt_to
         return QueryPlan(
             query=lexical_query,
             raw_query=raw_query,
@@ -476,7 +492,7 @@ class QueryUnderstanding:
             comparison=comparison,
             doc_subtype=subtype,
             section_path=section_path,
-            date_basis=_date_basis_from_query(raw_query),
+            date_basis=date_basis,
             section_boosts=section_boosts,
             route_confidence=route_confidence,
             route_evidence=route_evidence,
@@ -502,6 +518,9 @@ class QueryUnderstanding:
                 "derived_metric": derived_metric,
                 "exchange_aggregate": exchange_aggregate,
                 "cross_domain_ratio": cross_domain_ratio,
+                "exchange_recent_pair": exchange_recent_pair,
+                "corpus_receipt_from": corpus_receipt_from,
+                "corpus_receipt_to": corpus_receipt_to,
                 "correction_intent": correction_intent,
                 "correction_intent_evidence": correction_intent_evidence,
                 "comparison_frame": comparison_frame,
@@ -683,6 +702,13 @@ def _derived_metric_from_query(
     if task_type != "financial_metric":
         return None
     compact = re.sub(r"\s+", "", query)
+    if any(term in compact for term in ("부채비율",)):
+        return "balance_ratio"
+    if any(term in compact for term in ("부채총계", "총부채")) and any(
+        term in compact for term in ("자본총계", "총자본", "자기자본")
+    ):
+        if any(term in compact for term in ("÷", "비율", "부채÷자본", "부채/자본")):
+            return "balance_ratio"
     if "%p" in compact or "몇%p" in compact:
         if metric_view == "breakdown" or any(
             term in compact for term in ("국내", "해외", "비중")
@@ -733,6 +759,27 @@ def _exchange_aggregate_from_query(
         else "contract_amount"
     )
     return {"field": field, "ops": ops}
+
+
+def _exchange_recent_pair_from_query(
+    query: str,
+    *,
+    event_type: str | None,
+) -> dict[str, Any] | None:
+    if event_type != "facility_investment":
+        return None
+    compact = re.sub(r"\s+", "", query)
+    if not _latest_event_requested(query):
+        return None
+    if not any(term in compact for term in ("직전", "이전", "전번", "바로전")):
+        return None
+    payload: dict[str, Any] = {
+        "limit": 2,
+        "field": "investment_amount",
+    }
+    if "자기자본" in compact:
+        payload["equity_ratio"] = True
+    return payload
 
 
 def _cross_domain_ratio_from_query(

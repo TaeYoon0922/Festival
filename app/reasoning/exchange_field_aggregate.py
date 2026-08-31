@@ -16,6 +16,7 @@ from app.reasoning.periodic_segment_ranking import _parse_amount
 FIELD_LABELS: dict[str, tuple[str, ...]] = {
     "contract_amount": ("계약금액", "계약금", "계약금액(원)"),
     "investment_amount": ("투자금액", "투자금", "투자금액(원)"),
+    "equity_capital": ("자기자본", "자기자본(원)"),
 }
 
 _UNIT_MULTIPLIERS = (

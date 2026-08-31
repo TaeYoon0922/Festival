@@ -336,6 +336,8 @@ class MultiDocumentPlan:
     family_resolution: str | None = None
     aggregate_field: str | None = None
     aggregate_ops: tuple[str, ...] = ()
+    recent_pair_limit: int | None = None
+    recent_pair_equity_ratio: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.plan_type).strip():

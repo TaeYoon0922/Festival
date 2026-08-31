@@ -21,6 +21,12 @@ from app.reasoning.exchange_field_aggregate import (
     aggregate_exchange_amounts,
     aggregate_statement,
 )
+from app.reasoning.exchange_recent_pair import (
+    ExchangeRecentPairCompare,
+    build_recent_pair_compare,
+    recent_pair_statement,
+    select_recent_documents,
+)
 
 from app.reasoning.multi_document_plan import SlotStatus, SlotType
 from app.retrieval.interfaces import (
@@ -84,6 +90,7 @@ class MultiDocumentFacts:
     aggregate_field: str | None = None
     aggregate_ops: tuple[str, ...] = ()
     aggregate: ExchangeFieldAggregate | None = None
+    recent_pair: ExchangeRecentPairCompare | None = None
 
     def statement(self) -> str:
         """The deterministic sentence the answer states, in Korean.
@@ -93,6 +100,11 @@ class MultiDocumentFacts:
         other: "checked and found none" and "could not finish checking" are
         different claims, and only the first may be phrased as a negative.
         """
+
+        if self.recent_pair is not None:
+            recent_text = recent_pair_statement(self.recent_pair)
+            if recent_text:
+                return recent_text
 
         if self.aggregate is not None:
             aggregate_text = aggregate_statement(self.to_dict(), self.aggregate)
@@ -157,6 +169,8 @@ class MultiDocumentFacts:
             payload["aggregate_ops"] = list(self.aggregate_ops)
         if self.aggregate is not None:
             payload["aggregate"] = self.aggregate.to_dict()
+        if self.recent_pair is not None:
+            payload["recent_pair"] = self.recent_pair.to_dict()
         return payload
 
 
@@ -304,6 +318,7 @@ class MultiDocumentEvidenceBuilder:
             documents, plan=plan, start_rank=start_rank, execution=execution
         )
         facts = self._attach_aggregate(facts, execution, chunks)
+        facts = self._attach_recent_pair(facts, execution, chunks, plan=plan)
         return MultiDocumentEvidence(
             facts=facts,
             execution=execution,
@@ -334,6 +349,39 @@ class MultiDocumentEvidenceBuilder:
             texts.append(str(getattr(chunk, "chunk", "") or ""))
         aggregate = aggregate_exchange_amounts(texts, field, ops=aggregate_ops)
         return replace(facts, aggregate=aggregate)
+
+    def _attach_recent_pair(
+        self,
+        facts: MultiDocumentFacts,
+        execution: Any,
+        chunks: Sequence[CandidateChunk],
+        *,
+        plan: Any = None,
+    ) -> MultiDocumentFacts:
+        active_plan = plan or execution.plan
+        limit = getattr(active_plan, "recent_pair_limit", None)
+        if not limit:
+            return facts
+        include_equity_ratio = bool(getattr(active_plan, "recent_pair_equity_ratio", False))
+        field = getattr(active_plan, "aggregate_field", None) or "investment_amount"
+        doc_texts: dict[str, str] = {}
+        for chunk in chunks:
+            doc_id = str(getattr(chunk, "doc_id", "") or "")
+            if not doc_id:
+                continue
+            text = str(getattr(chunk, "chunk", "") or "")
+            if doc_id not in doc_texts or len(text) > len(doc_texts[doc_id]):
+                doc_texts[doc_id] = text
+        ordered_ids = select_recent_documents(list(doc_texts), limit=limit)
+        pairs = [(doc_id, doc_texts[doc_id]) for doc_id in ordered_ids if doc_id in doc_texts]
+        compare = build_recent_pair_compare(
+            pairs,
+            field=field,
+            include_equity_ratio=include_equity_ratio,
+        )
+        if compare is None:
+            return facts
+        return replace(facts, recent_pair=compare)
 
     def _ordered_doc_ids(self, execution: Any) -> list[str]:
         """Answer-critical filings first, then representative members.
@@ -390,6 +438,14 @@ class MultiDocumentEvidenceBuilder:
         for slot in plan.slots:
             for doc_id in execution.document_ids.get(slot.slot_id, ()):  # type: ignore[union-attr]
                 add(doc_id)
+        limit = getattr(plan, "recent_pair_limit", None)
+        if limit:
+            recent = select_recent_documents(ordered, limit=limit)
+            recent_set = set(recent)
+            ordered = [doc_id for doc_id in ordered if doc_id in recent_set]
+            for doc_id in recent:
+                if doc_id not in ordered:
+                    ordered.append(doc_id)
         return ordered[: self.max_evidence]
 
     def _opening_documents(self, execution: Any) -> dict[str, str]:

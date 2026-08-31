@@ -310,6 +310,33 @@ class UnsupportedCalculationTests(_PlannerCase):
         self.assertTrue(plan.applied)
         self.assertIn("average", plan.aggregate_ops)
 
+    def test_facility_recent_pair_engages_with_corpus_bounds(self) -> None:
+        from app.reasoning.query_plan import QueryPeriod, QueryPlan
+
+        question = (
+            "가상Corp 최근 신규시설투자 공시의 투자금액은 "
+            "직전 시설투자 공시 대비 커졌어?"
+        )
+        query_plan = QueryPlan(
+            query=question,
+            raw_query=question,
+            companies=("가상Corp",),
+            corp_codes=("00126478",),
+            period=QueryPeriod(period_type="latest_event"),
+            task_type="corporate_event",
+            event_type="facility_investment",
+            date_basis=DateBasis.RECEIPT_DATE,
+            evidence={
+                "exchange_recent_pair": {"limit": 2, "field": "investment_amount"},
+                "corpus_receipt_from": "2020-01-01",
+                "corpus_receipt_to": "2025-12-31",
+            },
+        )
+        plan = MultiDocumentPlanner().plan(question, query_plan)
+        self.assertTrue(plan.applied, plan.stop_reason)
+        self.assertEqual(plan.recent_pair_limit, 2)
+        self.assertEqual(plan.slots[0].event_family, "facility_investment")
+
     def test_cross_company_comparison_declines(self) -> None:
         plan = self.plan_for(
             "삼성중공업과 한화오션 중 2025년 설비투자 규모가 더 큰 기업은?"

@@ -160,6 +160,8 @@ class MultiDocumentPlanner:
             return _declined(REASON_UNSUPPORTED_CALCULATION)
 
         intent = self._intent(text)
+        if intent is None and _recent_pair_enables_enumeration(query_plan):
+            intent = MultiDocumentIntent.ENUMERATION
         if intent is None and _aggregation_enables_enumeration(text, query_plan):
             intent = MultiDocumentIntent.ENUMERATION
         if intent is None:
@@ -171,12 +173,16 @@ class MultiDocumentPlanner:
 
         slots = self._slots(definition, intent)
         aggregate_field, aggregate_ops = _aggregate_metadata(text, query_plan)
+        recent_pair_limit = _recent_pair_limit(query_plan)
+        recent_pair_equity_ratio = _recent_pair_equity_ratio(query_plan)
         return MultiDocumentPlan(
             plan_type=intent.value,
             slots=slots,
             family_resolution=definition.family_resolution,
             aggregate_field=aggregate_field,
             aggregate_ops=aggregate_ops,
+            recent_pair_limit=recent_pair_limit,
+            recent_pair_equity_ratio=recent_pair_equity_ratio,
         )
 
     # ------------------------------------------------------------------ intent
@@ -211,6 +217,8 @@ class MultiDocumentPlanner:
             return _SetDefinition(reason=REASON_UNRESOLVED_DATE_BASIS)
 
         date_from, date_to = _bounded_range(getattr(query_plan, "period", None))
+        if not (date_from and date_to):
+            date_from, date_to = _corpus_receipt_range(query_plan)
         if not (date_from and date_to):
             return _SetDefinition(reason=REASON_NO_DATE_RANGE)
 
@@ -333,6 +341,51 @@ def _question_text(question: str, query_plan: Any) -> str:
 
 def _matches(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
+
+
+def _recent_pair_enables_enumeration(query_plan: Any) -> bool:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict):
+        return False
+    return bool(evidence.get("exchange_recent_pair"))
+
+
+def _recent_pair_limit(query_plan: Any) -> int | None:
+    recent_pair = _exchange_recent_pair_config(query_plan)
+    if not isinstance(recent_pair, dict):
+        return None
+    limit = recent_pair.get("limit")
+    if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+        return limit
+    return None
+
+
+def _recent_pair_equity_ratio(query_plan: Any) -> bool:
+    recent_pair = _exchange_recent_pair_config(query_plan)
+    if not isinstance(recent_pair, dict):
+        return False
+    return bool(recent_pair.get("equity_ratio"))
+
+
+def _exchange_recent_pair_config(query_plan: Any) -> dict[str, Any] | None:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict):
+        return None
+    recent_pair = evidence.get("exchange_recent_pair")
+    return recent_pair if isinstance(recent_pair, dict) else None
+
+
+def _corpus_receipt_range(query_plan: Any) -> tuple[str | None, str | None]:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict) or not evidence.get("exchange_recent_pair"):
+        return None, None
+    receipt_from = evidence.get("corpus_receipt_from")
+    receipt_to = evidence.get("corpus_receipt_to")
+    if not receipt_from or not receipt_to:
+        return None, None
+    if not (_ISO_DATE.match(str(receipt_from)) and _ISO_DATE.match(str(receipt_to))):
+        return None, None
+    return str(receipt_from), _day_after(str(receipt_to))
 
 
 def _aggregation_enables_enumeration(text: str, query_plan: Any) -> bool:
