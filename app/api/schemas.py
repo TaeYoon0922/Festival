@@ -141,6 +141,17 @@ class AnswerabilityTrace(BaseModel):
     citable: bool = False
     relevant_to_request: bool | None = None
     answerable: bool = False
+    #: STEP 11-C.  Present only when a domain producer answered for a canonical
+    #: field, so every question outside the two fielded lanes keeps the exact
+    #: key set it had.
+    unavailable_fields: list[str] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+    unavailable_evidence: list[dict[str, Any]] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
 
 
 class HoldingEvidenceCoverageTrace(BaseModel):

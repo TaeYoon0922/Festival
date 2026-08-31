@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
@@ -15,7 +15,10 @@ from app.reasoning.answer_composer import (
     AnswerSection,
     EvidenceCitation,
 )
+from app.reasoning.corporate_event_field_evidence import corporate_event_field_evidence
 from app.reasoning.evidence_builder import EvidenceBuilder, EvidenceItem, EvidenceSet
+from app.reasoning.field_evidence import FieldEvidence, FieldStatus
+from app.reasoning.holding_field_evidence import holding_field_evidence
 from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
     HoldingResolution,
@@ -99,6 +102,11 @@ class AgentResult:
     #: Internal Phase 3 diagnostic; deliberately absent from ``to_dict`` and
     #: therefore from the public API schema.
     report_relative_execution: ReportRelativeEvidenceExecution | None = None
+    #: STEP 11-C.  What the domain producers found about the canonical fields
+    #: this question requested, if any producer had the authority to speak.
+    #: Empty for every question outside the two fielded lanes, which is what
+    #: keeps those questions on the answerability path they always took.
+    field_evidence: tuple[FieldEvidence, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         resolution = self.resolution
@@ -322,6 +330,32 @@ class AgentOrchestrator:
                 multi_document=multi_document,
             )
 
+        # STEP 11-C.  Ask the domain producers what the authoritative source
+        # says about the canonical fields this question requested.  Both read
+        # already-resolved identity and already-served evidence, so this adds a
+        # finding, never a selection -- and both decline outright for a question
+        # neither lane owns, which is every question that answered before.
+        field_evidence = _field_evidence(
+            question=question,
+            plan=query_plan,
+            # The retrieval execution itself, not the chunks/results view: the
+            # upstream event and correction metadata a producer consumes lives
+            # on the original object and the view deliberately carries neither.
+            execution=retrieval_execution,
+            evidence=evidence,
+            resolution=resolution,
+            multi_document=multi_document,
+        )
+        if field_evidence:
+            trace.append("field_evidence")
+            # A refusal has to point at the evidence that proves it.  Ordinary
+            # composition cites the highest-ranked handful, so a filing that
+            # states a blank field can be served and still go uncited, leaving a
+            # correct refusal with nothing to show for it.  Add exactly those
+            # served items back, through the citation contract composition
+            # already uses.  Retrieval, ranking and the served set are untouched.
+            draft = _with_field_evidence_citations(draft, field_evidence, evidence)
+
         _enforce_read_only_invariants(
             execution=execution,
             input_before=input_before,
@@ -367,7 +401,86 @@ class AgentOrchestrator:
                 report_relative is not None or coverage.rescued or reporter_scoped
             ),
             report_relative_execution=report_relative,
+            field_evidence=field_evidence,
         )
+
+
+def _with_field_evidence_citations(
+    draft: AnswerDraft, field_evidence: Sequence[FieldEvidence], evidence: EvidenceSet
+) -> AnswerDraft:
+    """Make the evidence a field refusal rests on citable.
+
+    Bounded on purpose.  Only an authoritative ``UNAVAILABLE`` record adds
+    anything: that is the one state whose whole meaning is "this served filing
+    states no value", and a refusal saying so has to be able to point at it.  A
+    stated value is already cited by whatever section reports it; an absence has
+    no source to cite and must not invent one; a conflict has no single source
+    and keeps the existing insufficient wording.
+
+    At most one item per field, and only items already served and already
+    carrying provenance -- no chunk is fetched, promoted, reordered or
+    fabricated here.
+    """
+
+    by_id = {item.chunk_id: item for item in evidence.served_items}
+    cited = {citation.chunk_id for citation in draft.citations}
+    added: list[EvidenceCitation] = []
+    for field in dict.fromkeys(record.field for record in field_evidence):
+        source = next(
+            (
+                record
+                for record in field_evidence
+                if record.field == field
+                and record.authoritative
+                and record.status is FieldStatus.UNAVAILABLE
+                and record.chunk_id
+                and record.chunk_id not in cited
+                and record.chunk_id in by_id
+            ),
+            None,
+        )
+        if source is None:
+            continue
+        cited.add(str(source.chunk_id))
+        added.append(_general_citation(by_id[str(source.chunk_id)]))
+    if not added:
+        return draft
+    return replace(draft, citations=(*draft.citations, *added))
+
+
+def _field_evidence(
+    *,
+    question: str,
+    plan: Any,
+    execution: Any,
+    evidence: EvidenceSet,
+    resolution: Any,
+    multi_document: Any = None,
+) -> tuple[FieldEvidence, ...]:
+    """Collect both producers' findings for this question.
+
+    Each producer owns one domain and answers only for the canonical fields its
+    own domain defines, so their outputs never compete: a contract-amount
+    question reaches no holding row and an acquisition-unit-price question
+    reaches no corporate event.  Both are handed the same served evidence, and
+    neither may look anywhere else.
+    """
+
+    items = evidence.served_items
+    return (
+        *corporate_event_field_evidence(
+            question=question,
+            plan=plan,
+            execution=execution,
+            evidence_items=items,
+            multi_document=multi_document,
+        ),
+        *holding_field_evidence(
+            question=question,
+            resolution=resolution,
+            evidence_items=items,
+        ),
+    )
 
 
 def _holding_reporter_scope(
