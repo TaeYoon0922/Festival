@@ -38,9 +38,8 @@ corpus_sketch: |
   metric alias 영업수익 fallback + rate.
 
 related_agent_gaps:
-  - metric alias
 
-improve_hint (참고): derived_metric(rate)
+improve_hint (참고): metric_fallback + derived_metric(rate) (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

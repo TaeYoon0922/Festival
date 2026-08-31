@@ -175,6 +175,7 @@ class MultiDocumentPlanner:
         aggregate_field, aggregate_ops = _aggregate_metadata(text, query_plan)
         recent_pair_limit = _recent_pair_limit(query_plan)
         recent_pair_equity_ratio = _recent_pair_equity_ratio(query_plan)
+        aggregate_years = _aggregate_years(query_plan)
         return MultiDocumentPlan(
             plan_type=intent.value,
             slots=slots,
@@ -183,6 +184,7 @@ class MultiDocumentPlanner:
             aggregate_ops=aggregate_ops,
             recent_pair_limit=recent_pair_limit,
             recent_pair_equity_ratio=recent_pair_equity_ratio,
+            aggregate_years=aggregate_years,
         )
 
     # ------------------------------------------------------------------ intent
@@ -219,6 +221,8 @@ class MultiDocumentPlanner:
         date_from, date_to = _bounded_range(getattr(query_plan, "period", None))
         if not (date_from and date_to):
             date_from, date_to = _corpus_receipt_range(query_plan)
+        if not (date_from and date_to):
+            date_from, date_to = _multi_year_exchange_range(query_plan)
         if not (date_from and date_to):
             return _SetDefinition(reason=REASON_NO_DATE_RANGE)
 
@@ -386,6 +390,41 @@ def _corpus_receipt_range(query_plan: Any) -> tuple[str | None, str | None]:
     if not (_ISO_DATE.match(str(receipt_from)) and _ISO_DATE.match(str(receipt_to))):
         return None, None
     return str(receipt_from), _day_after(str(receipt_to))
+
+
+def _multi_year_exchange_range(query_plan: Any) -> tuple[str | None, str | None]:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict):
+        return None, None
+    if not evidence.get("exchange_aggregate") and not evidence.get("exchange_year_compare"):
+        return None, None
+    years = evidence.get("mentioned_years") or list(getattr(query_plan, "years", ()) or ())
+    if not isinstance(years, list):
+        years = list(years)
+    if len(years) < 2:
+        return None, None
+    try:
+        parsed = sorted(int(year) for year in years)
+    except (TypeError, ValueError):
+        return None, None
+    return f"{parsed[0]:04d}-01-01", _day_after(f"{parsed[-1]:04d}-12-31")
+
+
+def _aggregate_years(query_plan: Any) -> tuple[int, ...]:
+    evidence = getattr(query_plan, "evidence", None) or {}
+    if not isinstance(evidence, dict):
+        return ()
+    year_compare = evidence.get("exchange_year_compare")
+    if not isinstance(year_compare, dict):
+        return ()
+    years = year_compare.get("years") or []
+    parsed: list[int] = []
+    for value in years:
+        try:
+            parsed.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return tuple(sorted(set(parsed)))
 
 
 def _aggregation_enables_enumeration(text: str, query_plan: Any) -> bool:

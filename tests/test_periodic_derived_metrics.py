@@ -60,6 +60,30 @@ class PeriodicDerivedMetricsTests(unittest.TestCase):
         self.assertIn("당기", display)
         self.assertIn("50%", display)
 
+    def test_quarter_compare_projection(self) -> None:
+        table = "\n".join(
+            [
+                "| 구분 | 2023년 1분기 | 2024년 1분기 |",
+                "| --- | --- | --- |",
+                "| 매출액 | 100,000 | 120,000 |",
+            ]
+        )
+        display = project_derived_metric_display(
+            table,
+            metric="매출액",
+            comparison={"type": "period_comparison", "years": [2023, 2024]},
+            request={
+                "derived_metric": "quarter_compare",
+                "period": {"quarter": 1, "period_type": "fiscal_quarter"},
+            },
+            raw_query="2023년 1분기와 2024년 1분기 중 어느 분기가 더 크고 차이는?",
+        )
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertIn("분기 비교(파생)", display)
+        self.assertIn("더 큰 쪽", display)
+        self.assertIn("20000", display.replace(",", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

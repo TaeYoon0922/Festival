@@ -39,9 +39,8 @@ corpus_sketch: |
   periodic_derived_metrics compare_rates.
 
 related_agent_gaps:
-  - compare_rates
 
-improve_hint (참고): derived_metric(compare_rates)
+improve_hint (참고): derived_metric(compare_rates) (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

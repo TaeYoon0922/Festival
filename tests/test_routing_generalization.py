@@ -96,6 +96,62 @@ class RoutingGeneralizationTests(unittest.TestCase):
         self.assertEqual(signatures[0][0], "facility_investment")
         self.assertEqual(signatures[0][1], "receipt_date")
 
+    def test_sp03_quarter_compare_intent_is_company_agnostic(self) -> None:
+        template = (
+            "{corp} {year_a}년 1분기와 {year_b}년 1분기 연결 매출액 중 "
+            "어느 분기가 더 크고 차이는?"
+        )
+        values = []
+        for corp, year_a, year_b in (
+            ("레인보우로보틱스", 2023, 2024),
+            ("크래프톤", 2023, 2024),
+            ("가상로봇사", 2022, 2025),
+        ):
+            plan = QueryUnderstanding(_aliases(corp)).understand(
+                template.format(corp=corp, year_a=year_a, year_b=year_b)
+            )
+            values.append(plan.evidence.get("derived_metric"))
+        self.assertEqual(set(values), {"quarter_compare"})
+
+    def test_sp07_metric_fallback_is_company_agnostic(self) -> None:
+        template = (
+            "{corp} 2024 사업보고서 연결 보험료수익(또는 영업수익)이 "
+            "전기 대비 얼마나 변했는지 증감률까지"
+        )
+        signatures: list[tuple[Any, ...]] = []
+        for corp in ("삼성생명", "한화생명", "가상보험사"):
+            plan = QueryUnderstanding(_aliases(corp)).understand(template.format(corp=corp))
+            signatures.append(
+                (
+                    plan.metric,
+                    plan.evidence.get("metric_fallback"),
+                    plan.evidence.get("derived_metric"),
+                )
+            )
+        self.assertEqual(len(set(signatures)), 1)
+        self.assertEqual(signatures[0][0], "보험료수익")
+        self.assertEqual(signatures[0][1], "영업수익")
+
+    def test_sp04_year_compare_intent_is_company_agnostic(self) -> None:
+        template = (
+            "{corp} {year_a}년과 {year_b}년에 공시한 신규시설투자 금액 합계를 "
+            "비교하고, {year_b}년 합계가 자기자본 대비 더 큰지?"
+        )
+        signatures: list[tuple[Any, ...]] = []
+        for corp in ("LG에너지솔루션", "SK이노베이션", "가상2차전지"):
+            plan = QueryUnderstanding(_aliases(corp)).understand(
+                template.format(corp=corp, year_a=2024, year_b=2025)
+            )
+            signatures.append(
+                (
+                    plan.event_type,
+                    bool(plan.evidence.get("exchange_aggregate")),
+                    bool(plan.evidence.get("exchange_year_compare")),
+                )
+            )
+        self.assertEqual(len(set(signatures)), 1)
+        self.assertEqual(signatures[0][0], "facility_investment")
+
     def test_routing_modules_do_not_hardcode_card_companies(self) -> None:
         for path in ROUTING_MODULES:
             text = path.read_text(encoding="utf-8")

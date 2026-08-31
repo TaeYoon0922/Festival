@@ -21,7 +21,7 @@ PROBES = [
         "evidence": {"section_path": "연결 손익계산서 > 매출액", "manifest": "corp_name=삼성전자, annual"},
         "negative": "매출 단일행 · derived rate 미지원",
         "notes": "comparison 파싱 + derived rate compute.",
-        "gaps": ["multi-doc retrieval"], "improve": "derived_metric(rate)",
+        "gaps": [], "improve": "derived_metric(rate) (implemented)",
     },
     {
         "id": "SP02", "slug": "현대자동차", "sector_no": 2, "sector": "자동차·모빌리티",
@@ -35,7 +35,7 @@ PROBES = [
         "evidence": {"section_path": "연결 손익계산서", "manifest": "corp_name=현대자동차"},
         "negative": "영업이익 단일행",
         "notes": "same-table ratio + %p.",
-        "gaps": ["derived_ratio"], "improve": "delta_pp",
+        "gaps": [], "improve": "derived_metric(ratio/delta_pp) (implemented)",
     },
     {
         "id": "SP03", "slug": "레인보우로보틱스", "sector_no": 3, "sector": "로봇·자동화",
@@ -49,7 +49,7 @@ PROBES = [
         "evidence": {"manifest": "corp_name=레인보우로보틱스, quarter"},
         "negative": "단일 분기만",
         "notes": "multi-quarter column pick + delta.",
-        "gaps": ["quarter_comparison"], "improve": "period_comparison across quarters",
+        "gaps": [], "improve": "derived_metric(quarter_compare) (implemented)",
     },
     {
         "id": "SP04", "slug": "LG에너지솔루션", "sector_no": 4, "sector": "2차전지",
@@ -63,7 +63,7 @@ PROBES = [
         "evidence": {"manifest": "corp_name=LG에너지솔루션, doc_subtype=신규시설투자등"},
         "negative": "합계 미집계",
         "notes": "P0-C enumeration + investment_amount sum.",
-        "gaps": ["cross-year aggregate"], "improve": "exchange_field_aggregate",
+        "gaps": [], "improve": "exchange_year_compare (implemented)",
     },
     {
         "id": "SP05", "slug": "POSCO홀딩스", "sector_no": 5, "sector": "철강",
@@ -105,7 +105,7 @@ PROBES = [
         "evidence": {"section_path": "연결 손익계산서", "manifest": "corp_name=삼성생명"},
         "negative": "단일 연도만",
         "notes": "metric alias 영업수익 fallback + rate.",
-        "gaps": ["metric alias"], "improve": "derived_metric(rate)",
+        "gaps": [], "improve": "metric_fallback + derived_metric(rate) (implemented)",
     },
     {
         "id": "SP11", "slug": "삼성바이오로직스", "sector_no": 11, "sector": "바이오",
@@ -133,7 +133,7 @@ PROBES = [
         "evidence": {"manifest": "exchange supply_contract 2024"},
         "negative": "count without average",
         "notes": "P0-C count + contract_amount average.",
-        "gaps": ["average"], "improve": "exchange_field_aggregate average",
+        "gaps": [], "improve": "exchange_field_aggregate average (implemented)",
     },
     {
         "id": "SP08", "slug": "NAVER", "sector_no": 8, "sector": "IT·플랫폼",
@@ -147,7 +147,7 @@ PROBES = [
         "evidence": {"section_path": "연결 손익계산서"},
         "negative": "compare_rates 미구현",
         "notes": "periodic_derived_metrics compare_rates.",
-        "gaps": ["compare_rates"], "improve": "derived_metric(compare_rates)",
+        "gaps": [], "improve": "derived_metric(compare_rates) (implemented)",
     },
     {
         "id": "SP15", "slug": "아모레퍼시픽", "sector_no": 15, "sector": "소비재",
@@ -161,7 +161,7 @@ PROBES = [
         "evidence": {"section_path": "매출 구분/지역별"},
         "negative": "breakdown_share 미구현",
         "notes": "metric_view=breakdown + delta_pp.",
-        "gaps": ["breakdown_share", "delta_pp"], "improve": "periodic_derived_metrics",
+        "gaps": [], "improve": "periodic_derived_metrics (implemented)",
     },
     {
         "id": "SP18", "slug": "엘에스일렉트릭", "sector_no": 18, "sector": "전력기기",

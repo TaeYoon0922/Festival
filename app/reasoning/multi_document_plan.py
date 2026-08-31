@@ -338,6 +338,7 @@ class MultiDocumentPlan:
     aggregate_ops: tuple[str, ...] = ()
     recent_pair_limit: int | None = None
     recent_pair_equity_ratio: bool = False
+    aggregate_years: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.plan_type).strip():

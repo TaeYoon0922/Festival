@@ -37,9 +37,8 @@ corpus_sketch: |
   multi-quarter column pick + delta.
 
 related_agent_gaps:
-  - quarter_comparison
 
-improve_hint (참고): period_comparison across quarters
+improve_hint (참고): derived_metric(quarter_compare) (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

@@ -61,6 +61,11 @@ _METRIC_LABEL_ALIASES = {
         "재고자산",
         "연결재고자산",
     },
+    "보험료수익": {
+        "보험료수익",
+        "보험수익",
+        "영업수익",
+    },
 }
 
 
@@ -71,6 +76,7 @@ def project_periodic_metric_table(
     period: Mapping[str, Any] | None = None,
     comparison: Mapping[str, Any] | None = None,
     raw_query: str | None = None,
+    metric_fallback: str | None = None,
 ) -> str | None:
     """Return header plus exact metric rows, or None when the table has no such row."""
 
@@ -84,6 +90,9 @@ def project_periodic_metric_table(
     separator = rows[1] if _TABLE_SEP.fullmatch(rows[1].strip()) else None
     data = rows[2:] if separator is not None else rows[1:]
     matched = [row for row in data if _row_label(row) in labels]
+    if not matched and metric_fallback:
+        fallback_labels = _metric_labels(metric_fallback)
+        matched = [row for row in data if _row_label(row) in fallback_labels]
     if not matched:
         return None
     rows_to_render = [header, *(matched)]

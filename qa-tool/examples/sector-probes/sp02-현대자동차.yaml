@@ -38,9 +38,8 @@ corpus_sketch: |
   same-table ratio + %p.
 
 related_agent_gaps:
-  - derived_ratio
 
-improve_hint (참고): delta_pp
+improve_hint (참고): derived_metric(ratio/delta_pp) (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

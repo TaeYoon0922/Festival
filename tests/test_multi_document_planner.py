@@ -337,6 +337,33 @@ class UnsupportedCalculationTests(_PlannerCase):
         self.assertEqual(plan.recent_pair_limit, 2)
         self.assertEqual(plan.slots[0].event_family, "facility_investment")
 
+    def test_multi_year_exchange_aggregate_engages(self) -> None:
+        from app.reasoning.query_plan import QueryPeriod, QueryPlan
+
+        question = (
+            "가상Corp 2024년과 2025년에 공시한 신규시설투자 금액 합계를 비교해줘"
+        )
+        query_plan = QueryPlan(
+            query=question,
+            raw_query=question,
+            companies=("가상Corp",),
+            corp_codes=("00126478",),
+            years=(2024, 2025),
+            period=QueryPeriod(period_type="reference_year"),
+            task_type="corporate_event",
+            event_type="facility_investment",
+            date_basis=DateBasis.RECEIPT_DATE,
+            evidence={
+                "exchange_aggregate": {"field": "investment_amount", "ops": ["sum"]},
+                "exchange_year_compare": {"years": [2024, 2025]},
+                "mentioned_years": [2024, 2025],
+            },
+        )
+        plan = MultiDocumentPlanner().plan(question, query_plan)
+        self.assertTrue(plan.applied, plan.stop_reason)
+        self.assertEqual(plan.aggregate_years, (2024, 2025))
+        self.assertEqual(plan.slots[0].date_from, "2024-01-01")
+
     def test_cross_company_comparison_declines(self) -> None:
         plan = self.plan_for(
             "삼성중공업과 한화오션 중 2025년 설비투자 규모가 더 큰 기업은?"

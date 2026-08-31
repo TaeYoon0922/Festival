@@ -19,6 +19,7 @@ _FINANCIAL_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("매출액", ("매출액", "매출", "영업수익")),
     ("영업이익", ("영업이익", "영업손익")),
     ("당기순이익", ("당기순이익", "순이익", "당기순손익")),
+    ("보험료수익", ("보험료수익", "보험수익")),
     ("자산총계", ("자산총계", "총자산")),
     ("부채총계", ("부채총계", "총부채")),
     ("자본총계", ("자본총계", "총자본")),
@@ -153,6 +154,12 @@ _SECTION_BOOSTS: dict[str, dict[str, float]] = {
         "주당이익": 1.0,
         "포괄손익계산서": 0.85,
         "손익계산서": 0.82,
+    },
+    "보험료수익": {
+        "포괄손익계산서": 1.0,
+        "손익계산서": 0.98,
+        "보험료수익": 0.95,
+        "영업수익": 0.9,
     },
     "holding_ratio": {"보유 주식": 1.0, "대량보유": 0.95, "보유비율": 0.90},
     "holding_shares": {"보유 주식": 1.0, "대량보유": 0.95, "주식수": 0.90},
@@ -375,7 +382,9 @@ class QueryUnderstanding:
             metric_view=metric_view,
             task_type=task_type,
             metric=metric,
+            period=period,
         )
+        metric_fallback = _metric_fallback_from_query(raw_query, metric=metric)
         exchange_aggregate = _exchange_aggregate_from_query(
             raw_query,
             event_type=event_type,
@@ -389,6 +398,12 @@ class QueryUnderstanding:
         exchange_recent_pair = _exchange_recent_pair_from_query(
             raw_query,
             event_type=event_type,
+        )
+        exchange_year_compare = _exchange_year_compare_from_query(
+            raw_query,
+            event_type=event_type,
+            years=mentioned_years,
+            exchange_aggregate=exchange_aggregate,
         )
         if cross_domain_ratio and "periodic" not in routes:
             routes = tuple(dict.fromkeys((*routes, "periodic")))
@@ -466,6 +481,9 @@ class QueryUnderstanding:
         date_basis = _date_basis_from_query(raw_query)
         if exchange_recent_pair and date_basis == "unspecified":
             date_basis = "receipt_date"
+        if exchange_aggregate and date_basis == "unspecified":
+            if re.search(r"공시|접수|제출", raw_query):
+                date_basis = "receipt_date"
         corpus_receipt_from: str | None = None
         corpus_receipt_to: str | None = None
         if exchange_recent_pair:
@@ -515,8 +533,10 @@ class QueryUnderstanding:
                 "segment_ranking": segment_ranking,
                 "segment_ranking_evidence": segment_ranking_evidence,
                 "metric_view": metric_view,
+                "metric_fallback": metric_fallback,
                 "derived_metric": derived_metric,
                 "exchange_aggregate": exchange_aggregate,
+                "exchange_year_compare": exchange_year_compare,
                 "cross_domain_ratio": cross_domain_ratio,
                 "exchange_recent_pair": exchange_recent_pair,
                 "corpus_receipt_from": corpus_receipt_from,
@@ -546,11 +566,20 @@ def understand_query(
 
 def _find_financial_metric(query: str) -> tuple[str | None, str | None]:
     compact = re.sub(r"\s+", "", query).casefold()
+    best: tuple[str, str, int] | None = None
     for canonical, aliases in _FINANCIAL_METRICS:
-        match = next((alias for alias in aliases if alias.casefold() in compact), None)
-        if match:
-            return canonical, match
-    return None, None
+        for alias in aliases:
+            normalized = alias.casefold()
+            index = compact.find(normalized)
+            if index < 0:
+                continue
+            if best is None or index < best[2] or (
+                index == best[2] and len(normalized) > len(best[1].casefold())
+            ):
+                best = (canonical, alias, index)
+    if best is None:
+        return None, None
+    return best[0], best[1]
 
 
 def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
@@ -698,6 +727,7 @@ def _derived_metric_from_query(
     metric_view: str | None,
     task_type: str,
     metric: str | None,
+    period: QueryPeriod | None = None,
 ) -> str | None:
     if task_type != "financial_metric":
         return None
@@ -709,6 +739,25 @@ def _derived_metric_from_query(
     ):
         if any(term in compact for term in ("÷", "비율", "부채÷자본", "부채/자본")):
             return "balance_ratio"
+    quarter = getattr(period, "quarter", None) if period is not None else None
+    if quarter is None:
+        quarter_match = re.search(r"(?<!\d)([1-4])\s*분기", query)
+        quarter = int(quarter_match.group(1)) if quarter_match else None
+    if quarter is not None and isinstance(comparison, Mapping):
+        if str(comparison.get("type") or "") == "period_comparison" and any(
+            term in compact
+            for term in (
+                "어느",
+                "더크",
+                "더큰",
+                "더높",
+                "더작",
+                "차이",
+                "중더",
+                "중어느",
+            )
+        ):
+            return "quarter_compare"
     if "%p" in compact or "몇%p" in compact:
         if metric_view == "breakdown" or any(
             term in compact for term in ("국내", "해외", "비중")
@@ -759,6 +808,35 @@ def _exchange_aggregate_from_query(
         else "contract_amount"
     )
     return {"field": field, "ops": ops}
+
+
+def _metric_fallback_from_query(query: str, *, metric: str | None) -> str | None:
+    match = re.search(r"\(또는([^)]+)\)", query)
+    if not match:
+        return None
+    alt_metric, alt_evidence = _find_financial_metric(match.group(1))
+    if not alt_metric or alt_metric == metric:
+        return None
+    return alt_evidence or alt_metric
+
+
+def _exchange_year_compare_from_query(
+    query: str,
+    *,
+    event_type: str | None,
+    years: Sequence[int],
+    exchange_aggregate: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not exchange_aggregate or len(years) < 2:
+        return None
+    if event_type != "facility_investment":
+        return None
+    compact = re.sub(r"\s+", "", query)
+    if not any(term in compact for term in ("합계", "총액", "총합")):
+        return None
+    if not any(term in compact for term in ("비교", "더큰", "더 큰", "대비")):
+        return None
+    return {"years": sorted(int(year) for year in years)}
 
 
 def _exchange_recent_pair_from_query(

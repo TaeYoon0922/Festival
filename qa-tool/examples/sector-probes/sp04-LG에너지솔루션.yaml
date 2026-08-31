@@ -38,9 +38,8 @@ corpus_sketch: |
   P0-C enumeration + investment_amount sum.
 
 related_agent_gaps:
-  - cross-year aggregate
 
-improve_hint (참고): exchange_field_aggregate
+improve_hint (참고): exchange_year_compare (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

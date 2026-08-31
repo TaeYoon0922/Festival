@@ -37,9 +37,8 @@ corpus_sketch: |
   P0-C count + contract_amount average.
 
 related_agent_gaps:
-  - average
 
-improve_hint (참고): exchange_field_aggregate average
+improve_hint (참고): exchange_field_aggregate average (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

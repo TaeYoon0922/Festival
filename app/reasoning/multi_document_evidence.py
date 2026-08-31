@@ -340,14 +340,22 @@ class MultiDocumentEvidenceBuilder:
         field = getattr(plan, "aggregate_field", None) or "contract_amount"
         seen_docs: set[str] = set()
         texts: list[str] = []
+        doc_ids: list[str] = []
         for chunk in chunks:
             doc_id = str(getattr(chunk, "doc_id", "") or "")
             if doc_id and doc_id in seen_docs:
                 continue
             if doc_id:
                 seen_docs.add(doc_id)
+            doc_ids.append(doc_id)
             texts.append(str(getattr(chunk, "chunk", "") or ""))
-        aggregate = aggregate_exchange_amounts(texts, field, ops=aggregate_ops)
+        aggregate = aggregate_exchange_amounts(
+            texts,
+            field,
+            ops=aggregate_ops,
+            doc_ids=doc_ids,
+            years=tuple(getattr(plan, "aggregate_years", ()) or ()),
+        )
         return replace(facts, aggregate=aggregate)
 
     def _attach_recent_pair(

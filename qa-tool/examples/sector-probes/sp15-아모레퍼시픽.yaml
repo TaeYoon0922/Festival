@@ -37,10 +37,8 @@ corpus_sketch: |
   metric_view=breakdown + delta_pp.
 
 related_agent_gaps:
-  - breakdown_share
-  - delta_pp
 
-improve_hint (참고): periodic_derived_metrics
+improve_hint (참고): periodic_derived_metrics (implemented)
 
 related_pipeline (taeyoon):
   - comparison_frame uncertain → P0-D fail-closed 가능 (query_validation)

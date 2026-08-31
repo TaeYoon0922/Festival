@@ -905,6 +905,48 @@ def _periodic_sections(
     return output, warnings, bool(facts_seen) and supported
 
 
+def _metric_fallback_from_request(request: Mapping[str, Any] | None) -> str | None:
+    evidence = (request or {}).get("evidence")
+    if isinstance(evidence, Mapping) and evidence.get("metric_fallback"):
+        return str(evidence["metric_fallback"])
+    return None
+
+
+def _render_periodic_display(
+    fact_text: str,
+    *,
+    request: Mapping[str, Any] | None = None,
+) -> str:
+    metric = _text((request or {}).get("metric"))
+    metric_fallback = _metric_fallback_from_request(request)
+    table_kwargs = {
+        "metric": metric,
+        "period": (request or {}).get("period"),
+        "comparison": (request or {}).get("comparison"),
+        "raw_query": _text((request or {}).get("raw_query")),
+        "metric_fallback": metric_fallback,
+    }
+    if derived_metric_requested(request or {}):
+        return (
+            project_derived_metric_display(
+                fact_text,
+                metric=metric,
+                comparison=(request or {}).get("comparison"),
+                request=request,
+                raw_query=_text((request or {}).get("raw_query")),
+            )
+            or project_periodic_metric_table(fact_text, **table_kwargs)
+            or fact_text
+        )
+    if segment_ranking_requested(request or {}):
+        return (
+            project_segment_ranking_table(fact_text, metric=metric)
+            or project_periodic_metric_table(fact_text, **table_kwargs)
+            or fact_text
+        )
+    return project_periodic_metric_table(fact_text, **table_kwargs) or fact_text
+
+
 def _periodic_source_lines(
     source: Mapping[str, Any],
     marker: str,
@@ -914,49 +956,7 @@ def _periodic_source_lines(
     fact_text = _text(source.get("fact_text"))
     if not fact_text:
         return []
-    metric = _text((request or {}).get("metric"))
-    if derived_metric_requested(request or {}):
-        display = (
-            project_derived_metric_display(
-                fact_text,
-                metric=metric,
-                comparison=(request or {}).get("comparison"),
-                request=request,
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or project_periodic_metric_table(
-                fact_text,
-                metric=metric,
-                period=(request or {}).get("period"),
-                comparison=(request or {}).get("comparison"),
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or fact_text
-        )
-    elif segment_ranking_requested(request or {}):
-        display = (
-            project_segment_ranking_table(fact_text, metric=metric)
-            or project_periodic_metric_table(
-                fact_text,
-                metric=metric,
-                period=(request or {}).get("period"),
-                comparison=(request or {}).get("comparison"),
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or fact_text
-        )
-    else:
-        display = (
-            project_periodic_metric_table(
-                fact_text,
-                metric=metric,
-                period=(request or {}).get("period"),
-                comparison=(request or {}).get("comparison"),
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or fact_text
-        )
-    display = _bounded_periodic_display(display)
+    display = _bounded_periodic_display(_render_periodic_display(fact_text, request=request))
     return [f"내용: {display} {marker}"]
 
 
@@ -1008,49 +1008,7 @@ def _periodic_fact_fallback_lines(
     fact_text = _text(fact.get("fact_text"))
     if not fact_text:
         return []
-    metric = _text((request or {}).get("metric"))
-    if derived_metric_requested(request or {}):
-        display = (
-            project_derived_metric_display(
-                fact_text,
-                metric=metric,
-                comparison=(request or {}).get("comparison"),
-                request=request,
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or project_periodic_metric_table(
-                fact_text,
-                metric=metric,
-                period=(request or {}).get("period"),
-                comparison=(request or {}).get("comparison"),
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or fact_text
-        )
-    elif segment_ranking_requested(request or {}):
-        display = (
-            project_segment_ranking_table(fact_text, metric=metric)
-            or project_periodic_metric_table(
-                fact_text,
-                metric=metric,
-                period=(request or {}).get("period"),
-                comparison=(request or {}).get("comparison"),
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or fact_text
-        )
-    else:
-        display = (
-            project_periodic_metric_table(
-                fact_text,
-                metric=metric,
-                period=(request or {}).get("period"),
-                comparison=(request or {}).get("comparison"),
-                raw_query=_text((request or {}).get("raw_query")),
-            )
-            or fact_text
-        )
-    display = _bounded_periodic_display(display)
+    display = _bounded_periodic_display(_render_periodic_display(fact_text, request=request))
     return [f"내용: {display} {marker}"]
 
 

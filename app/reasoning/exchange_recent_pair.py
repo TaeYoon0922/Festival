@@ -5,7 +5,6 @@ Amounts are parsed from disclosed fields; deltas and equity ratios are derived.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -14,9 +13,8 @@ from app.reasoning.exchange_field_aggregate import (
     ParsedExchangeAmount,
     format_aggregate_amount,
     parse_labeled_amount,
+    receipt_date_from_doc_id,
 )
-
-_DOC_RECEIPT = re.compile(r"^exchange_(\d{8})")
 
 
 @dataclass(frozen=True)
@@ -49,14 +47,6 @@ def exchange_recent_pair_requested(plan: Mapping[str, Any] | None) -> bool:
     if isinstance(evidence, Mapping) and evidence.get("exchange_recent_pair"):
         return True
     return getattr(plan, "recent_pair_limit", None) is not None
-
-
-def receipt_date_from_doc_id(doc_id: str) -> str | None:
-    match = _DOC_RECEIPT.match(str(doc_id or "").strip())
-    if match is None:
-        return None
-    raw = match.group(1)
-    return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
 
 
 def select_recent_documents(doc_ids: Sequence[str], *, limit: int) -> list[str]:

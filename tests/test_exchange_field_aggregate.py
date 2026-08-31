@@ -30,6 +30,29 @@ class ExchangeFieldAggregateTests(unittest.TestCase):
         self.assertEqual(result.amount_sum, 400_000_000.0)
         self.assertEqual(result.amount_average, 200_000_000.0)
 
+    def test_aggregate_by_receipt_year(self) -> None:
+        texts = [
+            "투자금액 100억원",
+            "투자금액 200억원",
+            "투자금액 50억원",
+        ]
+        doc_ids = [
+            "exchange_20240115800001",
+            "exchange_20250115800002",
+            "exchange_20250120800003",
+        ]
+        result = aggregate_exchange_amounts(
+            texts,
+            "investment_amount",
+            ops=("sum",),
+            doc_ids=doc_ids,
+            years=(2024, 2025),
+        )
+        self.assertEqual(len(result.by_year), 2)
+        by_year = {item.year: item.amount_sum for item in result.by_year}
+        self.assertEqual(by_year[2024], 10_000_000_000.0)
+        self.assertEqual(by_year[2025], 25_000_000_000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

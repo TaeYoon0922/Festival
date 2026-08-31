@@ -82,6 +82,7 @@ _TABLE_METRIC_TERMS = {
     "수주잔고",
     "순이익",
     "영업이익",
+    "보험료수익",
     "자본총계",
     "자산총계",
     "주식수",
@@ -327,7 +328,22 @@ def _source_relevance(
     table_metrics_complete = bool(
         table_metrics and len(matched_table_metrics) == len(table_metrics)
     )
-    exact_metric_row = bool(metric and has_exact_metric_row(source.fact_text, metric))
+    evidence = plan.get("evidence")
+    metric_fallback = (
+        str(evidence.get("metric_fallback"))
+        if isinstance(evidence, Mapping) and evidence.get("metric_fallback")
+        else None
+    )
+    exact_metric_row = bool(
+        metric
+        and (
+            has_exact_metric_row(source.fact_text, metric)
+            or (
+                metric_fallback
+                and has_exact_metric_row(source.fact_text, metric_fallback)
+            )
+        )
+    )
 
     if len(core_terms) <= 1:
         eligible = bool(

@@ -35,6 +35,15 @@ def _derived_kind(request: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def _metric_fallback(request: Mapping[str, Any] | None) -> str | None:
+    if not request:
+        return None
+    evidence = request.get("evidence")
+    if isinstance(evidence, Mapping) and evidence.get("metric_fallback"):
+        return str(evidence["metric_fallback"])
+    return None
+
+
 def project_derived_metric_display(
     text: str,
     *,
@@ -48,15 +57,19 @@ def project_derived_metric_display(
         return None
     if kind == "balance_ratio":
         return _append_balance_sheet_ratio(text)
+    fallback = _metric_fallback(request)
     base = project_periodic_metric_table(
         text,
         metric=metric,
         period=(request or {}).get("period"),
         comparison=comparison,
         raw_query=raw_query,
+        metric_fallback=fallback,
     )
     if not base:
         return None
+    if kind == "quarter_compare":
+        return _append_quarter_compare(base, raw_query=raw_query)
     if kind == "rate":
         return _append_rate(base, metric=metric)
     if kind == "ratio":
@@ -88,6 +101,39 @@ def _append_rate(table: str, *, metric: str | None) -> str | None:
         f"({label} 증가율(파생): {_format_pct(rate)} — "
         f"{_format_amount(old_value)} → {_format_amount(new_value)})"
     )
+
+
+def _append_quarter_compare(table: str, *, raw_query: str | None) -> str | None:
+    values = _metric_row_values(table)
+    if len(values) < 2:
+        return None
+    headers = _table_column_headers(table)
+    left_label = headers[0] if headers else "전기"
+    right_label = headers[1] if len(headers) > 1 else "당기"
+    left_value, right_value = values[0], values[1]
+    if right_value > left_value:
+        winner = right_label
+        delta = right_value - left_value
+    elif left_value > right_value:
+        winner = left_label
+        delta = left_value - right_value
+    else:
+        winner = "동일"
+        delta = 0.0
+    return (
+        f"{table}\n"
+        f"(분기 비교(파생): {left_label} {_format_amount(left_value)} · "
+        f"{right_label} {_format_amount(right_value)} · "
+        f"더 큰 쪽: {winner} · 차이 {_format_amount(delta)})"
+    )
+
+
+def _table_column_headers(table: str) -> list[str]:
+    rows = [line for line in str(table).splitlines() if line.strip().startswith("|")]
+    if not rows:
+        return []
+    cells = _cells(rows[0])
+    return cells[1:] if len(cells) > 1 else []
 
 
 def _append_balance_sheet_ratio(table: str) -> str | None:
