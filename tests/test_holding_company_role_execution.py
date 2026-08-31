@@ -827,3 +827,157 @@ class DirectedFilerAcquisitionEndToEndTests(unittest.TestCase):
             self.rival.doc_id,
             [context["doc_id"] for context in payload["retrieved_context"]],
         )
+
+
+class RecoveredAcquisitionEvidenceTests(unittest.TestCase):
+    """The proving detail row is fetched but unranked, and must still arrive.
+
+    A holding detail projection carries its acquisition columns only inside
+    ``column_headers``/``table_rows``, so no acquisition wording reaches its
+    lexical surface and a question about a unit price cannot rank it.  The
+    position summary ranks instead, the resolver is handed a row that proves no
+    acquisition, and it fails closed.  These cases serve exactly that shape --
+    summary ranked, detail row present only in the fetched pool -- and pin that
+    coverage recovery closes it without any component downstream changing.
+    """
+
+    HOLDER = "가상지주"
+    PRICE = "77,777"
+    #: Both projections of one filing state the reference date the same way, as
+    #: the corpus does.  ``record`` carries the compact rcept-style value that
+    #: a projection label never holds, so the summary restates it here.
+    REFERENCE = "2024.02.03"
+
+    def summary(self):
+        """The position projection, dated the way its own detail row is."""
+
+        base = candidate(self.selected)
+        chunk = dict(base.chunk)
+        fields = dict(chunk["projection_fields"])
+        fields["기준일/보고일"] = self.REFERENCE
+        chunk["projection_fields"] = fields
+        chunk["projection_field_refs"] = {
+            label: [dict(SOURCE_REF)] for label in fields
+        }
+        return CandidateChunk(base.chunk_id, base.doc_id, chunk, MetadataMatch())
+
+    def setUp(self) -> None:
+        # The summary and its detail row are two renderings of one filing,
+        # so their position must agree; a disagreement is a real conflict
+        # the frozen producer is right to refuse.
+        self.selected = record(self.HOLDER, "selected", "2,100")
+        self.index = HoldingReportIndex(
+            (self.selected,), complete=True, correction_finality_available=True
+        )
+        self.resolver = HoldingCompanyRoleResolver(self.index)
+        # The acquirer is absent from the universe, as a filer normally is.
+        self.scope = CorpusScope(
+            companies={ISSUER: (ISSUER, ISSUER_CODE)},
+            receipt_from="2020-01-01",
+            receipt_to="2030-12-31",
+        )
+        self.understanding = QueryUnderstanding(self.scope.company_aliases())
+        self.validator = QueryValidator(
+            corpus_scope=self.scope,
+            holding_company_role_resolver=self.resolver,
+        )
+        self.orchestrator = AgentOrchestrator(
+            report_relative_execution=HoldingReportRelativeExecution(index=self.index),
+            holding_company_role_resolver=self.resolver,
+        )
+        self.question = (
+            f"{self.HOLDER}가 {ISSUER} 주식을 "
+            "취득할 때의 취득단가는 얼마야?"
+        )
+
+    def _run(self, pool, served):
+        """Serve ``served`` while ``pool`` is what retrieval already fetched."""
+
+        executor = StaticExecutor(
+            pool, [ranked(candidate, index + 1)
+                   for index, candidate in enumerate(served)]
+        )
+        recording = RecordingOrchestrator(self.orchestrator)
+        payload = AnswerPipeline(
+            understanding=self.understanding,
+            executor=executor,
+            orchestrator=recording,
+            query_validator=self.validator,
+            answerability_guard=AnswerabilityGuard(),
+        ).answer("RECOVERED-ACQUISITION", self.question)
+        return recording.result, payload
+
+    def test_unranked_detail_row_is_recovered_and_grounds_unavailable(self) -> None:
+        summary = self.summary()
+        detail = acquisition_candidate(self.selected)
+
+        # Baseline: without the detail row in the pool at all, the frozen
+        # resolver has nothing that proves an acquisition and fails closed.
+        without, _payload = self._run((summary,), (summary,))
+        self.assertEqual(without.field_evidence, ())
+        self.assertTrue(
+            all(event.transaction_method is None
+                for event in without.resolution.events)
+        )
+
+        result, payload = self._run((summary, detail), (summary,))
+
+        # The frozen resolver now discovers the acquisition for itself.
+        proven = [event for event in result.resolution.events
+                  if event.transaction_method is not None]
+        self.assertEqual(len(proven), 1)
+        self.assertIsNotNone(proven[0].acquisition_date)
+        self.assertIsNotNone(proven[0].acquired_shares)
+        self.assertEqual(result.resolution.matching_event_count, 1)
+
+        # The frozen producer reads the recovered physical row.
+        self.assertEqual(len(result.field_evidence), 1)
+        field = result.field_evidence[0]
+        self.assertIs(field.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(field.doc_id, self.selected.doc_id)
+        self.assertEqual(field.chunk_id, detail.chunk_id)
+        self.assertEqual(field.table_id, "t-acquisition")
+        self.assertEqual((field.row_start, field.row_end), (2, 2))
+
+        # Answerability decides through the ordinary FieldEvidence contract.
+        self.assertFalse(payload["think_trace"]["answerable"])
+        answerability = payload["think_trace"]["answerability"]
+        self.assertEqual(answerability["status"], "insufficient_evidence")
+        self.assertEqual(answerability["unavailable_fields"],
+                         [ACQUISITION_UNIT_PRICE])
+        self.assertEqual(
+            answerability["unavailable_evidence"][0]["chunk_id"], detail.chunk_id
+        )
+
+    def test_recovered_numeric_unit_price_is_available_from_that_row(self) -> None:
+        summary = self.summary()
+        detail = priced_acquisition_candidate(self.selected, self.PRICE)
+
+        result, payload = self._run((summary, detail), (summary,))
+
+        self.assertEqual(len(result.field_evidence), 1)
+        field = result.field_evidence[0]
+        self.assertIs(field.status, FieldStatus.AVAILABLE)
+        self.assertEqual(field.value, self.PRICE)
+        self.assertEqual(field.doc_id, self.selected.doc_id)
+        self.assertEqual(field.chunk_id, detail.chunk_id)
+        self.assertEqual(field.table_id, "t-acquisition")
+        self.assertEqual((field.row_start, field.row_end), (2, 2))
+        # No neighbouring quantity may be read as the unit price.
+        for neighbour in ("100", "2,000", "2,100", "1.00"):
+            self.assertNotEqual(field.value, neighbour)
+        self.assertTrue(payload["think_trace"]["answerable"])
+
+    def test_baseline_served_order_survives_recovery(self) -> None:
+        summary = self.summary()
+        detail = acquisition_candidate(self.selected)
+
+        result, payload = self._run((summary, detail), (summary,))
+
+        served = [row["chunk_id"] for row in payload["retrieved_context"]]
+        # The ranked summary keeps its place; the recovered row is appended.
+        self.assertEqual(served[0], summary.chunk_id)
+        self.assertIn(detail.chunk_id, served)
+        self.assertLess(served.index(summary.chunk_id),
+                        served.index(detail.chunk_id))
+        self.assertEqual(len(result.field_evidence), 1)

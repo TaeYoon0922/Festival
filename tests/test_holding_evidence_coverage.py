@@ -13,9 +13,12 @@ from app.agent.orchestrator import AgentOrchestrator
 from app.generation.answer_generator import CitationAwareAnswerGenerator
 from app.reasoning.answerability import AnswerabilityGuard
 from app.reasoning.holding_evidence_coverage import (
+    ACQUISITION_PROOF,
     ANCHOR_MEDIUM,
     ANCHOR_STRONG,
     PROVENANCE_KEY,
+    RESCUE_MODE_ACQUISITION_PROOF,
+    STATUS_NO_ACQUISITION_PROOF,
     STATUS_NO_ANCHOR,
     anchor_tier,
     STATUS_COVERED,
@@ -23,8 +26,12 @@ from app.reasoning.holding_evidence_coverage import (
     STATUS_NOT_HOLDING,
     STATUS_NO_SAFE_DISPLACEMENT,
     STATUS_RESCUED,
+    _assess_field_coverage,
+    _minimum_subset,
     assess,
+    proves_acquisition,
     reporter_compatible,
+    strict_reporter_identity,
 )
 from app.reasoning.query_plan import QueryPlan
 from app.retrieval.interfaces import CandidateChunk, MetadataMatch, RetrievalResult
@@ -1212,3 +1219,318 @@ class P1A2PublicRegressionTests(unittest.TestCase):
                          if g.group_type == "holding_event"])
         self.assertEqual(payload["think_trace"]["route"], "holding_event_resolver")
         self.assertIn("holding_evidence_coverage", payload["think_trace"]["stages"])
+
+
+# --------------------------------------------------------- acquisition proof
+
+#: A holder no issuer-scoped universe lists, as a filer usually is.
+HOLDER = "가상지주"
+#: The same holder written the way a person writes it.
+HOLDER_LEGAL_FORM = "(주)가상지주"
+#: A different holder whose name merely *contains* the bound one.
+NEIGHBOUR_HOLDER = "가상지주캐피탈"
+#: A holder family and one of its members, which the frozen contract treats as
+#: one identity through its own suffix rule.
+SYNTH_FAMILY = "가상연금"
+SYNTH_MEMBER = "가상연금공단"
+
+ACQUISITION_Q = "가상발행사 주식 취득단가"
+#: An ordinary holding request, reusing this module's own pinned query so the
+#: comparison is against the behaviour those tests already fix.
+ORDINARY_Q = HX12_Q
+
+
+def _acquisition_row(
+    chunk_id,
+    doc_id="d1",
+    *,
+    reporter=HOLDER,
+    method="장내매수(+)",
+    change="1,000",
+    price="-",
+    change_date="2024.02.03",
+    reference_date="2024년 02월 03일",
+    table_id="t0031",
+    row=2,
+    citable=True,
+    headers=None,
+    rows=None,
+    rank=1,
+):
+    """A detail row shaped like the frozen corpus' 세부변동내역 table.
+
+    The acquisition columns live only in ``column_headers``/``table_rows``;
+    the projection labels carry the position, exactly as the corpus stores it.
+    Its table differs from the summary's on purpose, so anchoring has to fall
+    back to the reference date the two share -- which is what production does.
+    """
+
+    default_headers = [
+        "성명(명칭)", "변동일*", "취득/처분방법",
+        "변동 내역 / 증감", "취득/처분단가**", "비 고",
+    ]
+    default_rows = [[
+        {"text": value} for value in
+        (reporter, change_date, method, change, price, "")
+    ]]
+    fields = {"보고자/보유자": reporter, "기준일/보고일": reference_date}
+    ref = {"table_id": table_id, "row_start": row, "row_end": row}
+    chunk = {
+        "chunk_id": chunk_id,
+        "doc_id": doc_id,
+        "doc_group": "holding",
+        "corp_code": "00970453",
+        "corp_name": "테스트회사",
+        "report_nm": "주식등의대량보유상황보고서(일반)",
+        "rcept_dt": "2024-02-05",
+        "chunk_type": "table_projection",
+        "projection_type": "holding_detail_row",
+        "projection_fields": fields,
+        "projection_field_refs": (
+            {label: [dict(ref)] for label in fields} if citable else {}
+        ),
+        "source_refs": [dict(ref)] if citable else [],
+        "source_table_id": table_id,
+        "table_id": table_id,
+        "row_start": row,
+        "row_end": row,
+        "column_headers": default_headers if headers is None else headers,
+        "table_rows": default_rows if rows is None else rows,
+        "section_path": ["제3부 직전보고일 이후 대량변동 내역", "2. 세부변동내역"],
+        "content": " ".join(f"[{k}] {v}" for k, v in fields.items()),
+        "retrieval_text": " ".join(f"[{k}] {v}" for k, v in fields.items()),
+    }
+    return (CandidateChunk(chunk_id, doc_id, chunk, MetadataMatch()),
+            RetrievalResult(chunk_id, doc_id, 1.0, rank, MetadataMatch().to_dict()))
+
+
+def _summary(chunk_id="s1", doc_id="d1", *, reporter=HOLDER,
+             reference_date="2024년 02월 03일", rank=1):
+    """The position projection retrieval actually ranks for these questions."""
+
+    return _projection(
+        chunk_id, doc_id, kind="holding_report", reporter=reporter,
+        reference_date=reference_date, after_ratio="7.10", rank=rank,
+    )
+
+
+def _acquisition_plan(reporter=HOLDER, raw_query=ACQUISITION_Q):
+    return _plan(raw_query, task_type="holding_change", reporter=reporter,
+                 metric="acquisition_unit_price")
+
+
+class AcquisitionProofActivationTests(unittest.TestCase):
+    """The acquisition lane runs only for the answer field that needs it."""
+
+    def test_acquisition_unit_price_request_activates_the_lane(self) -> None:
+        summary = _summary()
+        detail = _acquisition_row("a1")
+
+        result = _assess(_acquisition_plan(), [summary, detail], [summary])
+
+        self.assertIn(ACQUISITION_PROOF, result.requested)
+        self.assertEqual(result.status, STATUS_RESCUED)
+        self.assertEqual(result.rescue_mode, RESCUE_MODE_ACQUISITION_PROOF)
+        self.assertEqual([r.chunk_id for r in result.selected], ["a1"])
+
+    def test_ordinary_holding_query_is_untouched_by_the_lane(self) -> None:
+        """Byte-for-byte the pre-feature selection, proved against the old body."""
+
+        plan = _plan(ORDINARY_Q, task_type="holding_change")
+        pool = [*_served_tables(2), _projection("p1", "d0", rank=3)]
+        served = pool[:2]
+
+        before = _assess_field_coverage(
+            plan.raw_query, plan, [c for c, _ in pool], [r for _, r in served],
+            routed_task_type="holding_event",
+        )
+        after = _assess(plan, pool, served)
+
+        self.assertNotIn(ACQUISITION_PROOF, after.requested)
+        self.assertEqual(after.requested, before.requested)
+        self.assertEqual(after.status, before.status)
+        self.assertEqual([r.chunk_id for r in after.selected],
+                         [r.chunk_id for r in before.selected])
+        self.assertEqual([r.chunk_id for r in after.results],
+                         [r.chunk_id for r in before.results])
+        self.assertEqual([r.rank for r in after.results],
+                         [r.rank for r in before.results])
+
+    def test_non_holding_execution_never_reaches_the_lane(self) -> None:
+        summary = _summary()
+        detail = _acquisition_row("a1")
+
+        result = _assess(_acquisition_plan(), [summary, detail], [summary],
+                         routed="general_evidence")
+
+        self.assertEqual(result.status, STATUS_NOT_HOLDING)
+        self.assertNotIn(ACQUISITION_PROOF, result.requested)
+
+
+class AcquisitionAmbiguityPreservationTests(unittest.TestCase):
+    """Every legitimate proof row reaches the resolver.  This lane picks none."""
+
+    def test_minimum_subset_would_have_hidden_the_second_row(self) -> None:
+        """Why the acquisition lane cannot reuse the ordinary selection."""
+
+        first, _ = _acquisition_row("a1")
+        second, _ = _acquisition_row("a2", row=3)
+
+        picked = _minimum_subset(
+            [(first, frozenset({ACQUISITION_PROOF})),
+             (second, frozenset({ACQUISITION_PROOF}))],
+            [ACQUISITION_PROOF],
+        )
+
+        # One row closes the requirement as well as two, so the ordinary
+        # selection keeps exactly one -- which would turn a contested
+        # acquisition into a confident single event.
+        self.assertEqual([c.chunk_id for c in picked], ["a1"])
+
+    def test_both_acquisition_rows_are_promoted(self) -> None:
+        summary = _summary()
+        first = _acquisition_row("a1", row=2, change="1,000")
+        second = _acquisition_row("a2", row=3, change="2,000")
+
+        result = _assess(_acquisition_plan(), [summary, first, second], [summary])
+
+        # Deliberately more rows than the requirement needs: the ambiguity is
+        # the resolver's to see, so selected_count exceeds the minimum.
+        self.assertEqual([r.chunk_id for r in result.selected], ["a1", "a2"])
+        self.assertEqual(len(result.selected), 2)
+        self.assertEqual(len(result.anchors), 2)
+
+
+class AcquisitionReporterIdentityTests(unittest.TestCase):
+    """An acquisition row must belong to the holder the question named."""
+
+    def test_containment_neighbour_is_rejected_by_strict_identity(self) -> None:
+        summary = _summary()
+        neighbour = _acquisition_row("a1", reporter=NEIGHBOUR_HOLDER)
+
+        # The ordinary predicate would have accepted it; the frozen identity
+        # contract does not, and the acquisition lane reads the latter.
+        self.assertTrue(reporter_compatible(neighbour[0].chunk, HOLDER))
+        self.assertFalse(strict_reporter_identity(neighbour[0].chunk, HOLDER))
+
+        result = _assess(_acquisition_plan(), [summary, neighbour], [summary])
+
+        self.assertEqual(result.selected, ())
+        self.assertEqual(result.status, STATUS_NO_ACQUISITION_PROOF)
+
+    def test_frozen_equivalent_spellings_are_allowed(self) -> None:
+        for label, requested, holder in (
+            ("legal form", HOLDER, HOLDER_LEGAL_FORM),
+            ("family suffix", SYNTH_FAMILY, SYNTH_MEMBER),
+        ):
+            with self.subTest(identity=label):
+                summary = _summary(reporter=holder)
+                detail = _acquisition_row("a1", reporter=holder)
+
+                self.assertTrue(strict_reporter_identity(detail[0].chunk, requested))
+                result = _assess(_acquisition_plan(reporter=requested),
+                                 [summary, detail], [summary])
+
+                self.assertEqual([r.chunk_id for r in result.selected], ["a1"])
+
+    def test_unbound_reporter_recovers_nothing(self) -> None:
+        for label, reporter in (("none", None), ("blank", "   ")):
+            with self.subTest(reporter=label):
+                summary = _summary()
+                detail = _acquisition_row("a1")
+
+                self.assertFalse(strict_reporter_identity(detail[0].chunk, reporter))
+                result = _assess(_acquisition_plan(reporter=reporter),
+                                 [summary, detail], [summary])
+
+                self.assertEqual(result.selected, ())
+
+
+class AcquisitionProofBoundsTests(unittest.TestCase):
+    """What may not become acquisition proof."""
+
+    def test_disposal_row_proves_no_acquisition(self) -> None:
+        summary = _summary()
+        disposal = _acquisition_row("a1", method="장내매도(-)", change="-1,000")
+
+        self.assertFalse(proves_acquisition(disposal[0].chunk))
+        result = _assess(_acquisition_plan(), [summary, disposal], [summary])
+
+        self.assertEqual(result.selected, ())
+        self.assertEqual(result.status, STATUS_NO_ACQUISITION_PROOF)
+
+    def test_other_document_is_not_anchored(self) -> None:
+        summary = _summary(doc_id="d1")
+        elsewhere = _acquisition_row("a1", doc_id="d9")
+
+        result = _assess(_acquisition_plan(), [summary, elsewhere], [summary])
+
+        self.assertEqual(result.selected, ())
+
+    def test_unanchored_same_document_row_is_rejected(self) -> None:
+        summary = _summary(reference_date="2024년 02월 03일")
+        # Same filing, a different event: no shared rows and no shared date.
+        other_event = _acquisition_row("a1", reference_date="2024년 09월 09일")
+
+        result = _assess(_acquisition_plan(), [summary, other_event], [summary])
+
+        self.assertEqual(result.selected, ())
+
+    def test_malformed_and_uncitable_rows_are_rejected(self) -> None:
+        summary = _summary()
+        cases = (
+            ("no headers", _acquisition_row("a1", headers=[])),
+            ("two rows", _acquisition_row(
+                "a1", rows=[[{"text": "x"}], [{"text": "y"}]])),
+            ("zero quantity", _acquisition_row("a1", change="0")),
+            ("uncitable", _acquisition_row("a1", citable=False)),
+        )
+        for label, candidate in cases:
+            with self.subTest(row=label):
+                result = _assess(_acquisition_plan(), [summary, candidate], [summary])
+                self.assertEqual(result.selected, ())
+
+    def test_no_detail_row_declines_cleanly(self) -> None:
+        summary = _summary()
+
+        result = _assess(_acquisition_plan(), [summary], [summary])
+
+        self.assertEqual(result.selected, ())
+        self.assertEqual(result.status, STATUS_NO_ACQUISITION_PROOF)
+        self.assertIn(ACQUISITION_PROOF, result.remaining_unresolved)
+
+
+class AcquisitionRetrievalImmutabilityTests(unittest.TestCase):
+    """Recovered rows are appended.  Nothing served is touched."""
+
+    def test_baseline_rows_keep_object_order_and_rank(self) -> None:
+        summary = _summary("s1", rank=1)
+        second = _summary("s2", rank=2)
+        detail = _acquisition_row("a1", rank=9)
+        served = [summary, second]
+
+        result = _assess(_acquisition_plan(), [summary, second, detail], served)
+
+        baseline = [r for _, r in served]
+        self.assertEqual([r.chunk_id for r in result.results[:2]],
+                         [r.chunk_id for r in baseline])
+        self.assertEqual([r.rank for r in result.results[:2]],
+                         [r.rank for r in baseline])
+        for original, kept in zip(baseline, result.results[:2]):
+            self.assertIs(original, kept)
+        self.assertEqual(result.displaced, ())
+
+    def test_recovered_row_is_appended_with_recovery_provenance(self) -> None:
+        summary = _summary()
+        detail = _acquisition_row("a1")
+
+        result = _assess(_acquisition_plan(), [summary, detail], [summary])
+        promoted = result.results[-1]
+
+        self.assertEqual(promoted.chunk_id, "a1")
+        self.assertEqual(promoted.rank, len(result.results))
+        self.assertGreater(promoted.rank, 1)
+        self.assertEqual(promoted.bm25_score, 0.0)
+        self.assertEqual(promoted.metadata_match[PROVENANCE_KEY],
+                         {"selected_for": "holding_field_coverage"})
+        self.assertEqual(result.anchors[0][1], ANCHOR_MEDIUM)

@@ -30,6 +30,7 @@ from itertools import combinations
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import _evidence_item, _normalize_date
+from app.reasoning.holding_acquisition import DETAIL_PROJECTION, acquisition_facts
 from app.reasoning.holding_event_resolver import (
     CURRENT_HOLDING_STATE_FIELDS,
     _FIELD_LABELS,
@@ -38,17 +39,39 @@ from app.reasoning.holding_event_resolver import (
     _requested_fields,
 )
 from app.reasoning.holding_date_intent import exact_reference_date
+# Aliased on purpose.  This module already defines a ``requested_holding_fields``
+# answering "which resolver state fields did the question ask for"; the field
+# lane's function of the same name answers "which canonical answer field did it
+# ask for".  They are different questions and must not read as the same call.
+from app.reasoning.holding_field_evidence import (
+    ACQUISITION_UNIT_PRICE,
+    requested_holding_fields as requested_answer_fields,
+)
 from app.reasoning.holding_report_index import (
     SELECTOR_EXACT_REFERENCE_DATE,
     HoldingReportIndex,
     HoldingReportRecord,
 )
-from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.holding_reporter import canonical_reporter_key, reporter_matches
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
 #: The structured holding projections a rescue may promote.
 HOLDING_PROJECTION_TYPES = ("holding_detail_row", "holding_report")
+
+#: An internal coverage requirement, never a public answer field.  It means one
+#: thing: the frozen acquisition parser can prove an acquisition from this
+#: structural detail row.  A question that asks for an acquisition unit price
+#: needs such a row served, and no holding *state* field implies one -- a report
+#: projection can carry every share count the resolver reads and still prove no
+#: acquisition, which is how a served-and-covered request reached the resolver
+#: with nothing to resolve.
+ACQUISITION_PROOF = "acquisition_proof"
+
+#: Recorded when the acquisition lane appended proof rows.
+RESCUE_MODE_ACQUISITION_PROOF = "acquisition_proof"
+#: The acquisition lane ran and found no bounded proving row.
+STATUS_NO_ACQUISITION_PROOF = "no_acquisition_proof_candidate"
 
 #: Statuses recorded on the assessment, for diagnostics.
 STATUS_NOT_HOLDING = "not_holding_execution"
@@ -535,6 +558,193 @@ def _contract_d_candidate(
 PROVENANCE_KEY = "holding_evidence_coverage"
 
 
+def proves_acquisition(chunk: Mapping[str, Any]) -> bool:
+    """Whether the frozen parser can prove an acquisition from this row.
+
+    A predicate and nothing more.  The parsed method, date and quantity are
+    deliberately discarded here: which transaction answers the question, and
+    what its unit price says, are decisions this lane must never make.
+    """
+
+    if str(chunk.get("projection_type") or "") != DETAIL_PROJECTION:
+        return False
+    return acquisition_facts(chunk) is not None
+
+
+def strict_reporter_identity(chunk: Mapping[str, Any], reporter: str | None) -> bool:
+    """Whether this row's holder *is* the bound reporter, on the frozen contract.
+
+    ``reporter_compatible`` accepts containment either way, which is right for
+    completing a holding position: a family name and its member describe one
+    holder's evidence.  An acquisition row is a different claim -- it says this
+    holder bought these shares on this day -- so a neighbouring holder whose
+    name merely contains the bound one must not supply it.  The frozen
+    ``reporter_matches`` is the identity contract, and it is read here whole.
+
+    An unbound reporter authorizes nothing: the acquisition lane runs only
+    after validation proved which holder the question named.
+    """
+
+    wanted = str(reporter or "").strip()
+    if not wanted:
+        return False
+    fields = dict(chunk.get("projection_fields") or {})
+    holder = str(fields.get("보고자/보유자") or chunk.get("reporter") or "").strip()
+    if not holder:
+        return False
+    return reporter_matches(holder, wanted)
+
+
+def _acquisition_anchor(
+    candidate: CandidateChunk,
+    served: Sequence[RetrievalResult],
+    by_id: Mapping[str, CandidateChunk],
+    reporter: str | None,
+) -> tuple[str, int] | None:
+    """The firmest served item this proof row completes, if any.
+
+    Same anchoring rule the ordinary lane uses, so a proof row reaches the
+    resolver only by completing a document retrieval already served.
+    """
+
+    best: tuple[str, int] | None = None
+    for result in served:
+        served_chunk = by_id.get(result.chunk_id)
+        if served_chunk is None:
+            continue
+        tier = anchor_tier(candidate.chunk, served_chunk.chunk, reporter)
+        if tier is None:
+            continue
+        if best is None or _ANCHOR_ORDER[tier] < _ANCHOR_ORDER[best[0]]:
+            best = (tier, result.rank)
+    return best
+
+
+def _recover_acquisition_proof(
+    assessment: CoverageAssessment,
+    chunks: Sequence[CandidateChunk],
+    reporter: str | None,
+) -> CoverageAssessment:
+    """Append every bounded row that proves an acquisition.  Choose none.
+
+    Ambiguity is the resolver's to see.  ``_minimum_subset`` exists to close a
+    field with the fewest rows, and one acquisition row closes this requirement
+    exactly as well as five do -- so using it here would silently keep one row
+    and drop the rest, turning a contested acquisition into a confident single
+    event.  Every legitimately bounded proof row is therefore promoted, and
+    whether they are one event, several, or an ambiguity that must fail closed
+    is decided downstream where the evidence can actually be compared.
+
+    Breadth is structural, not policed by a cutoff: a proof row must belong to
+    an already-served document, to the bound reporter on the frozen identity
+    contract, and must anchor to a served row of that document -- which ties
+    the set to one reporter's rows for one reference date inside one filing.
+
+    Baseline results are appended to, never reordered, rescored or displaced.
+    """
+
+    served = list(assessment.results)
+    served_ids = {result.chunk_id for result in served}
+    by_id = {candidate.chunk_id: candidate for candidate in chunks}
+
+    selected: list[RetrievalResult] = []
+    anchors: list[tuple[str, str, int]] = []
+    anchored_count = 0
+    for candidate in chunks:
+        if candidate.chunk_id in served_ids:
+            continue
+        if not _eligible(candidate, reporter):
+            continue
+        if not strict_reporter_identity(candidate.chunk, reporter):
+            continue
+        if not proves_acquisition(candidate.chunk):
+            continue
+        anchor = _acquisition_anchor(candidate, served, by_id, reporter)
+        if anchor is None:
+            continue
+        anchored_count += 1
+        tier, served_rank = anchor
+        selected.append(_synthetic(candidate, len(served) + len(selected) + 1))
+        anchors.append((candidate.chunk_id, tier, served_rank))
+
+    requested = tuple([*assessment.requested, ACQUISITION_PROOF])
+    if not selected:
+        return CoverageAssessment(
+            **{
+                **assessment.__dict__,
+                "requested": requested,
+                "unresolved": tuple([*assessment.unresolved, ACQUISITION_PROOF]),
+                "remaining_unresolved": tuple(
+                    [*assessment.remaining_unresolved, ACQUISITION_PROOF]
+                ),
+                "status": STATUS_NO_ACQUISITION_PROOF,
+                "anchored_candidate_count": (
+                    assessment.anchored_candidate_count + anchored_count
+                ),
+                "evaluated": True,
+            }
+        )
+    return CoverageAssessment(
+        **{
+            **assessment.__dict__,
+            "requested": requested,
+            "unresolved": tuple([*assessment.unresolved, ACQUISITION_PROOF]),
+            "served_coverage": tuple(
+                sorted({*assessment.served_coverage, ACQUISITION_PROOF})
+            ),
+            # Appended, so every baseline row keeps its object, order and rank.
+            "results": tuple([*served, *selected]),
+            "selected": tuple([*assessment.selected, *selected]),
+            "anchors": tuple([*assessment.anchors, *anchors]),
+            "anchored_candidate_count": (
+                assessment.anchored_candidate_count + anchored_count
+            ),
+            "rescue_mode": RESCUE_MODE_ACQUISITION_PROOF,
+            "status": STATUS_RESCUED,
+            "evaluated": True,
+        }
+    )
+
+
+def assess(
+    question: str,
+    plan: Any,
+    chunks: Sequence[CandidateChunk],
+    results: Sequence[RetrievalResult],
+    *,
+    routed_task_type: str | None = None,
+    report_index: HoldingReportIndex | None = None,
+    active_corpus_identity: Mapping[str, Any] | None = None,
+    ordinary_lane: bool = False,
+) -> CoverageAssessment:
+    """Field coverage, then the acquisition proof an answer field may also need.
+
+    The two are separate passes on purpose.  Ordinary coverage asks which of
+    the resolver's state fields the served rows can supply and closes any gap
+    with the fewest rows.  The acquisition lane asks a different question --
+    can any served row prove an acquisition at all -- and answers it without
+    choosing among the rows that can.
+    """
+
+    assessment = _assess_field_coverage(
+        question,
+        plan,
+        chunks,
+        results,
+        routed_task_type=routed_task_type,
+        report_index=report_index,
+        active_corpus_identity=active_corpus_identity,
+        ordinary_lane=ordinary_lane,
+    )
+    if routed_task_type != "holding_event":
+        return assessment
+    asked = str(getattr(plan, "raw_query", "") or question or "")
+    if ACQUISITION_UNIT_PRICE not in requested_answer_fields(asked):
+        return assessment
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    return _recover_acquisition_proof(assessment, chunks, reporter)
+
+
 def _synthetic(candidate: CandidateChunk, rank: int) -> RetrievalResult:
     match = dict(candidate.metadata_match.to_dict())
     match[PROVENANCE_KEY] = {"selected_for": "holding_field_coverage"}
@@ -547,7 +757,7 @@ def _synthetic(candidate: CandidateChunk, rank: int) -> RetrievalResult:
     )
 
 
-def assess(
+def _assess_field_coverage(
     question: str,
     plan: Any,
     chunks: Sequence[CandidateChunk],
