@@ -27,6 +27,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.reasoning.holding_report_index import ARTIFACT_SCHEMA_VERSION, _clean
+from app.reasoning.holding_correction_state import (
+    document_correction_states,
+    is_canonical_holding_body,
+)
 from app.reasoning.holding_reporter import canonical_reporter_key
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +70,39 @@ def _direction(change_shares: str | None) -> str | None:
     if any(ch.isdigit() and ch != "0" for ch in stripped):
         return "increase"
     return None
+
+
+def _projection_authority(chunks) -> dict[str, dict]:
+    """Build-time structural authority metadata for each report projection."""
+
+    projections = [
+        chunk for chunk in chunks
+        if chunk.get("projection_type") == PROJECTION
+    ]
+    states = document_correction_states(chunks)
+    event_counts = collections.Counter(
+        (
+            str(chunk.get("corp_code") or ""),
+            _digits8((chunk.get("projection_fields") or {}).get(F_REFERENCE)),
+        )
+        for chunk in projections
+    )
+    return {
+        str(chunk.get("chunk_id") or ""): {
+            "correction_state": states.get(str(chunk.get("chunk_id") or "")),
+            "is_canonical_body": is_canonical_holding_body(chunk),
+            "document_event_projection_count": event_counts[
+                (
+                    str(chunk.get("corp_code") or ""),
+                    _digits8(
+                        (chunk.get("projection_fields") or {}).get(F_REFERENCE)
+                    ),
+                )
+            ],
+        }
+        for chunk in projections
+        if str(chunk.get("chunk_id") or "")
+    }
 
 
 def manifest_holding_ids() -> set[str]:
@@ -128,6 +165,10 @@ def build() -> tuple[list[dict], dict]:
             missing_projection.append(doc_id)
             continue
         report["documents_with_report_projection"] += 1
+        # Read the filing-wide correction grid once.  Some projection captions
+        # carry only a region reference (for example ``<내용 1-6>``), so their
+        # state cannot be computed from the projection in isolation.
+        projection_authority = _projection_authority(doc.get("chunks") or [])
 
         for chunk in projections:
             report["projections_total"] += 1
@@ -144,12 +185,19 @@ def build() -> tuple[list[dict], dict]:
                 no_reference.append(str(chunk.get("chunk_id")))
                 continue
             change_shares = _clean(fields.get(F_CHANGE_SHARES))
+            chunk_id = str(chunk.get("chunk_id") or "")
+            authority = projection_authority.get(chunk_id) or {}
+            correction_state = authority.get("correction_state")
+            canonical_body = bool(authority.get("is_canonical_body"))
+            event_projection_count = int(
+                authority.get("document_event_projection_count") or 0
+            )
             records.append({
                 "issuer_corp_code": str(chunk.get("corp_code") or ""),
                 "reporter_key": reporter_key,
                 "raw_reporter": raw_reporter,
                 "doc_id": str(chunk.get("doc_id") or ""),
-                "projection_chunk_id": str(chunk.get("chunk_id") or ""),
+                "projection_chunk_id": chunk_id,
                 "reference_date": reference,
                 "receipt_date": _digits8(chunk.get("rcept_dt")),
                 "previous_date": _digits8(fields.get(F_PREVIOUS_DATE)),
@@ -161,11 +209,18 @@ def build() -> tuple[list[dict], dict]:
                 "after_shares": _clean(fields.get(F_AFTER_SHARES)),
                 "after_ratio": _clean(fields.get(F_AFTER_RATIO)),
                 "is_correction": bool(chunk.get("is_correction")),
+                "correction_state": correction_state,
+                "is_canonical_body": canonical_body,
+                "document_event_projection_count": event_projection_count,
                 "report_nm": _clean(chunk.get("report_nm")),
                 "source_table_id": _clean(chunk.get("source_table_id")),
                 "source_refs": list(chunk.get("source_refs") or ()),
             })
             report["records_indexed"] += 1
+            if correction_state:
+                report[f"projection_state_{correction_state}"] += 1
+            if canonical_body:
+                report["canonical_body_projections"] += 1
 
     records.sort(key=lambda r: (r["issuer_corp_code"], r["reporter_key"],
                                 r["reference_date"], r["doc_id"],

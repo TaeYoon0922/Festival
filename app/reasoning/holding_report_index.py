@@ -15,6 +15,12 @@ picks the wrong report in the majority of cases; ordering is therefore always by
 *later*, so a correction must be resolved before dates are compared, never
 after.
 
+A final correcting filing can itself contain several projections of the same
+report: a prior reprint, a corrected reprint, and the report body.  Their
+structural roles are materialized in the index.  Selection removes a proven
+prior state only within that one document, then requires every proven current
+projection to agree before choosing its canonical body.
+
 Where the corpus cannot prove an answer this module declines.  A tied maximum
 date, a correction whose finality is unproven, an index built from a different
 corpus, a previous state the filing does not record -- each returns a status, not
@@ -36,6 +42,10 @@ from app.reasoning.holding_correction_finality import (
     HoldingCorrectionFinality,
     load_finality,
 )
+from app.reasoning.holding_correction_state import (
+    CORRECTED_STATE,
+    PRIOR_STATE,
+)
 from app.reasoning.holding_report_relative import (
     ROLE_CHANGE,
     ROLE_CURRENT,
@@ -49,7 +59,7 @@ from app.reasoning.holding_reporter import canonical_reporter_key
 
 #: The artifact this module can read.  A different layout is a different
 #: contract and is refused rather than best-effort parsed.
-ARTIFACT_SCHEMA_VERSION = "1.0"
+ARTIFACT_SCHEMA_VERSION = "1.1"
 
 #: Where the generator writes, beside the manifest the identity is bound to.
 DEFAULT_ARTIFACT_PATH = "data/corpus/holding_report_index.json"
@@ -122,6 +132,9 @@ class HoldingReportRecord:
     after_shares: str | None = None
     after_ratio: str | None = None
     is_correction: bool = False
+    correction_state: str | None = None
+    is_canonical_body: bool = False
+    document_event_projection_count: int = 1
     report_nm: str | None = None
     source_table_id: str | None = None
     source_refs: tuple[Mapping[str, Any], ...] = ()
@@ -159,6 +172,11 @@ class HoldingReportRecord:
             "after_shares": self.after_shares,
             "after_ratio": self.after_ratio,
             "is_correction": self.is_correction,
+            "correction_state": self.correction_state,
+            "is_canonical_body": self.is_canonical_body,
+            "document_event_projection_count": (
+                self.document_event_projection_count
+            ),
             "report_nm": self.report_nm,
             "source_table_id": self.source_table_id,
             "source_refs": [dict(ref) for ref in self.source_refs],
@@ -166,6 +184,30 @@ class HoldingReportRecord:
 
     @classmethod
     def from_dict(cls, row: Mapping[str, Any]) -> "HoldingReportRecord":
+        # These are required by schema 1.1.  Treating their absence as an
+        # unmarked/non-body projection would silently interpret a 1.0 row under
+        # the new authority contract.
+        if (
+            "correction_state" not in row
+            or "is_canonical_body" not in row
+            or "document_event_projection_count" not in row
+        ):
+            raise KeyError("projection authority metadata")
+        correction_state = _clean(row.get("correction_state"))
+        if correction_state not in {None, PRIOR_STATE, CORRECTED_STATE}:
+            raise ValueError("unknown projection correction state")
+        canonical_body = row.get("is_canonical_body")
+        if not isinstance(canonical_body, bool):
+            raise ValueError("invalid canonical body marker")
+        if canonical_body and correction_state == PRIOR_STATE:
+            raise ValueError("canonical body cannot be a prior state")
+        projection_count = row.get("document_event_projection_count")
+        if isinstance(projection_count, bool) or not isinstance(
+            projection_count, int
+        ):
+            raise ValueError("invalid document event projection count")
+        if projection_count < 1:
+            raise ValueError("invalid document event projection count")
         return cls(
             issuer_corp_code=str(row["issuer_corp_code"]),
             reporter_key=str(row["reporter_key"]),
@@ -183,10 +225,113 @@ class HoldingReportRecord:
             after_shares=_clean(row.get("after_shares")),
             after_ratio=_clean(row.get("after_ratio")),
             is_correction=bool(row.get("is_correction")),
+            correction_state=correction_state,
+            is_canonical_body=canonical_body,
+            document_event_projection_count=projection_count,
             report_nm=_clean(row.get("report_nm")),
             source_table_id=_clean(row.get("source_table_id")),
             source_refs=tuple(dict(ref) for ref in (row.get("source_refs") or ())),
         )
+
+
+_PROJECTION_VALUE_FIELDS = (
+    "previous_date",
+    "before_shares",
+    "before_ratio",
+    "change_shares",
+    "change_ratio",
+    "change_direction",
+    "after_shares",
+    "after_ratio",
+)
+
+
+def _projection_values(record: HoldingReportRecord) -> tuple[Any, ...]:
+    """The report semantics that two current projections must agree on."""
+
+    return tuple(getattr(record, field) for field in _PROJECTION_VALUE_FIELDS)
+
+
+def _canonical_current_projection(
+    matches: Sequence[HoldingReportRecord],
+) -> tuple[HoldingReportRecord | None, dict[str, Any]]:
+    """Choose within one document only when its structure proves authority.
+
+    Document correction finality has already run before this function.  This
+    second, narrower collapse handles the repeated projections *inside* that
+    final document: prior-state reprints are ineligible for a current report,
+    while the corrected reprint and the canonical body must agree before one
+    of them can represent the report in the index.
+    """
+
+    marked = [
+        record for record in matches
+        if record.correction_state in {PRIOR_STATE, CORRECTED_STATE}
+    ]
+    if not marked:
+        return None, {
+            "projection_authority": "unproven",
+            "projection_authority_reason": "no correction state is proven",
+        }
+
+    current = [
+        record for record in matches
+        if record.correction_state == CORRECTED_STATE
+        or record.is_canonical_body
+    ]
+    if not current:
+        return None, {
+            "projection_authority": "unproven",
+            "projection_authority_reason": (
+                "the document proves only prior-state projections"
+            ),
+        }
+
+    fingerprints = {_projection_values(record) for record in current}
+    if len(fingerprints) != 1:
+        conflicts = [
+            field for field in _PROJECTION_VALUE_FIELDS
+            if len({getattr(record, field) for record in current}) > 1
+        ]
+        return None, {
+            "projection_authority": "current_projection_conflict",
+            "conflicting_projection_fields": conflicts,
+            "current_projection_chunk_ids": sorted(
+                record.projection_chunk_id for record in current
+            ),
+        }
+
+    bodies = [record for record in current if record.is_canonical_body]
+    corrected = [
+        record for record in current
+        if record.correction_state == CORRECTED_STATE
+    ]
+    selected: HoldingReportRecord | None = None
+    rule = ""
+    if len(bodies) == 1:
+        selected = bodies[0]
+        rule = "canonical_report_body"
+    elif len(corrected) == 1:
+        selected = corrected[0]
+        rule = "unique_corrected_projection"
+    if selected is None:
+        return None, {
+            "projection_authority": "ambiguous_current_projection",
+            "current_projection_chunk_ids": sorted(
+                record.projection_chunk_id for record in current
+            ),
+        }
+
+    return selected, {
+        "projection_authority": "resolved",
+        "projection_authority_rule": rule,
+        "canonical_projection_chunk_id": selected.projection_chunk_id,
+        "superseded_projection_chunk_ids": sorted(
+            record.projection_chunk_id
+            for record in matches
+            if record.correction_state == PRIOR_STATE
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -218,9 +363,10 @@ class ReportSelection:
 class HoldingReportIndex:
     """Every holding report in one corpus, keyed by issuer and holder.
 
-    The index is inert about meaning: it enumerates and compares dates.  What a
-    question meant by "latest" or "previous" is decided upstream, and whether an
-    answer may be given at all is decided by the statuses returned here.
+    Query meaning stays upstream: this class enumerates reports and compares
+    dates.  It does enforce the artifact's document-finality and projection-
+    authority proof before returning one, and reports every refusal as a
+    status.
     """
 
     def __init__(
@@ -441,12 +587,12 @@ class HoldingReportIndex:
 
     @staticmethod
     def _unique(matches, base, candidates, detail) -> ReportSelection:
-        """One match resolves; several decline.
+        """One report event resolves; unexplained ties decline.
 
-        Nothing here breaks a tie.  Receipt date, receipt number, document id
-        and file order all *could* order these records, and every one of them
-        would be inventing a reason to prefer one filing's numbers over
-        another's.
+        Receipt date, receipt number, document id and file order never break a
+        tie.  Several projections in one document can collapse only through
+        their persisted correction-state/body proof; different documents are
+        always distinct candidates here.
         """
 
         if not matches:
@@ -458,10 +604,31 @@ class HoldingReportIndex:
                 AMBIGUOUS, **base, candidates=tuple(matches),
                 detail={**detail, "doc_ids": sorted(distinct)},
             )
-        if len(matches) > 1:
+        expected_counts = {
+            record.document_event_projection_count for record in matches
+        }
+        if len(expected_counts) != 1 or next(iter(expected_counts), 0) != len(matches):
             return ReportSelection(
                 AMBIGUOUS, **base, candidates=tuple(matches),
-                detail={**detail, "reason": "one document, several projections",
+                detail={
+                    **detail,
+                    "reason": "document event projection set is incomplete",
+                    "doc_ids": sorted(distinct),
+                    "indexed_projection_count": len(matches),
+                    "expected_projection_counts": sorted(expected_counts),
+                },
+            )
+        if len(matches) > 1:
+            selected, authority = _canonical_current_projection(matches)
+            if selected is not None:
+                return ReportSelection(
+                    RESOLVED, selected=selected, **base, candidates=candidates,
+                    detail={**detail, **authority},
+                )
+            return ReportSelection(
+                AMBIGUOUS, **base, candidates=tuple(matches),
+                detail={**detail, **authority,
+                        "reason": "one document, several projections",
                         "doc_ids": sorted(distinct)},
             )
         return ReportSelection(RESOLVED, selected=matches[0], **base,
