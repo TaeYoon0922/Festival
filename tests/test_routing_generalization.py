@@ -46,11 +46,15 @@ class RoutingGeneralizationTests(unittest.TestCase):
         signatures: list[tuple[Any, ...]] = []
         for corp in ("삼성바이오로직스", "현대건설", "가상테스트Corp"):
             plan = QueryUnderstanding(_aliases(corp)).understand(template.format(corp=corp))
+            aggregate = plan.evidence.get("exchange_aggregate") or {}
+            ratio = plan.evidence.get("cross_domain_ratio") or {}
             signatures.append(
                 (
                     plan.event_type,
-                    plan.evidence.get("exchange_aggregate"),
-                    plan.evidence.get("cross_domain_ratio"),
+                    aggregate.get("field"),
+                    tuple(aggregate.get("ops") or ()),
+                    ratio.get("numerator_op"),
+                    ratio.get("denominator_metric"),
                     "periodic" in plan.disclosure_route,
                 )
             )
@@ -188,6 +192,14 @@ class RoutingGeneralizationTests(unittest.TestCase):
             plan = QueryUnderstanding(_aliases(corp)).understand(template.format(corp=corp))
             values.append(plan.evidence.get("derived_metric"))
         self.assertEqual(set(values), {"quarter_sum_vs_annual"})
+        peer_template = (
+            "크래프톤과 시프트업 2024년 4분기 영업이익 합계와 각 사 2024 "
+            "사업보고서 영업이익을 나란히 비교해 차이는?"
+        )
+        peer_plan = QueryUnderstanding(
+            {**_aliases("크래프톤"), **_aliases("시프트업")}
+        ).understand(peer_template)
+        self.assertEqual(peer_plan.evidence.get("derived_metric"), "quarter_sum_vs_annual")
 
     def test_sp12_order_backlog_intent_is_company_agnostic(self) -> None:
         template = (
@@ -208,6 +220,18 @@ class RoutingGeneralizationTests(unittest.TestCase):
         self.assertEqual(signatures[0][0], "수주잔고")
         self.assertEqual(signatures[0][1], "수주실적")
         self.assertEqual(signatures[0][2], "rate")
+
+    def test_peer_backlog_compare_prefers_periodic_over_exchange_event(self) -> None:
+        query = (
+            "HD현대중공업과 한화오션 2024 사업보고서 수주잔고(또는 수주실적) "
+            "전기 대비 증감률을 비교하면 어느 조선사가 더 높아?"
+        )
+        plan = QueryUnderstanding(
+            {**_aliases("HD현대중공업"), **_aliases("한화오션")}
+        ).understand(query)
+        self.assertEqual(plan.task_type, "financial_metric")
+        self.assertEqual(plan.metric, "수주잔고")
+        self.assertEqual(plan.evidence.get("derived_metric"), "peer_rate")
 
     def test_sp13_max_aggregate_intent_is_company_agnostic(self) -> None:
         template = (
@@ -282,6 +306,40 @@ class RoutingGeneralizationTests(unittest.TestCase):
             )
             values.append(plan.evidence.get("holding_multi_event_compute"))
         self.assertTrue(all(values))
+
+    def test_dual_corp_exchange_backend_filters_drop_doc_subtype(self) -> None:
+        from app.reasoning.query_plan import QueryPlan
+
+        plan = QueryPlan(
+            query="LG에너지솔루션과 삼성SDI 2024년 신규시설투자 공시",
+            companies=("LG에너지솔루션", "삼성SDI"),
+            corp_codes=("01515323", "00126362"),
+            years=(2024,),
+            disclosure_route=("exchange",),
+            doc_subtype="신규시설투자등",
+            comparison={"type": "company_comparison", "companies": ["A", "B"]},
+        )
+        filters = plan.backend_filters()
+        self.assertEqual(filters["doc_group"], "exchange")
+        self.assertIsNone(filters["doc_subtype"])
+        self.assertIsNone(filters["company"])
+        self.assertEqual(filters["corp_code"], ["01515323", "00126362"])
+
+    def test_quarter_sum_vs_annual_backend_filters_allow_annual_and_quarter(self) -> None:
+        from app.reasoning.query_plan import QueryPeriod, QueryPlan
+
+        plan = QueryPlan(
+            query="크래프톤과 시프트업 2024년 4분기 영업이익 합계와 사업보고서 영업이익",
+            companies=("크래프톤", "시프트업"),
+            corp_codes=("00760971", "01384787"),
+            years=(2024,),
+            period=QueryPeriod(year=2024, quarter=4, period_type="fiscal_quarter"),
+            doc_subtype="quarter",
+            evidence={"derived_metric": "quarter_sum_vs_annual"},
+        )
+        filters = plan.backend_filters()
+        self.assertIsNone(filters["doc_subtype"])
+        self.assertIsNone(filters["period"])
 
     def test_routing_modules_do_not_hardcode_card_companies(self) -> None:
         for path in ROUTING_MODULES:

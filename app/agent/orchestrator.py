@@ -21,6 +21,12 @@ from app.reasoning.cross_domain_ratio import (
     cross_domain_ratio_requested,
     cross_domain_ratio_statement,
 )
+from app.reasoning.exchange_field_aggregate import (
+    aggregate_exchange_amounts,
+    aggregate_field_for_event,
+    aggregate_statement,
+    exchange_aggregate_requested,
+)
 from app.reasoning.evidence_builder import EvidenceBuilder, EvidenceItem, EvidenceSet
 from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
@@ -471,6 +477,10 @@ def _compose_general_evidence(
     max_evidence = _general_evidence_limit(evidence, task_type=task_type)
     selected_items = ordered_items[:max_evidence]
     facts = getattr(multi_document, "facts", None)
+    retrieval_aggregate = False
+    if facts is None:
+        facts = _retrieval_exchange_aggregate_facts(evidence)
+        retrieval_aggregate = facts is not None
     multi_document_items = _multi_document_items(multi_document, item_by_id)
     citation_items = tuple(
         {
@@ -499,6 +509,8 @@ def _compose_general_evidence(
     warnings.append("resolver_not_required" if not unknown else "unknown_task")
     if len(ordered_items) > len(selected_items):
         warnings.append(f"general_evidence_limited:max={max_evidence}")
+    if retrieval_aggregate:
+        warnings.append("exchange_aggregate_from_retrieval_fallback")
     if not answerable:
         warnings.append("answer_not_supported")
     sections = (
@@ -563,6 +575,71 @@ def _compose_general_evidence(
             "basis": "evidence_presence_and_provenance",
         },
         answerable=answerable,
+    )
+
+
+def _retrieval_exchange_aggregate_facts(evidence: EvidenceSet) -> SimpleNamespace | None:
+    """Derive exchange aggregates from ranked retrieval when P0-C did not hydrate."""
+
+    plan = evidence.query_plan
+    if not exchange_aggregate_requested(plan):
+        return None
+    plan_evidence = plan.get("evidence") if isinstance(plan.get("evidence"), Mapping) else {}
+    agg_config = plan_evidence.get("exchange_aggregate") or {}
+    field = str(
+        agg_config.get("field") or aggregate_field_for_event(plan.get("event_type"))
+    )
+    ops = tuple(agg_config.get("ops") or ("sum",))
+    item_by_id = {
+        item.chunk_id: item
+        for group in evidence.evidence_groups
+        for item in group.items
+    }
+    seen_docs: set[str] = set()
+    texts: list[str] = []
+    doc_ids: list[str] = []
+    for chunk_id in evidence.retrieval_order:
+        item = item_by_id.get(chunk_id)
+        if item is None or item.doc_group != "exchange":
+            continue
+        if item.doc_id in seen_docs:
+            continue
+        seen_docs.add(item.doc_id)
+        doc_ids.append(item.doc_id)
+        texts.append(item.evidence_text)
+    if not texts:
+        return None
+    aggregate = aggregate_exchange_amounts(
+        texts,
+        field,
+        ops=ops,
+        doc_ids=doc_ids,
+    )
+    if aggregate.parsed_count == 0 and not any(
+        value is not None
+        for value in (aggregate.amount_sum, aggregate.amount_average, aggregate.amount_max)
+    ):
+        return None
+    logical_count = len(seen_docs)
+
+    def statement() -> str:
+        return aggregate_statement({"logical_count": logical_count}, aggregate)
+
+    def to_dict() -> dict[str, Any]:
+        return {
+            "logical_count": logical_count,
+            "source": "retrieval_aggregate_fallback",
+            "aggregate": aggregate.to_dict(),
+        }
+
+    return SimpleNamespace(
+        aggregate=aggregate,
+        logical_count=logical_count,
+        complete=True,
+        unresolved_count=0,
+        lifecycle_answer=None,
+        statement=statement,
+        to_dict=to_dict,
     )
 
 

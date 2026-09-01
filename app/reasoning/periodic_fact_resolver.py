@@ -205,7 +205,14 @@ def resolve_periodic_facts(
             )
 
     explicit = bool(constraint.get("explicit"))
-    matching = [fact for fact in facts if _fact_temporal_match(fact, explicit)]
+    matching: list[PeriodicFact]
+    if _peer_rate_company_comparison(plan):
+        matching = list(facts)
+        explicit = False
+    elif explicit:
+        matching = [fact for fact in facts if _fact_temporal_match(fact, explicit)]
+    else:
+        matching = list(facts)
     matching_count = len(matching) if explicit else len(facts)
     temporal_ambiguity = _temporal_ambiguity(facts, matching, explicit)
     unresolved: list[str] = []
@@ -493,6 +500,14 @@ def _subject(plan: Mapping[str, Any], fact_type: str) -> str | None:
 
 def _requested_fact(plan: Mapping[str, Any], fact_type: str) -> str | None:
     return _text(plan.get("metric") or fact_type)
+
+
+def _peer_rate_company_comparison(plan: Mapping[str, Any]) -> bool:
+    evidence = plan.get("evidence")
+    if not isinstance(evidence, Mapping) or evidence.get("derived_metric") != "peer_rate":
+        return False
+    comparison = plan.get("comparison")
+    return isinstance(comparison, Mapping) and comparison.get("type") == "company_comparison"
 
 
 def _temporal_constraint(

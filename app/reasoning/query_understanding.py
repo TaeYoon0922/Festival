@@ -314,6 +314,17 @@ class QueryUnderstanding:
         if holding_metric or ownership_intent:
             task_type = "holding_change"
             metric = holding_metric or ownership_metric
+        elif event_type and financial_metric:
+            compact_query = re.sub(r"\s+", "", raw_query)
+            if any(
+                term in compact_query
+                for term in ("사업보고서", "분기보고서", "반기보고서", "전기대비", "전기와")
+            ) and not _cross_domain_exchange_intent(compact_query, event_type):
+                task_type = "financial_metric"
+                metric = financial_metric
+            else:
+                task_type = "corporate_event"
+                metric = None
         elif event_type:
             task_type = "corporate_event"
             metric = None
@@ -500,9 +511,16 @@ class QueryUnderstanding:
                 date_basis = "receipt_date"
             elif isinstance(comparison, Mapping) and comparison.get("type") == "company_comparison":
                 date_basis = "receipt_date"
+        if (
+            exchange_aggregate
+            and date_basis == "receipt_date"
+            and period.period_type == "reference_year"
+            and period.year is not None
+        ):
+            period = _whole_year_period(period.year, "receipt_date")
         corpus_receipt_from: str | None = None
         corpus_receipt_to: str | None = None
-        if exchange_recent_pair:
+        if exchange_recent_pair or exchange_aggregate:
             from app.reasoning.query_validation import CorpusScope
 
             scope = CorpusScope.repository_default()
@@ -782,7 +800,9 @@ def _derived_metric_from_query(
         if any(term in compact for term in ("최고", "최대", "최저", "최소", "차이")):
             return "quarter_timeseries"
     if "4개분기" in compact or (
-        "분기" in compact and "사업보고서" in compact and "같" in compact
+        "분기" in compact
+        and "사업보고서" in compact
+        and any(term in compact for term in ("같", "나란히", "합계"))
     ):
         return "quarter_sum_vs_annual"
     if any(term in compact for term in ("흑자", "적자", "전환")):
@@ -844,7 +864,7 @@ def _exchange_aggregate_from_query(
     if event_type not in {"supply_contract", "facility_investment"}:
         return None
     ops: list[str] = []
-    if any(term in compact for term in ("합계", "총액", "총합")):
+    if any(term in compact for term in ("합계", "총액", "총합", "금액합")):
         ops.append("sum")
     if any(term in compact for term in ("평균", "건당")):
         ops.append("average")
@@ -953,6 +973,19 @@ def _exchange_recent_pair_from_query(
     if "자기자본" in compact:
         payload["equity_ratio"] = True
     return payload
+
+
+def _cross_domain_exchange_intent(compact_query: str, event_type: str | None) -> bool:
+    if event_type not in {"supply_contract", "facility_investment"}:
+        return False
+    if not any(term in compact_query for term in ("대비", "비율")):
+        return False
+    if not any(term in compact_query for term in ("매출", "매출액", "영업수익")):
+        return False
+    return any(
+        term in compact_query
+        for term in ("합계", "합", "총액", "계약금액", "공급계약", "단일판매", "시설투자", "투자금액")
+    )
 
 
 def _cross_domain_ratio_from_query(
@@ -1159,6 +1192,30 @@ def _period_from_query(
             years,
             _date_semantics(date_role, date_marker, [period.from_date, period.to_date]),
         )
+    if (
+        task_type == "corporate_event"
+        and "exchange" in routes
+        and len(years) >= 2
+    ):
+        from app.reasoning.query_validation import CorpusScope
+
+        scope = CorpusScope.repository_default()
+        receipt_from = scope.receipt_from if scope is not None else None
+        receipt_to = scope.receipt_to if scope is not None else None
+        period = _exchange_multi_year_receipt_period(
+            years, receipt_from=receipt_from, receipt_to=receipt_to
+        )
+        if period is not None:
+            return (
+                period,
+                spans,
+                years,
+                _date_semantics(
+                    "receipt",
+                    "exchange_multi_year",
+                    [period.from_date, period.to_date],
+                ),
+            )
     if date_role == "holding_reference" and task_type == "holding_change":
         if dates:
             value = dates[0][0]
@@ -1383,6 +1440,30 @@ def _date_semantics(
         "marker": marker,
         "values": [value for value in values if value],
     }
+
+
+def _exchange_multi_year_receipt_period(
+    years: Sequence[int],
+    *,
+    receipt_from: str | None,
+    receipt_to: str | None,
+) -> QueryPeriod | None:
+    """Build a receipt-date span from explicit years, clamped to corpus receipt bounds."""
+
+    if len(years) < 2:
+        return None
+    start_year, end_year = int(years[0]), int(years[-1])
+    if receipt_from and re.fullmatch(r"\d{4}-\d{2}-\d{2}", receipt_from):
+        start_year = max(start_year, int(receipt_from[:4]))
+    if receipt_to and re.fullmatch(r"\d{4}-\d{2}-\d{2}", receipt_to):
+        end_year = min(end_year, int(receipt_to[:4]))
+    if start_year > end_year:
+        return None
+    return QueryPeriod(
+        from_date=f"{start_year:04d}-01-01",
+        to_date=f"{end_year:04d}-12-31",
+        period_type="receipt_date",
+    )
 
 
 def _single_year_month(

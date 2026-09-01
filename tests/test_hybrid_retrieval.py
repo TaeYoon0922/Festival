@@ -528,6 +528,52 @@ class HybridExecutorTests(unittest.TestCase):
             "statement_metric_rescue",
         )
 
+    def test_insurance_metric_rescue_accepts_exact_row_despite_low_section_score(
+        self,
+    ) -> None:
+        backend = FakeHybridBackend(vector_mode="empty")
+        backend.chunks.append(
+            CandidateChunk(
+                "insurance-income",
+                "d1",
+                {
+                    "chunk_id": "insurance-income",
+                    "doc_group": "periodic",
+                    "section_path": ["연결 손익계산서"],
+                    "statement_scope": "consolidated",
+                    "content": (
+                        "| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |\n"
+                        "| --- | --- | --- |\n"
+                        "| 보험료수익 | 35,000,000 | 33,000,000 |"
+                    ),
+                    "retrieval_text": (
+                        "| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |\n"
+                        "| --- | --- | --- |\n"
+                        "| 보험료수익 | 35,000,000 | 33,000,000 |"
+                    ),
+                },
+                MetadataMatch(),
+            )
+        )
+        execution = self.executor(backend).execute(
+            QueryPlan(
+                query="보험료수익",
+                task_type="financial_metric",
+                metric="보험료수익",
+                disclosure_route=("periodic",),
+                basis="consolidated",
+                years=(2024,),
+                section_boosts={"손익계산서": 1.0, "포괄손익계산서": 1.0},
+                top_k=10,
+            )
+        )
+
+        self.assertEqual(execution.results[0].chunk_id, "insurance-income")
+        self.assertEqual(
+            execution.results[0].metadata_match["hybrid"]["fallback"],
+            "statement_metric_rescue",
+        )
+
     def test_latest_event_rescue_promotes_newest_routed_document(self) -> None:
         execution = self.executor(LatestEventBackend()).execute(
             QueryPlan(

@@ -325,6 +325,39 @@ class EvidenceBuilderTests(unittest.TestCase):
         self.assertEqual(evidence.ambiguity["matching_event_count"], 2)
         self.assertIn("multiple_temporal_alternatives", evidence.warnings)
 
+    def test_peer_compare_exchange_aggregate_suppresses_temporal_ambiguity(self) -> None:
+        first = _holding_pair(
+            "h2023:ch_report",
+            "h2023",
+            rank=1,
+            date="2023-06-30",
+            projection_type="holding_report",
+            table_id="t1",
+        )
+        second = _holding_pair(
+            "h2024:ch_report",
+            "h2024",
+            rank=2,
+            date="2024-06-30",
+            projection_type="holding_report",
+            table_id="t1",
+        )
+
+        evidence = build_evidence_set(
+            question="HD현대중공업과 삼성중공업 계약금액 합계",
+            query_plan=QueryPlan(
+                query="HD현대중공업과 삼성중공업 계약금액 합계",
+                task_type="corporate_event",
+                date_basis="receipt_date",
+                comparison={"type": "company_comparison", "companies": ["A", "B"]},
+                evidence={"exchange_aggregate": {"field": "contract_amount", "ops": ["sum"]}},
+            ),
+            candidates=[first[0], second[0]],
+            results=[first[1], second[1]],
+        )
+
+        self.assertNotIn("multiple_temporal_alternatives", evidence.warnings)
+
     def test_grouping_preserves_chunk_and_source_provenance(self):
         original = _holding_pair(
             "h1:ch_table",

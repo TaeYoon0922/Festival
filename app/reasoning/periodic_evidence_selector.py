@@ -154,12 +154,16 @@ class PeriodicEvidenceSelector:
 def _effective_max_evidence(plan: Mapping[str, Any], max_evidence: int) -> int:
     comparison = plan.get("comparison")
     companies = plan.get("companies") or ()
+    evidence = plan.get("evidence") if isinstance(plan.get("evidence"), Mapping) else {}
     if (
         isinstance(comparison, Mapping)
         and comparison.get("type") == "company_comparison"
         and len(companies) >= 2
     ):
-        return max(max_evidence, len(companies) * 2)
+        cap = max(max_evidence, len(companies) * 2)
+        if evidence.get("derived_metric") == "peer_rate":
+            cap = max(cap, len(companies) * 2)
+        return cap
     return max_evidence
 
 
@@ -179,7 +183,11 @@ def select_periodic_evidence(
         raise ValueError("max_evidence must be a positive integer")
     plan = _plan_mapping(query_plan)
     max_evidence = _effective_max_evidence(plan, max_evidence)
-    explicit_period = _explicit_period(plan) and not _is_period_comparison(plan)
+    explicit_period = (
+        _explicit_period(plan)
+        and not _is_period_comparison(plan)
+        and not _suppress_peer_compare_temporal_ambiguity(plan)
+    )
     signals = _query_signals(resolution.question, plan)
     candidates: list[tuple[float, int, str, PeriodicFact, PeriodicFactSource]] = []
     all_sources = [source for fact in resolution.facts for source in fact.sources]
@@ -206,6 +214,10 @@ def select_periodic_evidence(
             annual_report_preferred = True
 
     candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
+    if not candidates and _suppress_peer_compare_temporal_ambiguity(plan):
+        candidates = list(
+            _peer_rate_exact_metric_candidates(resolution, plan)
+        )
     if candidates:
         seed = candidates[0][4]
         candidates = [
@@ -227,11 +239,19 @@ def select_periodic_evidence(
         ]
         candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
     metric = str(plan.get("metric") or "").strip()
+    evidence = plan.get("evidence") if isinstance(plan.get("evidence"), Mapping) else {}
+    metric_fallback = (
+        str(evidence.get("metric_fallback")) if evidence.get("metric_fallback") else None
+    )
     if _is_statement_metric_query(plan, signals):
         exact_rows = [
             row
             for row in candidates
             if has_exact_metric_row(row[4].fact_text, metric)
+            or (
+                metric_fallback
+                and has_exact_metric_row(row[4].fact_text, metric_fallback)
+            )
         ]
         if exact_rows:
             income_rows = [
@@ -240,11 +260,16 @@ def select_periodic_evidence(
                 if is_income_statement_section(row[4].section_path)
             ]
             candidates = income_rows or exact_rows
-            keep_multi_period = derived_metric_requested(plan) or _is_period_comparison(
-                plan
+            keep_multi_period = (
+                derived_metric_requested(plan)
+                or _suppress_peer_compare_temporal_ambiguity(plan)
             )
             selected_rows = (
-                candidates[:max_evidence] if keep_multi_period else candidates[:1]
+                _peer_compare_metric_rows(candidates, max_evidence, plan)
+                if _suppress_peer_compare_temporal_ambiguity(plan)
+                else (
+                    candidates[:max_evidence] if keep_multi_period else candidates[:1]
+                )
             )
             warnings_seed = ["periodic_metric_row_preferred"]
         else:
@@ -285,7 +310,8 @@ def select_periodic_evidence(
         tuple(selected_facts),
         explicit_period=explicit_period,
         suppress_temporal_ambiguity=(
-            _is_statement_metric_query(plan, signals) and len(selected_facts) == 1
+            (_is_statement_metric_query(plan, signals) and len(selected_facts) == 1)
+            or _suppress_peer_compare_temporal_ambiguity(plan)
         ),
         selection_warnings=warnings,
     )
@@ -432,7 +458,12 @@ def _source_relevance(
             score += _BASIS_SCORE["mixed"]
         elif classification in {"consolidated", "standalone"}:
             score += _BASIS_SCORE["opposite"]
-            eligible = False
+            if not (
+                _suppress_peer_compare_temporal_ambiguity(plan) and exact_metric_row
+            ):
+                eligible = False
+    if _suppress_peer_compare_temporal_ambiguity(plan) and exact_metric_row:
+        eligible = True
     return score, eligible
 
 
@@ -514,6 +545,8 @@ def _is_statement_metric_query(
     basis = str(plan.get("basis") or "").strip()
     if not metric:
         return False
+    if _suppress_peer_compare_temporal_ambiguity(plan):
+        return bool(signals.get("table_metrics"))
     if basis not in {"consolidated", "standalone", "unspecified", ""}:
         return False
     if not (_explicit_period(plan) or _is_period_comparison(plan)):
@@ -669,6 +702,83 @@ def _rebuild_fact(
         confidence=confidence,
         warnings=tuple(warnings),
     )
+
+
+def _peer_rate_exact_metric_candidates(
+    resolution: PeriodicFactResolution,
+    plan: Mapping[str, Any],
+) -> tuple[tuple[float, int, str, PeriodicFact, PeriodicFactSource], ...]:
+    """Recover peer-rate rows when generic relevance filters excluded every source."""
+
+    metric = str(plan.get("metric") or "").strip()
+    evidence = plan.get("evidence") if isinstance(plan.get("evidence"), Mapping) else {}
+    metric_fallback = (
+        str(evidence.get("metric_fallback")) if evidence.get("metric_fallback") else None
+    )
+    if not metric:
+        return ()
+    rows: list[tuple[float, int, str, PeriodicFact, PeriodicFactSource]] = []
+    for fact in resolution.facts:
+        for source in fact.sources:
+            if not (
+                has_exact_metric_row(source.fact_text, metric)
+                or (
+                    metric_fallback
+                    and has_exact_metric_row(source.fact_text, metric_fallback)
+                )
+            ):
+                continue
+            score = _EXACT_METRIC_ROW_BOOST
+            if is_income_statement_section(source.section_path):
+                score += _INCOME_STATEMENT_BOOST
+            rows.append(
+                (score, source.retrieval_rank, source.chunk_id, fact, source)
+            )
+    rows.sort(key=lambda row: (-row[0], row[1], row[2]))
+    return tuple(rows)
+
+
+def _peer_compare_metric_rows(
+    candidates: Sequence[tuple[float, int, str, Any, PeriodicFactSource]],
+    max_evidence: int,
+    plan: Mapping[str, Any],
+) -> tuple[tuple[float, int, str, Any, PeriodicFactSource], ...]:
+    """Prefer one high-scoring income-statement row per compared company."""
+
+    target_codes = {
+        str(value)
+        for value in (plan.get("corp_codes") or ())
+        if str(value).strip()
+    }
+    picked: list[tuple[float, int, str, Any, PeriodicFactSource]] = []
+    seen_codes: set[str] = set()
+    for row in candidates:
+        fact = row[3]
+        corp_code = str(getattr(fact, "corp_code", "") or "").strip()
+        if target_codes and corp_code not in target_codes:
+            continue
+        if corp_code and corp_code in seen_codes:
+            continue
+        picked.append(row)
+        if corp_code:
+            seen_codes.add(corp_code)
+        if target_codes and seen_codes >= target_codes:
+            break
+        if len(picked) >= max_evidence:
+            break
+    if picked:
+        return tuple(picked)
+    return tuple(candidates[:max_evidence])
+
+
+def _suppress_peer_compare_temporal_ambiguity(plan: Mapping[str, Any]) -> bool:
+    evidence = plan.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("derived_metric") != "peer_rate":
+        return False
+    comparison = plan.get("comparison")
+    return isinstance(comparison, Mapping) and comparison.get("type") == "company_comparison"
 
 
 def _selected_resolution(

@@ -32,7 +32,9 @@ DIAGNOSTIC_WEIGHT_GRID: tuple[tuple[float, float], ...] = (
     (0.80, 0.20),
 )
 _BALANCE_SHEET_METRICS = frozenset({"자산총계", "부채총계", "자본총계"})
-_INCOME_STATEMENT_METRICS = frozenset({"매출액", "영업이익", "당기순이익"})
+_INCOME_STATEMENT_METRICS = frozenset(
+    {"매출액", "영업이익", "당기순이익", "보험료수익", "영업수익"}
+)
 _STATEMENT_METRICS = _BALANCE_SHEET_METRICS | _INCOME_STATEMENT_METRICS
 
 
@@ -237,6 +239,8 @@ class HybridQueryExecutor:
         documents = self.router.filter_documents(documents, route)
         chunks = self._chunk_backend.get_candidate_chunks(documents)
         chunks = self.router.prepare_chunks(chunks, route)
+        if not chunks:
+            documents, chunks = self._rescue_exchange_disclosure_chunks(plan, route)
         document_metadata = {document.doc_id: document.metadata for document in documents}
         embedded_candidate_ids, vector_coverage = self._vector_coverage(chunks)
 
@@ -494,6 +498,53 @@ class HybridQueryExecutor:
             )
         return output
 
+    def _rescue_exchange_disclosure_chunks(
+        self, plan: Any, route: Any
+    ) -> tuple[list[CandidateDocument], list[CandidateChunk]]:
+        """Hydrate exchange filings when ranked retrieval produced zero chunks."""
+
+        enumerate = getattr(self._metadata_backend, "enumerate_disclosures", None)
+        if not callable(enumerate):
+            return [], []
+        if getattr(plan, "task_type", "") != "corporate_event":
+            return [], []
+        if "exchange" not in tuple(getattr(plan, "disclosure_route", ()) or ()):
+            return [], []
+        evidence = getattr(plan, "evidence", None) or {}
+        if not evidence.get("exchange_aggregate") and getattr(
+            plan, "event_type", ""
+        ) not in {"facility_investment", "supply_contract"}:
+            return [], []
+        corp_codes = [
+            str(code)
+            for code in (getattr(plan, "corp_codes", ()) or ())
+            if str(code).strip()
+        ]
+        if not corp_codes:
+            return [], []
+        date_from, date_to = _exchange_enumeration_bounds(plan)
+        if not (date_from and date_to):
+            return [], []
+        documents: list[CandidateDocument] = []
+        seen: set[str] = set()
+        for corp_code in corp_codes:
+            for document in enumerate(
+                corp_code=corp_code,
+                doc_group="exchange",
+                doc_subtype=None,
+                date_from=date_from,
+                date_to=date_to,
+            ):
+                if document.doc_id in seen:
+                    continue
+                seen.add(document.doc_id)
+                documents.append(document)
+        if not documents:
+            return [], []
+        chunks = list(self._chunk_backend.get_candidate_chunks(documents))
+        chunks = self.router.prepare_chunks(chunks, route)
+        return documents, list(chunks)
+
     def _rescue_latest_event_candidates(
         self,
         results: Sequence[RetrievalResult],
@@ -586,7 +637,12 @@ class HybridQueryExecutor:
         if route.ranking_context.get("task_type") != "financial_metric":
             return list(results)
         metric = str(route.ranking_context.get("metric") or "")
-        if metric not in _STATEMENT_METRICS:
+        metric_fallback = str(route.ranking_context.get("metric_fallback") or "")
+        derived_metric = str(route.ranking_context.get("derived_metric") or "")
+        if (
+            metric not in _STATEMENT_METRICS
+            and derived_metric != "peer_rate"
+        ):
             return list(results)
         if not chunks or top_k <= 0:
             return list(results)
@@ -618,12 +674,19 @@ class HybridQueryExecutor:
             has_metric_row = has_exact_metric_row(
                 str(chunk.get("content") or chunk.get("retrieval_text") or ""),
                 metric,
+            ) or (
+                metric_fallback
+                and has_exact_metric_row(
+                    str(chunk.get("content") or chunk.get("retrieval_text") or ""),
+                    metric_fallback,
+                )
             )
-            if (
-                not has_metric_row
-                and float(components.get("exact_term", 0.0)) < 0.65
+            if not has_metric_row and (
+                float(components.get("exact_term", 0.0)) < 0.65
                 or float(components.get("section", 0.0)) < 0.85
-                or not _statement_section_matches_metric(chunk, metric)
+                or not _statement_section_matches_metric(
+                    chunk, metric, metric_fallback=metric_fallback
+                )
             ):
                 continue
             match = dict(result.metadata_match)
@@ -1069,10 +1132,16 @@ def _compact_date(value: Any) -> str:
     return digits[:8] if len(digits) >= 8 else ""
 
 
-def _statement_section_matches_metric(chunk: Mapping[str, Any], metric: str) -> bool:
+def _statement_section_matches_metric(
+    chunk: Mapping[str, Any],
+    metric: str,
+    *,
+    metric_fallback: str = "",
+) -> bool:
     section_text = " ".join(str(value) for value in chunk.get("section_path") or ())
     normalized = re.sub(r"[^0-9a-z가-힣]+", "", section_text.casefold())
-    if metric in _INCOME_STATEMENT_METRICS:
+    income_metrics = _INCOME_STATEMENT_METRICS | {"보험료수익", "영업수익"}
+    if metric in income_metrics or metric_fallback in income_metrics:
         return "손익계산서" in normalized or "포괄손익계산서" in normalized
     if metric in _BALANCE_SHEET_METRICS:
         return (
@@ -1081,6 +1150,29 @@ def _statement_section_matches_metric(chunk: Mapping[str, Any], metric: str) -> 
             or "첨부재무제표" in normalized
         )
     return False
+
+
+def _exchange_enumeration_bounds(plan: Any) -> tuple[str | None, str | None]:
+    from datetime import date, timedelta
+
+    period = getattr(plan, "period", None)
+    if period is not None:
+        from_date = getattr(period, "from_date", None)
+        to_date = getattr(period, "to_date", None)
+        period_type = getattr(period, "period_type", None)
+        if from_date and to_date and period_type in {"receipt_date", "date_range"}:
+            end = date.fromisoformat(str(to_date)) + timedelta(days=1)
+            return str(from_date), end.isoformat()
+        year = getattr(period, "year", None)
+        if isinstance(year, int) and not isinstance(year, bool):
+            return f"{year:04d}-01-01", f"{year + 1:04d}-01-01"
+    evidence = getattr(plan, "evidence", None) or {}
+    receipt_from = evidence.get("corpus_receipt_from")
+    receipt_to = evidence.get("corpus_receipt_to")
+    if receipt_from and receipt_to:
+        end = date.fromisoformat(str(receipt_to)) + timedelta(days=1)
+        return str(receipt_from), end.isoformat()
+    return None, None
 
 
 def _require_method(backend: object, method: str) -> Any:

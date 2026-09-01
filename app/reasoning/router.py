@@ -196,11 +196,18 @@ class QueryRouter:
             "basis": None if plan.basis == "unspecified" else plan.basis,
             "is_correction": correction_value,
         }
+        dual_corp_compare = (
+            len(getattr(plan, "corp_codes", ()) or ()) >= 2
+            and isinstance(getattr(plan, "comparison", None), Mapping)
+            and plan.comparison.get("type") == "company_comparison"
+        )
         for field_name, value in optional_values.items():
             if value is None:
                 continue
             confidence = float(plan.route_confidence.get(field_name, 0.8))
             mode = "hard" if confidence >= self.hard_threshold else "soft"
+            if field_name == "doc_subtype" and dual_corp_compare:
+                mode = "soft"
             decision = RouteDecision(
                 field=field_name,
                 value=value,
@@ -232,6 +239,15 @@ class QueryRouter:
                 "fiscal_quarter": plan.period.quarter,
                 "periodic_intent": plan.evidence.get("periodic_intent"),
                 "event_type": plan.event_type,
+                "derived_metric": plan.evidence.get("derived_metric"),
+                "metric_fallback": plan.evidence.get("metric_fallback"),
+                "exchange_aggregate": plan.evidence.get("exchange_aggregate"),
+                "corp_codes": list(plan.corp_codes),
+                "comparison_type": (
+                    (plan.comparison or {}).get("type")
+                    if isinstance(plan.comparison, Mapping)
+                    else None
+                ),
             },
             retrieval_limit=retrieval_limit,
         )

@@ -655,3 +655,100 @@ def test_selector_prefers_income_statement_net_income_over_cash_flow() -> None:
 
     assert selected.selected_chunk_ids == ("p:ch_income_net",)
     assert "p:ch_cash_flow" in selected.excluded_chunk_ids
+
+
+def test_peer_rate_company_compare_selects_exact_metric_rows_per_company() -> None:
+    income_table = (
+        "| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |\n"
+        "| --- | --- | --- |\n"
+        "| 보험료수익 | 10,000 | 9,000 |"
+    )
+    life_noise = replace(
+        _item(
+            "life:noise",
+            "life-doc",
+            rank=1,
+            text="보험료수익이 전기 대비 증가하였습니다.",
+            year=2024,
+            section="사업의 내용",
+        ),
+        corp_code="LIFE",
+        corp_name="삼성생명",
+        company_id="LIFE",
+    )
+    life_income = replace(
+        _item(
+            "life:income",
+            "life-doc",
+            rank=3,
+            text=income_table,
+            year=2024,
+            section_path=("연결 손익계산서",),
+            statement_scope="연결",
+        ),
+        corp_code="LIFE",
+        corp_name="삼성생명",
+        company_id="LIFE",
+    )
+    fire_noise = replace(
+        _item(
+            "fire:noise",
+            "fire-doc",
+            rank=2,
+            text="영업수익이 전기 대비 증가하였습니다.",
+            year=2024,
+            section="사업의 내용",
+        ),
+        corp_code="FIRE",
+        corp_name="삼성화재",
+        company_id="FIRE",
+    )
+    fire_income = replace(
+        _item(
+            "fire:income",
+            "fire-doc",
+            rank=4,
+            text=income_table.replace("보험료수익", "영업수익"),
+            year=2024,
+            section_path=("연결 손익계산서",),
+            statement_scope="연결",
+        ),
+        corp_code="FIRE",
+        corp_name="삼성화재",
+        company_id="FIRE",
+    )
+    evidence = _evidence(
+        [
+            _group("life_noise", life_noise),
+            _group("life_income", life_income),
+            _group("fire_noise", fire_noise),
+            _group("fire_income", fire_income),
+        ],
+        question=(
+            "삼성생명과 삼성화재 2024 사업보고서 보험료수익(또는 영업수익) "
+            "전기 대비 증감률을 비교하면 어느 쪽이 더 높아?"
+        ),
+        year=2024,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "보험료수익",
+            "lexical_query": "보험료수익 증감률",
+            "comparison": {"type": "company_comparison"},
+            "companies": ["삼성생명", "삼성화재"],
+            "corp_codes": ["LIFE", "FIRE"],
+            "evidence": {
+                "derived_metric": "peer_rate",
+                "metric_fallback": "영업수익",
+            },
+        }
+    )
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("life:income", "fire:income")
+    assert selected.resolution.facts
+    assert "no_periodic_fact_evidence" not in selected.warnings

@@ -111,6 +111,32 @@ class AnswerabilityGuardTests(unittest.TestCase):
 
         self.assertIs(result.status, AnswerabilityStatus.INSUFFICIENT_EVIDENCE)
 
+    def test_complete_exchange_enumeration_is_answerable_without_citations(self) -> None:
+        multi = MultiDocumentEvidence(
+            facts=MultiDocumentFacts(
+                plan_type="enumeration",
+                complete=True,
+                logical_count=4,
+                aggregate_field="contract_amount",
+                aggregate_ops=("sum",),
+            )
+        )
+        plan = QueryPlan(
+            query="삼성바이오로직스와 셀트리온 exchange 공급계약 금액 합계",
+            task_type="corporate_event",
+            evidence={"exchange_aggregate": {"field": "contract_amount", "ops": ["sum"]}},
+        )
+
+        result = self.guard.evaluate(
+            _generated(answerable=True, citations=0),
+            plan=plan,
+            execution=_execution(6),
+            multi_document=multi,
+        )
+
+        self.assertIs(result.status, AnswerabilityStatus.ANSWERABLE)
+        self.assertEqual(result.reason, "complete_exchange_enumeration")
+
     def test_some_supported_fields_produce_partial_answer(self) -> None:
         resolution = SimpleNamespace(
             requested_fields=("contract_amount", "termination_reason"),

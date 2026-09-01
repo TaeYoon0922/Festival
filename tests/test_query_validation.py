@@ -488,6 +488,25 @@ class ComparisonFirewallPrecedenceTests(unittest.TestCase):
         self.assertEqual(len(result.plan.companies), 2)
         self.assertEqual(len(result.plan.corp_codes), 2)
 
+    def test_multi_year_exchange_peer_compare_resolves(self) -> None:
+        result = self.validated(
+            "두산에너빌리티와 한전기술 2024·2025년 원전 관련 exchange "
+            "공급계약 건수와 최대 계약금액을 비교하면 어느 쪽이 더 많아?"
+        )
+
+        self.assertIs(result.state, QueryState.RESOLVED)
+        self.assertTrue(result.retrieval_allowed)
+        self.assertEqual(result.plan.period.from_date, "2024-01-01")
+        self.assertEqual(result.plan.period.to_date, "2025-12-31")
+
+        other_years = self.validated(
+            "두산에너빌리티와 한전기술 2023·2024년 exchange 공급계약 건수를 "
+            "비교하면 어느 쪽이 더 많아?"
+        )
+        self.assertIs(other_years.state, QueryState.RESOLVED)
+        self.assertEqual(other_years.plan.period.from_date, "2023-01-01")
+        self.assertEqual(other_years.plan.period.to_date, "2024-12-31")
+
     def test_a_frame_does_not_make_a_comparison_answerable(self) -> None:
         """The firewall recognizes these; it does not start executing them."""
 

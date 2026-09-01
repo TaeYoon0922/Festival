@@ -301,10 +301,21 @@ class MultiDocumentExecutor:
             date_from=slot.date_from,
             date_to=slot.date_to,
         )
+        if not documents and slot.doc_subtype:
+            documents = self._disclosures.enumerate_disclosures(
+                corp_code=slot.corp_code,
+                doc_group=slot.doc_group,
+                doc_subtype=None,
+                date_from=slot.date_from,
+                date_to=slot.date_to,
+            )
         doc_ids = [document.doc_id for document in documents]
-        correction_states = (
-            self._corrections.document_states(doc_ids) if doc_ids else {}
-        )
+        try:
+            correction_states = (
+                self._corrections.document_states(doc_ids) if doc_ids else {}
+            )
+        except CorrectionGraphUnavailable:
+            correction_states = {}
         logical = collapse_logical_documents(doc_ids, correction_states)
         states[slot.slot_id] = {"documents": logical.representative_ids}
         return slot.resolve_status_with(

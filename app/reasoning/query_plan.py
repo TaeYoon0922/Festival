@@ -208,15 +208,32 @@ class QueryPlan:
     def backend_filters(self) -> dict[str, Any]:
         """Translate into the existing ``MetadataBackend`` contract unchanged."""
 
-        period_month = self.period.quarter * 3 if self.period.quarter else None
+        evidence = self.evidence if isinstance(self.evidence, Mapping) else {}
+        period_month = None
+        if evidence.get("derived_metric") != "quarter_sum_vs_annual":
+            period_month = self.period.quarter * 3 if self.period.quarter else None
+        doc_subtype = self.doc_subtype
+        if evidence.get("derived_metric") == "quarter_sum_vs_annual":
+            # Needs both quarterly and annual filings in the same window.
+            doc_subtype = None
+        elif _dual_corp_company_comparison(self) and self.doc_group == "exchange":
+            # Subtype is a router soft boost; a hard SQL filter can zero candidates
+            # when the two peers' filings use slightly different subtype labels.
+            doc_subtype = None
+        companies = list(self.companies) or None
+        corp_codes = list(self.corp_codes) or None
+        if corp_codes and _dual_corp_company_comparison(self):
+            # Resolved corp_code is authoritative for peer compares; display names
+            # often disagree with stored corp_name/listed_name spellings.
+            companies = None
         return {
-            "company": list(self.companies) or None,
+            "company": companies,
             "year": list(self.years) if self.period.is_fiscal and self.years else None,
             "period": period_month,
             "doc_group": self.doc_group,
-            "doc_subtype": self.doc_subtype,
+            "doc_subtype": doc_subtype,
             "is_correction": self.is_correction,
-            "corp_code": list(self.corp_codes) or None,
+            "corp_code": corp_codes,
             "section_path": self.section_path,
         }
 
@@ -385,6 +402,13 @@ def _coerce_period(
     if not _is_integer(month) or month not in {3, 6, 9, 12}:
         raise ValueError("period month must be one of 3, 6, 9, or 12")
     return QueryPeriod(year=year, quarter=month // 3, period_type="fiscal_quarter")
+
+
+def _dual_corp_company_comparison(plan: QueryPlan) -> bool:
+    comparison = plan.comparison
+    if not isinstance(comparison, Mapping) or comparison.get("type") != "company_comparison":
+        return False
+    return len(plan.corp_codes) >= 2
 
 
 def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:

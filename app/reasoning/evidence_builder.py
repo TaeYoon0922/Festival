@@ -194,7 +194,9 @@ def build_evidence_set(
     ]
     groups = _group_items(items, task_type=grouping_task)
     ambiguity = _ambiguity_metadata(groups, temporal_constraint)
-    if ambiguity["temporal_ambiguity"]:
+    if ambiguity["temporal_ambiguity"] and not _suppress_corporate_temporal_ambiguity(
+        plan
+    ):
         warnings.append("multiple_temporal_alternatives")
     if (
         temporal_constraint["explicit"]
@@ -562,6 +564,23 @@ def _ambiguity_metadata(
         "temporal_group_ids": temporal_group_ids,
         "matching_group_ids": matching_group_ids,
     }
+
+
+def _suppress_corporate_temporal_ambiguity(plan: Mapping[str, Any]) -> bool:
+    comparison = plan.get("comparison")
+    if not isinstance(comparison, Mapping) or comparison.get("type") != "company_comparison":
+        return False
+    evidence = plan.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("derived_metric") == "peer_rate":
+        return True
+    if evidence.get("exchange_aggregate"):
+        return True
+    date_basis = plan.get("date_basis")
+    if hasattr(date_basis, "value"):
+        date_basis = date_basis.value
+    return str(date_basis or "") == "receipt_date"
 
 
 def _temporal_constraint(plan: Mapping[str, Any]) -> dict[str, Any]:

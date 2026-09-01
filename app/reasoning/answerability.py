@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from app.reasoning.exchange_field_aggregate import exchange_aggregate_requested
 from app.reasoning.multi_document_evidence import (
     LIFECYCLE_NO_MEMBERS,
     LIFECYCLE_NONE,
@@ -83,11 +84,50 @@ class AnswerabilityGuard:
         citation_count = len(tuple(getattr(generated, "citations", ()) or ()))
 
         facts = getattr(multi_document, "facts", None)
+        plan_payload = (
+            plan.to_dict()
+            if hasattr(plan, "to_dict")
+            else (plan if isinstance(plan, Mapping) else None)
+        )
+        if facts is None and exchange_aggregate_requested(plan_payload):
+            draft = getattr(agent_result, "answer_draft", None)
+            draft_warnings = tuple(getattr(draft, "warnings", ()) or ())
+            if "exchange_aggregate_from_retrieval_fallback" in draft_warnings:
+                return AnswerabilityResult(
+                    AnswerabilityStatus.ANSWERABLE,
+                    evidence_count,
+                    citation_count,
+                    complete=True,
+                    reason="retrieval_exchange_aggregate",
+                )
+
         if facts is not None:
             complete = bool(getattr(facts, "complete", False))
             unresolved = int(getattr(facts, "unresolved_count", 0) or 0)
             logical_count = int(getattr(facts, "logical_count", 0) or 0)
             lifecycle = getattr(facts, "lifecycle_answer", None)
+            aggregate = getattr(facts, "aggregate", None)
+            if lifecycle is None and exchange_aggregate_requested(plan_payload):
+                if aggregate is not None or logical_count > 0:
+                    return AnswerabilityResult(
+                        AnswerabilityStatus.ANSWERABLE,
+                        evidence_count,
+                        citation_count,
+                        complete=complete,
+                        reason=(
+                            "complete_exchange_aggregate"
+                            if aggregate is not None
+                            else "complete_exchange_enumeration"
+                        ),
+                    )
+                if complete and logical_count == 0:
+                    return AnswerabilityResult(
+                        AnswerabilityStatus.NOT_FOUND,
+                        evidence_count,
+                        citation_count,
+                        complete=True,
+                        reason="complete_empty_set",
+                    )
             if unresolved > 0 or not complete:
                 return AnswerabilityResult(
                     AnswerabilityStatus.INSUFFICIENT_EVIDENCE,
