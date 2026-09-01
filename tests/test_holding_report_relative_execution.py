@@ -1104,3 +1104,94 @@ class DocumentNounNeverStealsPhase3Tests(unittest.TestCase):
         self.assertIsNotNone(outcome)
         self.assertEqual(outcome.status, RESOLVED)
         self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+
+
+class LatestHoldingDocumentWordingEntersPhase3Tests(unittest.TestCase):
+    """Naming the document must reach the same report as not naming it.
+
+    Nothing in this module changes: the selector is still ``latest``, the index
+    still orders by reference date, and the projection is still the one that
+    report carries.  What is new upstream is only that the wording is
+    recognized, so the two phrasings have to land on the same filing.
+    """
+
+    HOLDER = "가상보유인"
+
+    def records(self):
+        older = replace(
+            OLD, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_doc_old", projection_chunk_id="holding_doc_old:report",
+        )
+        newer = replace(
+            NEW, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_doc_new", projection_chunk_id="holding_doc_new:report",
+        )
+        return older, newer
+
+    def outcome(self, question, older, newer):
+        query_plan = plan(question)
+        return query_plan, adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            # Rank order inverted on purpose: the answer must come from
+            # enumeration, never from what retrieval happened to put first.
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+    def test_the_document_wording_reaches_the_latest_report(self) -> None:
+        older, newer = self.records()
+        question = (
+            f"{COMPANY} {self.HOLDER}의 최근 대량보유보고 기준 보유주식수는?"
+        )
+
+        query_plan, outcome = self.outcome(question, older, newer)
+
+        self.assertEqual(query_plan.reporter, self.HOLDER)
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+        self.assertEqual(outcome.selected_chunk_id, newer.projection_chunk_id)
+
+    def test_both_phrasings_select_the_same_report(self) -> None:
+        older, newer = self.records()
+        with_document = (
+            f"{COMPANY} {self.HOLDER}의 최근 대량보유보고 기준 보유주식수는?"
+        )
+        plain = f"{COMPANY} {self.HOLDER}의 최근 보고 기준 보유주식수는?"
+
+        _plan_a, first = self.outcome(with_document, older, newer)
+        _plan_b, second = self.outcome(plain, older, newer)
+
+        self.assertEqual(first.status, second.status)
+        self.assertEqual(
+            first.report_execution.record.doc_id,
+            second.report_execution.record.doc_id,
+        )
+        self.assertEqual(first.selected_chunk_id, second.selected_chunk_id)
+        self.assertEqual(
+            first.report_execution.selection.selector,
+            second.report_execution.selection.selector,
+        )
+
+    def test_an_exact_receipt_question_is_still_not_taken(self) -> None:
+        """The T9-1A.1 repair holds with a latest word in the sentence."""
+
+        older, newer = self.records()
+        question = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{COMPANY} 최근 대량보유보고의 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertIsNone(query_plan.reporter)
+        self.assertEqual(query_plan.period.period_type, "receipt_date")
+        self.assertIsNone(
+            adapter(index_of(older, newer)).adapt(
+                question,
+                query_plan,
+                execution(query_plan, candidate(older)),
+                routed_task_type="holding_event",
+            )
+        )

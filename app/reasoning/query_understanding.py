@@ -331,7 +331,7 @@ class QueryUnderstanding:
         # reference-date and receipt-date wording keep the axis it assigned.
         report_relative = (
             holding_report_relative.parse(
-                raw_query,
+                _latest_report_wording(raw_query),
                 date_semantics=date_semantics,
                 has_exact_date=bool(period.from_date and period.from_date == period.to_date),
             )
@@ -595,6 +595,21 @@ _REPORT_HEAD_NOUNS = ("보고서", "보고", "공시", "신고서", "신고")
 _REPORT_QUALIFIERS = (
     "대량보유상황", "대량보유", "소유상황", "특정증권등소유", "특정증권등",
     "임원주요주주", "주요주주", "임원", "주식등의", "주식등", "특수관계자", "소유",
+)
+#: The words that make a report the newest one.  These are the modifiers inside
+#: the frozen parser's own latest terms, which are written as one contiguous
+#: ``<modifier><head>`` string -- so a question that names the document between
+#: the two says the same thing in wording that parser cannot see.
+_LATEST_REPORT_MODIFIERS = ("최신", "최근", "마지막", "최종")
+#: ``최근 대량보유상황보고서`` -- a latest modifier, then this corpus's own holding
+#: document vocabulary, then the report head.  At least one qualifier is
+#: required, so ``최근 보고`` (already understood) is not touched and ``최근 계약``,
+#: ``최근 사업보고서`` and ``최근 실적`` are not holding-report wording at all: the
+#: qualifiers are the holding disclosure families and nothing else.
+_LATEST_HOLDING_REPORT = re.compile(
+    r"(?P<latest>" + "|".join(_LATEST_REPORT_MODIFIERS) + r")"
+    r"\s*(?:(?:" + "|".join(_REPORT_QUALIFIERS) + r")\s*)+"
+    r"(?P<head>" + "|".join(_REPORT_HEAD_NOUNS) + r")"
 )
 #: ``plan.evidence`` key carrying the actor a directed acquisition named, before
 #: anything corpus-aware has confirmed that such a holder exists.  Read by
@@ -1533,6 +1548,25 @@ def _find_reporter(query: str) -> str | None:
         return None
     value = match.group(1)
     return re.sub(r"^보고자\s*[:：]?\s*", "", value).strip()
+
+
+def _latest_report_wording(query: str) -> str:
+    """The question as the frozen report-relative parser can read its selector.
+
+    That parser recognizes "the newest report" as one contiguous string --
+    ``최신보고``, ``최근보고`` -- so naming the document in between (``최근 대량보유
+    보고 기준``) says exactly the same thing in wording it cannot see.  Dropping
+    the document's own qualifiers restores the adjacency and leaves the head
+    noun the parser is looking for.
+
+    Only the text handed to that one parser is rewritten; ``raw_query`` is what
+    every other stage still reads.  The rewrite is deliberately not a selector
+    decision: which report the wording then names, and whether an explicit date
+    outranks it, stay entirely that parser's answers.  An exact date still wins,
+    because it is tested before any latest term.
+    """
+
+    return _LATEST_HOLDING_REPORT.sub(r"\g<latest>\g<head>", query)
 
 
 def _names_a_filing(key: str) -> bool:

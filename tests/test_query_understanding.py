@@ -13,6 +13,7 @@ from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.query_understanding import (
     ACTOR_SOURCE_DIRECTED_HOLDER,
     HOLDING_ACTOR_CANDIDATE_KEY,
+    _latest_report_wording,
     _names_a_filing,
 )
 from app.retrieval.interfaces import (
@@ -2166,3 +2167,178 @@ class DocumentNounIsNotAReporterTests(unittest.TestCase):
         self.assertEqual(
             self.reporter(f"국민연금 {self.ISSUER} 최신 보고 보유주식수"), "국민연금"
         )
+
+
+class LatestHoldingReportSelectorTests(unittest.TestCase):
+    """"The newest report" said with the document's own name in the middle.
+
+    The frozen report-relative parser recognizes the selector as one contiguous
+    string -- ``최근보고`` -- so a question that names the filing between the two
+    (``최근 대량보유보고 기준``) says exactly the same thing in wording that parser
+    cannot see.  Recognition is restored by dropping the document's qualifiers
+    before that parser reads the question; which report the wording then names,
+    and whether an explicit date outranks it, stay its own answers.
+    """
+
+    ISSUER = "가상발행사"
+    OTHER = "가상상대사"
+    HOLDER = "가상보유인"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.ISSUER, self.OTHER)}
+        )
+
+    def intent(self, query: str):
+        return self.understanding.understand(query).evidence["holding_report_relative"]
+
+    def selector(self, query: str):
+        value = self.intent(query)
+        return None if value is None else value["selector"]
+
+    def plan(self, query: str):
+        return self.understanding.understand(query)
+
+    # ---------------------------------------------------------- positives
+    def test_a_latest_modifier_on_a_holding_document_selects_the_latest(
+        self,
+    ) -> None:
+        for document in (
+            "대량보유보고",
+            "대량보유상황보고",
+            "대량보유상황보고서",
+            "대량보유보고서",
+            "주식등의대량보유상황보고서",
+            "주식등의 대량보유상황보고서",
+            "소유상황보고서",
+        ):
+            for modifier in ("최근", "최신", "가장 최근", "가장 최신"):
+                query = (
+                    f"{self.ISSUER} {self.HOLDER}의 "
+                    f"{modifier} {document} 기준 보유주식수는?"
+                )
+                with self.subTest(document=document, modifier=modifier):
+                    self.assertEqual(self.selector(query), "latest")
+
+    def test_the_holder_and_the_metric_survive_the_recognition(self) -> None:
+        for metric_words, metric in (
+            ("보유주식수는?", "holding_shares"),
+            ("보유비율은?", "holding_ratio"),
+        ):
+            query = (
+                f"{self.ISSUER} {self.HOLDER}의 최근 대량보유보고 기준 {metric_words}"
+            )
+            with self.subTest(metric=metric):
+                plan = self.plan(query)
+                self.assertEqual(plan.reporter, self.HOLDER)
+                self.assertEqual(plan.metric, metric)
+                self.assertEqual(plan.companies, (self.ISSUER,))
+
+    def test_a_legal_form_holder_is_unaffected(self) -> None:
+        query = (
+            f"{self.ISSUER} 주식회사 {self.HOLDER}의 "
+            "최근 대량보유보고 기준 보유비율은?"
+        )
+        plan = self.plan(query)
+
+        self.assertEqual(plan.reporter, f"주식회사 {self.HOLDER}")
+        self.assertEqual(self.selector(query), "latest")
+
+    def test_the_document_wording_means_the_same_as_the_plain_wording(self) -> None:
+        """Equivalence is the contract: same selector, same role, same evidence."""
+
+        with_document = self.intent(
+            f"{self.ISSUER} {self.HOLDER}의 최근 대량보유보고 기준 보유주식수는?"
+        )
+        plain = self.intent(
+            f"{self.ISSUER} {self.HOLDER}의 최근 보고 기준 보유주식수는?"
+        )
+
+        self.assertEqual(with_document, plain)
+
+    # ---------------------------------------------------------- negatives
+    def test_a_latest_word_alone_is_never_a_holding_selector(self) -> None:
+        """The rewrite needs this corpus's holding document vocabulary.
+
+        Every one of these contains a latest word and none of them is a holding
+        report, so none may acquire a holding selector from it.
+        """
+
+        for query in (
+            f"{self.ISSUER}의 최근 계약 계약금액은?",
+            f"{self.ISSUER}의 최근 사업보고서 매출액은?",
+            f"{self.ISSUER}의 최근 분기보고서 영업이익은?",
+            f"{self.ISSUER}의 최근 실적은 어때?",
+            f"{self.ISSUER} 최근 변동 중 큰 건은?",
+            f"{self.ISSUER}의 최근 유상증자 규모는?",
+        ):
+            with self.subTest(query=query):
+                self.assertNotEqual(self.selector(query), "latest")
+
+    def test_the_rewrite_is_a_no_op_without_the_document_wording(self) -> None:
+        """A question the rule does not touch behaves exactly as it did before.
+
+        This is what makes every unrelated shape provably unchanged: the only
+        production change is the rewrite, so a query it returns untouched takes
+        the identical path.
+        """
+
+        for query in (
+            f"{self.ISSUER} {self.HOLDER}의 최근 보고 기준 보유주식수는?",
+            f"{self.ISSUER} {self.HOLDER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER} {self.HOLDER}의 이번 보고 보유주식수는?",
+            f"{self.ISSUER} {self.HOLDER}의 직전 보고 보유비율은?",
+            f"{self.ISSUER}의 최근 계약 계약금액은?",
+            f"{self.ISSUER}의 최근 사업보고서 매출액은?",
+            f"{self.ISSUER} 대량보유보고의 보유주식수는?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(_latest_report_wording(query), query)
+
+    def test_an_exact_date_still_outranks_the_recognized_wording(self) -> None:
+        """The frozen precedence is untouched: a stated date owns selection."""
+
+        receipt = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{self.ISSUER} 최근 대량보유보고의 보유주식수는?"
+        )
+        reference = (
+            f"{self.ISSUER} {self.HOLDER}의 2025년 3월 14일 기준 "
+            "최근 대량보유보고 보유비율은?"
+        )
+
+        self.assertEqual(self.selector(receipt), "exact_receipt_date")
+        self.assertEqual(self.plan(receipt).period.period_type, "receipt_date")
+        self.assertEqual(self.selector(reference), "exact_reference_date")
+
+    def test_the_previous_and_deictic_contracts_are_untouched(self) -> None:
+        for query, selector, role in (
+            (f"{self.ISSUER} {self.HOLDER}의 이번 보고 보유주식수는?",
+             "selected_context", "current"),
+            (f"{self.ISSUER} {self.HOLDER}의 직전 보고 보유비율은?",
+             "selected_context", "previous"),
+            (f"{self.ISSUER} {self.HOLDER}의 최신 보고의 직전보고 보유비율은?",
+             "latest", "previous"),
+        ):
+            with self.subTest(query=query):
+                value = self.intent(query)
+                self.assertEqual(value["selector"], selector)
+                self.assertEqual(value["projection_role"], role)
+
+    def test_the_recognized_wording_does_not_create_a_reporter(self) -> None:
+        """Issuer-only and role-pair shapes keep their frozen fail-closed reading."""
+
+        issuer_only = f"{self.ISSUER}의 최근 대량보유보고 기준 보유주식수는?"
+        self.assertEqual(self.selector(issuer_only), "latest")
+        self.assertIsNone(self.plan(issuer_only).reporter)
+
+        collision = f"{self.OTHER}가 보유한 {self.ISSUER} 주식은 몇 주인가?"
+        self.assertIsNone(self.plan(collision).reporter)
+        self.assertEqual(len(self.plan(collision).companies), 2)
+
+    def test_a_filing_noun_in_the_holder_slot_is_still_not_a_holder(self) -> None:
+        """The T9-1A.1 guard is unaffected by the new recognition."""
+
+        query = f"{self.ISSUER} 최근 대량보유보고의 보유주식수는?"
+
+        self.assertIsNone(self.plan(query).reporter)
