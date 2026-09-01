@@ -4480,3 +4480,155 @@ connection to the selected-context fix and does not block this freeze.
 | TARGET B.3 — Holding Correction Finality Artifact | FINAL FREEZE | `da65d23` |
 | Phase 3 — Report-Relative Holding Execution | FINAL FREEZE | `b8799e9` |
 | Periodic Retrieval — Live BGE Diagnosis | **DIAGNOSIS COMPLETE — KEEP DEFERRED** | — |
+## T2 Correction Semantics / Pair Role Binding Freeze — 2026-09-01
+
+### Status
+
+**FREEZE_READY**
+
+### Scope
+
+Resolved correction 질의의 `정정 전 / 정정 후` 의미 해석과
+document-version role binding을 다음 단계로 수정하였다.
+
+- T2-A — Correction Pair Intent
+- T2-B — Correction Pair Role Binding
+- T2-B.1 — Production Path Reconciliation
+
+### Semantic Contract
+
+`정정 전`은 holding event의 `before_*` 값이 아니다.
+
+Correction comparison에서는 질문이 요구한 동일 metric을
+문서 버전별로 비교한다.
+
+- original filing requested metric → `correction_before`
+- corrected/final filing requested metric → `correction_after`
+
+예:
+
+- original `after_shares` → 정정 전 보유주식수
+- corrected `after_shares` → 정정 후 보유주식수
+- original `after_ratio` → 정정 전 보유비율
+- corrected `after_ratio` → 정정 후 보유비율
+
+Document-version authority는 Correction Graph로 결정하며
+retrieval rank, receipt-order heuristic, recency heuristic 또는 HCX 추론을
+사용하지 않는다.
+
+### Independent Eval v2
+
+Baseline:
+
+- PASS: 39/69
+- Score: 56.5%
+- Answer: 43
+- Evidence: 52
+- Citation: 44
+- Answerability: 54
+- T2: 2/8
+
+Frozen result:
+
+- PASS: **42/69**
+- Score: **60.9%**
+- Answer: **46**
+- Evidence: **55**
+- Citation: **47**
+- Answerability: **54**
+- T2: **5/8**
+
+Delta:
+
+- PASS: +3
+- PASS -> FAIL: 0
+
+FAIL -> PASS:
+
+- IEV2-C001
+- IEV2-C002
+- IEV2-C007
+
+### Regression Controls
+
+Preserved:
+
+- T8: 5/5
+- T9: 4/4
+- T11: 3/3
+- T12: 3/3
+- T19: 3/3
+
+Target regression controls:
+
+- C010 PASS
+- C011 PASS
+- C023 PASS
+- C027 PASS
+
+### Remaining T2 Failures
+
+Intentionally not addressed in this freeze:
+
+- C003 — evidence/projection materialization
+- C004 — citation alignment
+- C012 — correction-state field conflict
+
+### Validation
+
+Validated implementation commit:
+
+`f6872bd6c53e0390ba9e32bd2a0b4f50f594f115`
+
+Merged dev:
+
+`1de94703e024f64deccd56e716e211af63e3f0d9`
+
+The two commits have identical trees.
+
+Full69:
+
+- 69/69 HTTP 200
+- 42/69 PASS
+- 0 PASS -> FAIL
+
+Artifacts:
+
+`local-test/independent-v2/t2b1-f6872bd-full69-hcx-20260901_225936.jsonl`
+
+SHA256:
+
+`e2e92c9a887475a283b54ebebc8b56964313e5400513ecb36de43d95af124c56`
+
+Scores SHA256:
+
+`b00cd20abe07536460676216112c410f8b76c6bb66b0f5e47499f705ffe2294e`
+
+Summary SHA256:
+
+`1b6a40dd5e09bc5eb4f8bcde5d34273bcc05cf26f5ad454635278feded193ed4`
+
+### Deployment Smoke
+
+Port 8010 deployed from:
+
+`/srv/festival/app-t2-frozen`
+
+HEAD:
+
+`1de94703e024f64deccd56e716e211af63e3f0d9`
+
+C001 smoke confirmed:
+
+- 정정 전 보유주식수 183,202,431주
+- 정정 후 보유주식수 183,323,596주
+
+### HCX
+
+HCX behavior was not changed.
+
+Correction authority and correction-version role binding remain deterministic.
+
+### Freeze Decision
+
+**FREEZE_READY**
