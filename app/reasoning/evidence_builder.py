@@ -9,6 +9,13 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.holding_acquisition import acquisition_facts
+from app.reasoning.holding_correction_state import (
+    PRIOR_STATE,
+    PRIOR_STATE_SUPERSEDED,
+    current_state_is_authoritative,
+    declared_correction_state,
+    item_correction_state,
+)
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
@@ -215,7 +222,17 @@ def build_evidence_set(
         )
         for item in items
     ]
-    groups = _group_items(items, task_type=grouping_task)
+    # A corrected filing reprints the report it corrects, so its own 정정 전
+    # region states values it has itself superseded. Settle that before the
+    # groups are built: the resolver reads a group's fields as equally
+    # authoritative statements of one event, and the superseded half was never
+    # that. Nothing is dropped -- the chunk stays served, cited and readable,
+    # and only its standing as this event's evidence changes.
+    superseded, superseded_warnings = _superseded_prior_states(items, plan)
+    warnings.extend(superseded_warnings)
+    groups = _group_items(
+        items, task_type=grouping_task, superseded_holding_ids=superseded
+    )
     ambiguity = _ambiguity_metadata(groups, temporal_constraint)
     if ambiguity["temporal_ambiguity"]:
         warnings.append("multiple_temporal_alternatives")
@@ -286,13 +303,18 @@ def _evidence_item(
 
 
 def _group_items(
-    items: Sequence[EvidenceItem], *, task_type: str | None
+    items: Sequence[EvidenceItem],
+    *,
+    task_type: str | None,
+    superseded_holding_ids: frozenset[str] = frozenset(),
 ) -> list[EvidenceGroup]:
     remaining = list(items)
     groups: list[EvidenceGroup] = []
 
     if task_type == "holding_change":
-        holding_groups, remaining = _holding_groups(remaining)
+        holding_groups, remaining = _holding_groups(
+            remaining, superseded_holding_ids
+        )
         groups.extend(holding_groups)
 
     periodic_groups, remaining = _periodic_groups(remaining)
@@ -319,11 +341,23 @@ def _group_items(
 
 def _holding_groups(
     items: Sequence[EvidenceItem],
+    superseded_holding_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[EvidenceGroup], list[EvidenceItem]]:
-    seeds = [item for item in items if _is_holding_evidence(item)]
+    """Holding-event groups, and everything that is not one of their members.
+
+    ``superseded_holding_ids`` names projections a filing's own correction-state
+    labels proved it no longer states.  They take no part in a holding event --
+    neither as a seed nor as a member reached through one -- and fall through to
+    the grouping every other chunk gets, so the evidence set keeps them.
+    """
+
+    eligible = [
+        item for item in items if item.chunk_id not in superseded_holding_ids
+    ]
+    seeds = [item for item in eligible if _is_holding_evidence(item)]
     holding_items = [
         item
-        for item in items
+        for item in eligible
         if item in seeds
         or any(
             item.doc_id == seed.doc_id and _source_related(item, seed)
@@ -345,6 +379,51 @@ def _holding_groups(
             for component in components
         ],
         nonholding,
+    )
+
+
+def _superseded_prior_states(
+    items: Sequence[EvidenceItem], plan: Mapping[str, Any]
+) -> tuple[frozenset[str], list[str]]:
+    """Which served projections their own filing has already superseded.
+
+    A projection qualifies on three counts, all of them structural.  Its own
+    labels declare it the filing's prior state.  The question is not one that
+    asks for that state -- a correction history and an original-filing question
+    both want it, and are refused here rather than repaired downstream.  And the
+    same filing also serves a projection of the same event that it does *not*
+    declare prior, so resolving one state away can never leave the event without
+    one.
+
+    Two projections that both declare the prior state, or a filing that serves
+    the prior state alone, change nothing: the point is not to remove a
+    disagreement but to stop treating a filing's own superseded text as a rival
+    to what it now says.  Where the labels prove nothing, the conflict stands.
+    """
+
+    if not current_state_is_authoritative(plan):
+        return frozenset(), []
+
+    holding = [item for item in items if _is_holding_evidence(item)]
+    prior = [item for item in holding if item_correction_state(item) == PRIOR_STATE]
+    if not prior:
+        return frozenset(), []
+
+    superseded: list[str] = []
+    for item in prior:
+        if any(
+            other.chunk_id != item.chunk_id
+            and item_correction_state(other) != PRIOR_STATE
+            # ``_same_holding_event`` is the frozen relation, so a correction
+            # state can only supersede inside the one filing and the one event
+            # the grouping would have merged it into anyway.
+            and _same_holding_event(item, other)
+            for other in holding
+        ):
+            superseded.append(item.chunk_id)
+    return (
+        frozenset(superseded),
+        [f"{PRIOR_STATE_SUPERSEDED}:{chunk_id}" for chunk_id in sorted(superseded)],
     )
 
 
@@ -679,6 +758,10 @@ def _holding_metadata(chunk: Mapping[str, Any]) -> dict[str, Any]:
         "change_direction": direction,
         "projection_type": _text(chunk.get("projection_type")),
         "projection_state": _text(chunk.get("projection_state")),
+        # Which state of a corrected filing this projection states, read from
+        # the filing's own labels. ``None`` for the body of a report and for
+        # every filing that corrects nothing, which is nearly all of them.
+        "correction_state": declared_correction_state(chunk),
         "projection_fields": copy.deepcopy(fields),
         "projection_field_refs": copy.deepcopy(
             dict(chunk.get("projection_field_refs") or {})
