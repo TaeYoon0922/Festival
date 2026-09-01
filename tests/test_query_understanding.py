@@ -9,6 +9,13 @@ from app.reasoning import (
     QueryRouter,
     QueryUnderstanding,
 )
+from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.query_understanding import (
+    ACTOR_SOURCE_DIRECTED_HOLDER,
+    HOLDING_ACTOR_CANDIDATE_KEY,
+    _latest_report_wording,
+    _names_a_filing,
+)
 from app.retrieval.interfaces import (
     CandidateChunk,
     CandidateDocument,
@@ -640,6 +647,57 @@ class BoundedOwnershipIntentTests(unittest.TestCase):
         self.assertEqual(shares.evidence["metric"], "몇 주")
         self.assertEqual(ratio.evidence["metric"], "지분 비율")
         self.assertIsNone(ambiguous.evidence["metric"])
+
+    def test_directed_acquisition_unit_price_activates_holding(self) -> None:
+        for query in (
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가는 얼마였어?",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 매수한 단가는 얼마야?",
+        ):
+            with self.subTest(query=query):
+                plan = self.assert_bounded_holding(
+                    query,
+                    metric="acquisition_unit_price",
+                    family="company_acquires_company_shares",
+                )
+                self.assertEqual(plan.evidence["operation"], "lookup_holding")
+                self.assertIn("단가", plan.evidence["metric"])
+                self.assertEqual(route_task(query, plan).task_type, "holding_event")
+
+    def test_acquisition_unit_price_activation_stays_narrow(self) -> None:
+        queries = (
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 처분할 때의 처분단가는 얼마야?",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득했어?",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득한 가액은 얼마야?",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertNotEqual(plan.metric, "acquisition_unit_price")
+                self.assertNotEqual(
+                    plan.evidence["holding_ownership_intent"],
+                    "company_acquires_company_shares",
+                )
+
+    def test_acquisition_unit_price_respects_comparison_and_cardinality_gates(
+        self,
+    ) -> None:
+        comparison = self.plan(
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때와 "
+            "매수할 때의 단가를 비교해줘"
+        )
+        three_company = self.plan(
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가와 "
+            f"{self.THIRD} 관련 공시도 알려줘"
+        )
+
+        self.assertIn(
+            comparison.evidence["comparison_frame"], {"cross_company", "uncertain"}
+        )
+        self.assertNotEqual(comparison.metric, "acquisition_unit_price")
+        self.assertIsNone(comparison.evidence["holding_ownership_intent"])
+        self.assertEqual(len(three_company.companies), 3)
+        self.assertNotEqual(three_company.metric, "acquisition_unit_price")
+        self.assertIsNone(three_company.evidence["holding_ownership_intent"])
 
     def test_new_ownership_reference_date_keeps_the_exact_holding_axis(self) -> None:
         plan = self.assert_bounded_holding(
@@ -1499,3 +1557,788 @@ class ComparisonFrameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectedUnresolvableHolderIntentTests(unittest.TestCase):
+    """A directed acquisition whose acquirer no alias map can name.
+
+    The company universe is scoped to issuers, so the filer a holding report
+    belongs to is usually absent from it.  A real directed acquisition question
+    therefore names one company this stage can canonicalize -- the issuer whose
+    shares were bought -- and one it never will.  These cases prove the lane
+    activates on that structure alone, and that nothing wider rides along.
+    """
+
+    ISSUER = "가상발행사"
+    HOLDER = "가상지주"
+
+    def setUp(self) -> None:
+        # Only the issuer is recognizable, exactly as an issuer-scoped universe
+        # behaves for a holding-report filer.
+        self.understanding = QueryUnderstanding({self.ISSUER: {self.ISSUER}})
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def directed(self) -> str:
+        return f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가는 얼마야?"
+
+    def assert_ordinary_lookup(self, query: str) -> None:
+        plan = self.plan(query)
+        self.assertEqual(plan.task_type, "disclosure_lookup")
+        self.assertEqual(plan.disclosure_route, ())
+        self.assertNotEqual(plan.metric, "acquisition_unit_price")
+        self.assertIsNone(plan.evidence["holding_ownership_intent"])
+        self.assertIsNone(plan.evidence[HOLDING_ACTOR_CANDIDATE_KEY])
+
+    def test_directed_acquisition_with_unresolvable_holder_activates_holding(
+        self,
+    ) -> None:
+        query = self.directed()
+        plan = self.plan(query)
+
+        self.assertEqual(plan.task_type, "holding_change")
+        self.assertEqual(plan.evidence["operation"], "lookup_holding")
+        self.assertEqual(plan.metric, "acquisition_unit_price")
+        self.assertEqual(plan.disclosure_route, ("holding",))
+        self.assertEqual(
+            plan.evidence["holding_ownership_intent"],
+            "company_acquires_company_shares",
+        )
+        # The acquirer is read for structure and written nowhere: the issuer
+        # stays the only company, and who the filer is remains validation's
+        # question because only the corpus can answer it.
+        self.assertEqual(plan.companies, (self.ISSUER,))
+        self.assertIsNone(plan.reporter)
+        self.assertEqual(route_task(query, plan).task_type, "holding_event")
+
+    def test_actor_candidate_is_carried_unresolved(self) -> None:
+        candidate = self.plan(self.directed()).evidence[HOLDING_ACTOR_CANDIDATE_KEY]
+
+        self.assertEqual(candidate["surface"], self.HOLDER)
+        self.assertEqual(
+            candidate["reporter_key"], canonical_reporter_key(self.HOLDER)
+        )
+        self.assertEqual(candidate["source"], ACTOR_SOURCE_DIRECTED_HOLDER)
+        # Syntax proved a surface stood in the actor slot; it cannot prove the
+        # surface names a holder this corpus knows, and must not claim to.
+        self.assertFalse(candidate["resolved"])
+
+    def test_directed_acquisition_subject_guards(self) -> None:
+        for label, subject in (
+            ("issuer itself", f"{self.ISSUER}가"),
+            ("bare temporal", "2024년이"),
+            ("generic noun", "회사가"),
+            ("no subject", ""),
+        ):
+            with self.subTest(subject=label):
+                self.assert_ordinary_lookup(
+                    f"{subject} {self.ISSUER} 주식을 "
+                    "취득할 때의 취득단가는 얼마야?".strip()
+                )
+
+    def test_ordinary_acquisition_language_is_not_over_routed(self) -> None:
+        for query in (
+            f"{self.ISSUER}가 토지를 취득한 공시는?",
+            f"{self.ISSUER}가 자산을 취득한 공시는?",
+            f"{self.ISSUER}가 자기주식을 취득한 공시는?",
+            f"{self.ISSUER} 주식의 단가는?",
+            "취득단가는 얼마야?",
+        ):
+            with self.subTest(query=query):
+                self.assert_ordinary_lookup(query)
+
+    def test_single_mention_comparison_is_blocked(self) -> None:
+        # ``_comparison_frame`` needs two canonical mentions to bind an
+        # operator, and an unresolved acquirer gives it only one.  Comparative
+        # vocabulary must therefore decline outright rather than pass an
+        # unchecked comparison into a single-holder binding.
+        for query in (
+            f"{self.HOLDER}와 다른 회사의 {self.ISSUER} 주식 취득단가를 비교해줘",
+            f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때와 "
+            "매수할 때의 취득단가 차이는?",
+        ):
+            with self.subTest(query=query):
+                self.assert_ordinary_lookup(query)
+
+
+class TwoMentionUnitPriceAlignmentTests(unittest.TestCase):
+    """Both parties recognizable: the reviewed metric alignment, pinned.
+
+    ``holding_field_evidence`` already answered these questions from the
+    question text alone while the plan reported no metric.  Recording the
+    metric makes the plan agree with the producer that was already active, so
+    the agreement is asserted here rather than left to be dropped by accident.
+    """
+
+    HOLDER = "가상투자사"
+    ISSUER = "가상발행사"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.HOLDER, self.ISSUER)}
+        )
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def test_two_mention_unit_price_alignment_is_intentional(self) -> None:
+        for query in (
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 취득 단가는?",
+            f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 매수 단가는?",
+        ):
+            with self.subTest(query=query):
+                plan = self.plan(query)
+                self.assertEqual(plan.task_type, "holding_change")
+                self.assertEqual(plan.metric, "acquisition_unit_price")
+                self.assertEqual(plan.disclosure_route, ("holding",))
+
+    def test_neighbouring_fields_are_not_a_unit_price(self) -> None:
+        for label, query in (
+            ("disposal price", f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 처분 단가는?"),
+            ("total amount", f"{self.HOLDER}가 보유한 {self.ISSUER} 주식의 총 취득금액은?"),
+            ("share count", f"{self.HOLDER}가 보유한 {self.ISSUER} 주식은 몇 주야?"),
+            ("ownership ratio", f"{self.HOLDER}가 보유한 {self.ISSUER} 지분 비율은?"),
+        ):
+            with self.subTest(field=label):
+                self.assertNotEqual(
+                    self.plan(query).metric, "acquisition_unit_price"
+                )
+
+
+class ItemizedDateAnchorTests(unittest.TestCase):
+    """Several dates in one question are anchors, not the ends of one span.
+
+    An itemized comparison names one date per item -- "A의 <date> 계약과 B의
+    <date> 계약 중 어느 쪽이 큰가".  Reading the first two as ``from``/``to``
+    invents a period nobody asked for, and when the first item happens to carry
+    the later date it invents a backwards one, which is not a period at all.
+    """
+
+    A, B, C, D = "가상가사", "가상나사", "가상다사", "가상라사"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.A, self.B, self.C, self.D)}
+        )
+
+    def plan(self, query: str) -> QueryPlan:
+        return self.understanding.understand(query)
+
+    def itemized(self) -> str:
+        """Four items, each with its own date; the first date is the latest."""
+
+        return (
+            f"{self.A}의 2023년 2월 28일 공급계약과 {self.B}의 2023년 1월 20일 공급계약, "
+            f"{self.C}의 2023년 5월 10일 공급계약, {self.D}의 2023년 7월 3일 공급계약 "
+            "중 계약금액이 가장 큰 곳은?"
+        )
+
+    def test_itemized_dates_do_not_become_a_backwards_range(self) -> None:
+        plan = self.plan(self.itemized())
+
+        # The pair that used to be read as a span, in the order they are written.
+        self.assertNotEqual(
+            (plan.period.from_date, plan.period.to_date),
+            ("2023-02-28", "2023-01-20"),
+        )
+        # Nor is it rescued by quietly reordering them.
+        self.assertNotEqual(
+            (plan.period.from_date, plan.period.to_date),
+            ("2023-01-20", "2023-02-28"),
+        )
+        self.assertNotEqual(plan.period.period_type, "date_range")
+        # What the question does establish is the year its items share.
+        self.assertEqual(plan.period.period_type, "reference_year")
+        self.assertEqual(plan.period.year, 2023)
+        self.assertIsNone(plan.period.from_date)
+        self.assertIsNone(plan.period.to_date)
+        # Every item's company survives for the comparison lanes downstream.
+        self.assertEqual(plan.companies, (self.A, self.B, self.C, self.D))
+
+    def test_two_anchors_without_span_wording_are_not_a_range(self) -> None:
+        for label, first, second in (
+            ("ascending", "2023년 1월 20일", "2023년 2월 28일"),
+            ("descending", "2023년 2월 28일", "2023년 1월 20일"),
+        ):
+            with self.subTest(order=label):
+                plan = self.plan(
+                    f"{self.A}의 {first} 공급계약과 {second} 공급계약의 계약금액은?"
+                )
+
+                self.assertNotEqual(plan.period.period_type, "date_range")
+                self.assertIsNone(plan.period.from_date)
+                self.assertIsNone(plan.period.to_date)
+
+    def test_a_stated_span_is_still_a_range(self) -> None:
+        plan = self.plan(
+            f"{self.A}의 2023년 1월 20일부터 2023년 2월 28일까지 공시된 공급계약은?"
+        )
+
+        self.assertEqual(plan.period.period_type, "date_range")
+        self.assertEqual(plan.period.from_date, "2023-01-20")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+    def test_a_backwards_stated_span_declines_instead_of_raising(self) -> None:
+        """Which end was meant is not something this stage may guess.
+
+        A span written backwards is refused as a span rather than reordered
+        into one.  What the question is left with is whatever the rest of the
+        parser can say honestly: a receipt question keeps its stated filing
+        date, and one that states no role keeps only the year.  Neither
+        invents the window the wording failed to describe.
+        """
+
+        receipt = self.plan(
+            f"{self.A}의 2023년 2월 28일부터 2023년 1월 20일까지 공시된 공급계약은?"
+        )
+        bare = self.plan(
+            f"{self.A}의 2023년 2월 28일부터 2023년 1월 20일까지 공급계약은?"
+        )
+
+        for plan in (receipt, bare):
+            self.assertNotEqual(plan.period.period_type, "date_range")
+            # Never the backwards pair, and never it silently turned around.
+            self.assertNotEqual(
+                (plan.period.from_date, plan.period.to_date),
+                ("2023-02-28", "2023-01-20"),
+            )
+            self.assertNotEqual(
+                (plan.period.from_date, plan.period.to_date),
+                ("2023-01-20", "2023-02-28"),
+            )
+        self.assertEqual(receipt.period.period_type, "receipt_date")
+        self.assertEqual(receipt.period.from_date, receipt.period.to_date)
+        self.assertEqual(bare.period.period_type, "reference_year")
+        self.assertIsNone(bare.period.from_date)
+
+    def test_one_exact_date_is_unchanged(self) -> None:
+        plan = self.plan(f"{self.A}가 2023년 2월 28일 공시한 공급계약의 계약금액은?")
+
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2023-02-28")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+    def test_a_stated_receipt_span_is_unchanged(self) -> None:
+        plan = self.plan(
+            f"{self.A}가 2023년 1월 20일부터 2023년 2월 28일까지 공시한 공급계약은?"
+        )
+
+        self.assertEqual(plan.period.period_type, "date_range")
+        self.assertEqual(plan.period.from_date, "2023-01-20")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+    def test_a_stated_holding_reference_span_is_unchanged(self) -> None:
+        plan = self.plan(
+            f"{self.A}가 보유한 {self.B} 주식은 "
+            "2023년 1월 20일부터 2023년 2월 28일까지 어떻게 변했어?"
+        )
+
+        self.assertEqual(plan.period.period_type, "holding_reference_range")
+        self.assertEqual(plan.period.from_date, "2023-01-20")
+        self.assertEqual(plan.period.to_date, "2023-02-28")
+
+
+class NaturalHoldingReporterTests(unittest.TestCase):
+    """The holder a holding question names in relation to its issuer.
+
+    A holding report's filer is an individual, a fund or a foreign entity far
+    more often than it is one of the issuers the company universe holds, so the
+    filer is invisible to company-mention extraction.  These cases prove the
+    surface is read out of the issuer's own relational structure, and that
+    nothing wider rides along: not a role noun standing alone, not a metric,
+    not a date, and never a second corpus company.
+    """
+
+    ISSUER = "가상발행사"
+    OTHER = "가상상대사"
+    HOLDER = "가상보유인"
+    SECOND = "가상보유이"
+
+    def setUp(self) -> None:
+        # Two issuers are recognizable; no holder ever is, exactly as an
+        # issuer-scoped universe behaves for a holding-report filer.
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.ISSUER, self.OTHER)}
+        )
+
+    def reporter(self, query: str):
+        return self.understanding.understand(query).reporter
+
+    # ------------------------------------------------------------- recognized
+    def test_a_holder_related_to_the_issuer_is_read(self) -> None:
+        for query in (
+            f"{self.ISSUER}에 대한 {self.HOLDER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER}에 관한 {self.HOLDER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER} {self.HOLDER}의 최근 보고 보유주식수는?",
+            f"{self.ISSUER}에 대해 {self.HOLDER}가 최신 보고한 보유비율은?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.reporter(query), self.HOLDER)
+
+    def test_a_role_noun_names_the_holder_that_follows_it(self) -> None:
+        for role in ("최대주주", "대주주", "주요주주", "지배주주"):
+            query = f"{self.ISSUER} {role} {self.HOLDER}의 가장 최근 보고 기준 보유주식수는?"
+            with self.subTest(role=role):
+                self.assertEqual(self.reporter(query), self.HOLDER)
+
+    def test_a_legal_form_stays_part_of_the_surface(self) -> None:
+        """Canonical identity is ``canonical_reporter_key``'s job, not this one.
+
+        The parser reports what was written; the key is what compares.  Both
+        surfaces therefore have to reduce to the same holder downstream.
+        """
+
+        with_form = self.reporter(
+            f"{self.ISSUER}에 대해 주식회사 {self.HOLDER}가 최신 보고한 보유비율은?"
+        )
+        without_form = self.reporter(
+            f"{self.ISSUER}에 대해 {self.HOLDER}가 최신 보고한 보유비율은?"
+        )
+
+        self.assertEqual(with_form, f"주식회사 {self.HOLDER}")
+        self.assertEqual(without_form, self.HOLDER)
+        self.assertEqual(
+            canonical_reporter_key(with_form), canonical_reporter_key(without_form)
+        )
+
+    def test_the_holder_surface_ends_at_its_own_token(self) -> None:
+        """The boundary is the particle, not the rest of the sentence.
+
+        Without that boundary the surface would swallow the metric, the report
+        wording and the question suffix that follow it.
+        """
+
+        query = (
+            f"{self.ISSUER} 최대주주 {self.HOLDER}의 "
+            "가장 최근 보고 기준 보유주식수는 몇 주인가?"
+        )
+
+        self.assertEqual(self.reporter(query), self.HOLDER)
+
+    # ----------------------------------------------------------- fails closed
+    def test_an_issuer_without_a_named_holder_stays_unresolved(self) -> None:
+        for query in (
+            f"{self.ISSUER} 최신 보고 보유주식수는?",
+            f"{self.ISSUER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER} 최근 보고 기준 보유주식수는 몇 주인가?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
+    def test_a_role_noun_alone_names_nobody(self) -> None:
+        """``최대주주의 보유비율`` asks about a role, not about a holder."""
+
+        for role in ("최대주주", "대주주", "주요주주"):
+            with self.subTest(role=role):
+                self.assertIsNone(
+                    self.reporter(f"{self.ISSUER} {role}의 보유비율은?")
+                )
+
+    def test_two_named_holders_stay_unresolved(self) -> None:
+        """Nothing here chooses between them, and choosing would be a guess."""
+
+        for joiner in ("와", ",", "및"):
+            query = (
+                f"{self.ISSUER}에 대한 {self.HOLDER}{joiner} {self.SECOND}의 "
+                "최신 보고 보유비율은?"
+            )
+            with self.subTest(joiner=joiner):
+                self.assertIsNone(self.reporter(query))
+
+    def test_a_metric_or_a_date_is_never_a_holder(self) -> None:
+        for query in (
+            f"{self.ISSUER} 보유비율의 최신 보고는?",
+            f"{self.ISSUER} 2024년의 최신 보고 보유비율은?",
+            f"{self.ISSUER} 지분율의 최근 보고 기준 값은?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
+    def test_a_non_holding_question_reads_no_holder(self) -> None:
+        """The same possessive shape, without a holding metric to bind it."""
+
+        for query in (
+            f"{self.ISSUER} {self.HOLDER}의 2024년 매출액은?",
+            f"{self.ISSUER} {self.HOLDER}의 유상증자 규모는?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
+    # ------------------------------------------------------------- T8 firewall
+    def test_a_second_corpus_company_is_never_read_as_the_holder(self) -> None:
+        """Issuer/reporter direction over two corpus companies is not this lane.
+
+        Two recognizable companies are a role pair or a comparison, and the
+        corpus -- not this parser -- is what says which is which.
+        """
+
+        for query in (
+            f"{self.OTHER}가 보유한 {self.ISSUER} 주식은 몇 주인가?",
+            f"{self.ISSUER}에 대한 {self.OTHER}의 최신 보고 보유비율은?",
+            f"{self.OTHER}의 {self.ISSUER} 지분율은 얼마야?",
+            f"{self.ISSUER} 대량보유보고에서 {self.OTHER}가 신고한 보유주식수는?",
+        ):
+            with self.subTest(query=query):
+                plan = self.understanding.understand(query)
+                self.assertEqual(len(plan.companies), 2)
+                self.assertIsNone(plan.reporter)
+
+    def test_comparison_wording_declines_outright(self) -> None:
+        for query in (
+            f"{self.ISSUER}에 대한 {self.HOLDER}의 최신 보고 보유비율을 비교해줘",
+            f"{self.ISSUER}에 대한 {self.HOLDER}의 보유비율은 각각 얼마야?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
+    # ------------------------------------------------------- existing shapes
+    def test_the_labelled_and_pension_shapes_are_unchanged(self) -> None:
+        self.assertEqual(
+            self.reporter(f"{self.ISSUER} 보고자: 가상투자 보유비율은?"), "가상투자"
+        )
+        self.assertEqual(
+            self.reporter(f"국민연금 {self.ISSUER} 최신 보고 보유주식수"), "국민연금"
+        )
+        self.assertEqual(
+            self.reporter(f"{self.ISSUER}에 대한 국민연금공단의 최신 보고 보유비율은?"),
+            "국민연금공단",
+        )
+
+    def test_a_directed_acquisition_keeps_its_own_semantics(self) -> None:
+        """The acquisition lane carries a candidate, never a reporter."""
+
+        query = f"{self.HOLDER}가 {self.ISSUER} 주식을 취득할 때의 취득단가는 얼마야?"
+        plan = self.understanding.understand(query)
+
+        self.assertEqual(plan.metric, "acquisition_unit_price")
+        self.assertIsNone(plan.reporter)
+        self.assertEqual(
+            plan.evidence[HOLDING_ACTOR_CANDIDATE_KEY]["source"],
+            ACTOR_SOURCE_DIRECTED_HOLDER,
+        )
+
+
+class DocumentNounIsNotAReporterTests(unittest.TestCase):
+    """A holding question can name the filing where a holder would stand.
+
+    ``<issuer> 대량보유보고의 보유주식수`` asks about a document, not about
+    anybody.  Reading that document as a holder invents a filer the question
+    never named, and -- because a named filer is what the authoritative report
+    lane gates on -- it also takes the question away from the path that was
+    answering it.  These cases fix the family, not one phrase.
+    """
+
+    ISSUER = "가상발행사"
+    OTHER = "가상상대사"
+    HOLDER = "가상보유인"
+    SECOND = "가상보유이"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.ISSUER, self.OTHER)}
+        )
+
+    def reporter(self, query: str):
+        return self.understanding.understand(query).reporter
+
+    # --------------------------------------------------- the document family
+    def test_a_filing_name_in_the_holder_slot_names_nobody(self) -> None:
+        for document in (
+            "대량보유보고",
+            "대량보유상황보고",
+            "대량보유상황보고서",
+            "대량보유보고서",
+            "주식등의 대량보유상황보고서",
+            "소유상황보고서",
+            "보고서",
+            "보고",
+            "공시",
+        ):
+            for question in (
+                f"{self.ISSUER} {document}의 보유주식수는?",
+                f"{self.ISSUER} {document}의 보유비율은?",
+            ):
+                with self.subTest(document=document, question=question):
+                    self.assertIsNone(self.reporter(question))
+
+    def test_the_family_is_derived_rather_than_enumerated(self) -> None:
+        """Composition, not membership: qualifiers may stack in any depth."""
+
+        for key in (
+            "보고",
+            "보고서",
+            "공시",
+            "신고서",
+            "대량보유보고",
+            "대량보유상황보고",
+            "대량보유상황보고서",
+            "소유상황보고서",
+            "주식등의대량보유상황보고서",
+            "임원주요주주소유상황보고서",
+            "특정증권등소유상황보고서",
+            # Bare fragments too: a spaced document name leaves one of these in
+            # the holder slot, and they are what the frozen set no longer lists.
+            "대량보유상황",
+            "주식등",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(_names_a_filing(key))
+
+    def test_a_holder_whose_name_ends_in_a_report_word_survives(self) -> None:
+        """The rule is compositional, so it cannot eat a real legal entity.
+
+        Containment would reject every one of these.  Requiring the whole
+        surface to be qualifiers plus a head is what keeps them holders.
+        """
+
+        for key in ("보고펀드", "대한보고", "신고전자", "보고서적", "가상공시투자"):
+            with self.subTest(key=key):
+                self.assertFalse(_names_a_filing(key))
+
+    def test_such_a_holder_is_still_read_as_the_reporter(self) -> None:
+        for holder in ("보고펀드", "대한보고"):
+            question = f"{self.ISSUER}에 대한 {holder}의 최신 보고 보유비율은?"
+            with self.subTest(holder=holder):
+                self.assertEqual(self.reporter(question), holder)
+
+    # ----------------------------------------- exact receipt date regression
+    def test_an_exact_receipt_date_question_is_not_given_a_false_holder(
+        self,
+    ) -> None:
+        """The measured regression, as its structure rather than its identities.
+
+        A filer stated ahead of the issuer, an exact receipt date, and the
+        filing named after the issuer.  Reading the filing as the holder would
+        hand this question to the authoritative report lane, which then has an
+        identity the corpus cannot match -- and the receipt-date path that was
+        answering it never runs.  The holder stays unresolved, which is what
+        leaves that path in place.
+        """
+
+        question = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{self.ISSUER} 대량보유보고의 보유주식수는?"
+        )
+        plan = self.understanding.understand(question)
+
+        self.assertIsNone(plan.reporter)
+        # The receipt-date axis this question is answered on is untouched.
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2025-10-10")
+        self.assertEqual(plan.period.to_date, "2025-10-10")
+        self.assertEqual(plan.metric, "holding_shares")
+
+    # ------------------------------------------------ T9-1A shapes preserved
+    def test_the_valid_natural_shapes_still_resolve(self) -> None:
+        for query in (
+            f"{self.ISSUER} {self.HOLDER}의 최신 보고 보유주식수는?",
+            f"{self.ISSUER}에 대한 {self.HOLDER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER}에 대해 {self.HOLDER}가 최신 보고한 보유비율은?",
+            f"{self.ISSUER} 최대주주 {self.HOLDER}의 가장 최근 보고 기준 보유주식수는?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.reporter(query), self.HOLDER)
+
+    def test_a_legal_form_holder_is_unchanged(self) -> None:
+        self.assertEqual(
+            self.reporter(
+                f"{self.ISSUER}에 대해 주식회사 {self.HOLDER}가 최신 보고한 보유비율은?"
+            ),
+            f"주식회사 {self.HOLDER}",
+        )
+
+    def test_the_frozen_fail_closed_shapes_are_unchanged(self) -> None:
+        for query in (
+            # issuer only
+            f"{self.ISSUER} 최신 보고 보유주식수는?",
+            # two named holders
+            f"{self.ISSUER}에 대한 {self.HOLDER}와 {self.SECOND}의 최신 보고 보유비율은?",
+            # two corpus companies -- the role pair belongs to the corpus lane
+            f"{self.OTHER}가 보유한 {self.ISSUER} 주식은 몇 주인가?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
+    def test_the_labelled_and_pension_paths_are_unchanged(self) -> None:
+        self.assertEqual(
+            self.reporter(f"{self.ISSUER} 보고자: 가상투자 보유비율은?"), "가상투자"
+        )
+        self.assertEqual(
+            self.reporter(f"국민연금 {self.ISSUER} 최신 보고 보유주식수"), "국민연금"
+        )
+
+
+class LatestHoldingReportSelectorTests(unittest.TestCase):
+    """"The newest report" said with the document's own name in the middle.
+
+    The frozen report-relative parser recognizes the selector as one contiguous
+    string -- ``최근보고`` -- so a question that names the filing between the two
+    (``최근 대량보유보고 기준``) says exactly the same thing in wording that parser
+    cannot see.  Recognition is restored by dropping the document's qualifiers
+    before that parser reads the question; which report the wording then names,
+    and whether an explicit date outranks it, stay its own answers.
+    """
+
+    ISSUER = "가상발행사"
+    OTHER = "가상상대사"
+    HOLDER = "가상보유인"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.ISSUER, self.OTHER)}
+        )
+
+    def intent(self, query: str):
+        return self.understanding.understand(query).evidence["holding_report_relative"]
+
+    def selector(self, query: str):
+        value = self.intent(query)
+        return None if value is None else value["selector"]
+
+    def plan(self, query: str):
+        return self.understanding.understand(query)
+
+    # ---------------------------------------------------------- positives
+    def test_a_latest_modifier_on_a_holding_document_selects_the_latest(
+        self,
+    ) -> None:
+        for document in (
+            "대량보유보고",
+            "대량보유상황보고",
+            "대량보유상황보고서",
+            "대량보유보고서",
+            "주식등의대량보유상황보고서",
+            "주식등의 대량보유상황보고서",
+            "소유상황보고서",
+        ):
+            for modifier in ("최근", "최신", "가장 최근", "가장 최신"):
+                query = (
+                    f"{self.ISSUER} {self.HOLDER}의 "
+                    f"{modifier} {document} 기준 보유주식수는?"
+                )
+                with self.subTest(document=document, modifier=modifier):
+                    self.assertEqual(self.selector(query), "latest")
+
+    def test_the_holder_and_the_metric_survive_the_recognition(self) -> None:
+        for metric_words, metric in (
+            ("보유주식수는?", "holding_shares"),
+            ("보유비율은?", "holding_ratio"),
+        ):
+            query = (
+                f"{self.ISSUER} {self.HOLDER}의 최근 대량보유보고 기준 {metric_words}"
+            )
+            with self.subTest(metric=metric):
+                plan = self.plan(query)
+                self.assertEqual(plan.reporter, self.HOLDER)
+                self.assertEqual(plan.metric, metric)
+                self.assertEqual(plan.companies, (self.ISSUER,))
+
+    def test_a_legal_form_holder_is_unaffected(self) -> None:
+        query = (
+            f"{self.ISSUER} 주식회사 {self.HOLDER}의 "
+            "최근 대량보유보고 기준 보유비율은?"
+        )
+        plan = self.plan(query)
+
+        self.assertEqual(plan.reporter, f"주식회사 {self.HOLDER}")
+        self.assertEqual(self.selector(query), "latest")
+
+    def test_the_document_wording_means_the_same_as_the_plain_wording(self) -> None:
+        """Equivalence is the contract: same selector, same role, same evidence."""
+
+        with_document = self.intent(
+            f"{self.ISSUER} {self.HOLDER}의 최근 대량보유보고 기준 보유주식수는?"
+        )
+        plain = self.intent(
+            f"{self.ISSUER} {self.HOLDER}의 최근 보고 기준 보유주식수는?"
+        )
+
+        self.assertEqual(with_document, plain)
+
+    # ---------------------------------------------------------- negatives
+    def test_a_latest_word_alone_is_never_a_holding_selector(self) -> None:
+        """The rewrite needs this corpus's holding document vocabulary.
+
+        Every one of these contains a latest word and none of them is a holding
+        report, so none may acquire a holding selector from it.
+        """
+
+        for query in (
+            f"{self.ISSUER}의 최근 계약 계약금액은?",
+            f"{self.ISSUER}의 최근 사업보고서 매출액은?",
+            f"{self.ISSUER}의 최근 분기보고서 영업이익은?",
+            f"{self.ISSUER}의 최근 실적은 어때?",
+            f"{self.ISSUER} 최근 변동 중 큰 건은?",
+            f"{self.ISSUER}의 최근 유상증자 규모는?",
+        ):
+            with self.subTest(query=query):
+                self.assertNotEqual(self.selector(query), "latest")
+
+    def test_the_rewrite_is_a_no_op_without_the_document_wording(self) -> None:
+        """A question the rule does not touch behaves exactly as it did before.
+
+        This is what makes every unrelated shape provably unchanged: the only
+        production change is the rewrite, so a query it returns untouched takes
+        the identical path.
+        """
+
+        for query in (
+            f"{self.ISSUER} {self.HOLDER}의 최근 보고 기준 보유주식수는?",
+            f"{self.ISSUER} {self.HOLDER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER} {self.HOLDER}의 이번 보고 보유주식수는?",
+            f"{self.ISSUER} {self.HOLDER}의 직전 보고 보유비율은?",
+            f"{self.ISSUER}의 최근 계약 계약금액은?",
+            f"{self.ISSUER}의 최근 사업보고서 매출액은?",
+            f"{self.ISSUER} 대량보유보고의 보유주식수는?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(_latest_report_wording(query), query)
+
+    def test_an_exact_date_still_outranks_the_recognized_wording(self) -> None:
+        """The frozen precedence is untouched: a stated date owns selection."""
+
+        receipt = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{self.ISSUER} 최근 대량보유보고의 보유주식수는?"
+        )
+        reference = (
+            f"{self.ISSUER} {self.HOLDER}의 2025년 3월 14일 기준 "
+            "최근 대량보유보고 보유비율은?"
+        )
+
+        self.assertEqual(self.selector(receipt), "exact_receipt_date")
+        self.assertEqual(self.plan(receipt).period.period_type, "receipt_date")
+        self.assertEqual(self.selector(reference), "exact_reference_date")
+
+    def test_the_previous_and_deictic_contracts_are_untouched(self) -> None:
+        for query, selector, role in (
+            (f"{self.ISSUER} {self.HOLDER}의 이번 보고 보유주식수는?",
+             "selected_context", "current"),
+            (f"{self.ISSUER} {self.HOLDER}의 직전 보고 보유비율은?",
+             "selected_context", "previous"),
+            (f"{self.ISSUER} {self.HOLDER}의 최신 보고의 직전보고 보유비율은?",
+             "latest", "previous"),
+        ):
+            with self.subTest(query=query):
+                value = self.intent(query)
+                self.assertEqual(value["selector"], selector)
+                self.assertEqual(value["projection_role"], role)
+
+    def test_the_recognized_wording_does_not_create_a_reporter(self) -> None:
+        """Issuer-only and role-pair shapes keep their frozen fail-closed reading."""
+
+        issuer_only = f"{self.ISSUER}의 최근 대량보유보고 기준 보유주식수는?"
+        self.assertEqual(self.selector(issuer_only), "latest")
+        self.assertIsNone(self.plan(issuer_only).reporter)
+
+        collision = f"{self.OTHER}가 보유한 {self.ISSUER} 주식은 몇 주인가?"
+        self.assertIsNone(self.plan(collision).reporter)
+        self.assertEqual(len(self.plan(collision).companies), 2)
+
+    def test_a_filing_noun_in_the_holder_slot_is_still_not_a_holder(self) -> None:
+        """The T9-1A.1 guard is unaffected by the new recognition."""
+
+        query = f"{self.ISSUER} 최근 대량보유보고의 보유주식수는?"
+
+        self.assertIsNone(self.plan(query).reporter)

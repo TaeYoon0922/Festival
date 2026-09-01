@@ -9,6 +9,7 @@ from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
 from app.reasoning import holding_report_relative
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -281,7 +282,20 @@ class QueryUnderstanding:
                     or extracted.get("doc_group") not in {None, "holding"}
                 ),
             )
-        reporter = _find_reporter(raw_query)
+        # The named-holder shapes stay in precedence order: an explicitly
+        # labelled reporter, then the one this question relates to its issuer.
+        reporter = _find_reporter(raw_query) or _natural_holding_reporter(
+            raw_query, company_mentions, holding_metric=holding_metric
+        )
+        # Syntax's half of the role question: which surface stood in the actor
+        # slot.  Whether that surface names a holder of this issuer is a corpus
+        # question, and validation is where the corpus is readable.
+        actor_candidate = (
+            directed_holder_candidate(raw_query, company_mentions[0])
+            if ownership_evidence == "company_acquires_company_shares"
+            and len(company_mentions) == 1
+            else None
+        )
 
         if holding_metric or ownership_intent:
             task_type = "holding_change"
@@ -317,7 +331,7 @@ class QueryUnderstanding:
         # reference-date and receipt-date wording keep the axis it assigned.
         report_relative = (
             holding_report_relative.parse(
-                raw_query,
+                _latest_report_wording(raw_query),
                 date_semantics=date_semantics,
                 has_exact_date=bool(period.from_date and period.from_date == period.to_date),
             )
@@ -430,6 +444,7 @@ class QueryUnderstanding:
                 "event_type": event_evidence,
                 "operation": operation,
                 "holding_ownership_intent": ownership_evidence,
+                HOLDING_ACTOR_CANDIDATE_KEY: actor_candidate,
                 "periodic_intent": periodic_intent,
                 "periodic_intent_evidence": periodic_intent_evidence,
                 "correction_intent": correction_intent,
@@ -501,6 +516,118 @@ def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+#: A directed acquisition question names its acquirer in subject position.  The
+#: acquirer is matched as the *whole* subject and as a single token: anything
+#: else in front of the recognized company is structure this stage cannot bound.
+#: A leading legal form is part of the token, and ``canonical_reporter_key``
+#: removes it, so ``(주)가상인수자``, ``㈜가상인수자`` and ``가상인수자`` reduce to one acquirer.
+_HOLDER_SUBJECT = re.compile(
+    r"\s*(?P<holder>[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{1,31})"
+    r"\s*[이가]\s*"
+)
+#: Words that fill the subject slot without naming anybody.  Compared against
+#: the canonical holder key, never against raw text.
+_NON_HOLDER_SUBJECTS = frozenset(
+    {
+        "회사", "기업", "법인", "당사", "본사", "상대방",
+        "취득자", "매수자", "인수자", "보유자", "주주",
+        "어디", "누구", "그곳", "이곳", "어느곳",
+    }
+)
+#: A date or a quantity standing where an acquirer should.
+_BARE_PERIOD_SUBJECT = re.compile(r"\d+(?:년|월|일|분기|기|주)?")
+#: How a holding question attaches the holder it asks about to the issuer.  Only
+#: the relational bridges such a question actually uses, plus bare whitespace for
+#: the commonest shape (``<issuer> <holder>의 최근 보고``).  Whitespace is safe
+#: here only because the holder must also carry a possessive or subject particle
+#: below; without that requirement it would match any following word.
+_REPORTER_BRIDGE = r"(?:\s*에\s*(?:대|관)(?:한|해서?|하여)\s*|\s+)"
+#: A role noun may name the holder's standing before naming the holder itself.
+#: It is consumed, never returned: the holder is the name that follows it.
+_REPORTER_ROLE = r"(?:(?:최대|대|주요|지배)\s*주주\s+)?"
+#: A leading legal form is written as its own word.  It is kept in the surface
+#: rather than stripped: canonical identity is ``canonical_reporter_key``'s job,
+#: and this parser must not do that work a second time.
+_REPORTER_LEGAL_FORM = r"(?:(?:주식회사|유한회사|유한책임회사|재단법인|사단법인)\s+)?"
+#: One name token, with no internal whitespace.  The only multi-word holder
+#: accepted is a legal form followed by one token, which is why the legal form
+#: above is a separate group rather than part of this character class.
+_REPORTER_TOKEN = r"[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{0,31}"
+#: The holder must stand in a possessive or subject relation to the report.
+#: Object and topic particles are deliberately absent: with 을/를/은/는 accepted,
+#: ``보유주식수는`` and ``보유비율을`` would themselves read as holders.  The
+#: trailing space ends the surface, so the boundary is a token boundary rather
+#: than a guess about how much of the sentence belongs to the holder.
+_REPORTER_PARTICLE = r"\s*(?:의|이|가)\s"
+#: ``<issuer><bridge>[role ]<holder><particle>``, anchored at the end of the
+#: issuer mention.  The anchoring is the whole safety argument: the holder is
+#: read out of the issuer's own relational structure and never searched for in
+#: the sentence, so metrics, dates, document nouns and question suffixes
+#: elsewhere in the question can never be reached.
+_NATURAL_REPORTER = re.compile(
+    _REPORTER_BRIDGE
+    + _REPORTER_ROLE
+    + r"(?P<holder>"
+    + _REPORTER_LEGAL_FORM
+    + _REPORTER_TOKEN
+    + r")"
+    + _REPORTER_PARTICLE
+)
+#: Surfaces that fill the holder slot without naming a holder: a role, a bare
+#: document qualifier, or the requested quantity itself.  ``최대주주의 보유비율``
+#: names no holder, and reading the role noun as one would answer about nobody.
+#: The filing *names* themselves are not listed: they are a productive family,
+#: so ``_names_a_filing`` derives them instead of enumerating them.  Compared
+#: against the canonical key, never against raw text.
+_NON_REPORTER_SURFACES = _NON_HOLDER_SUBJECTS | frozenset(
+    {
+        "최대주주", "대주주", "주요주주", "지배주주", "소액주주", "특수관계자",
+        "지분", "지분율", "주식", "보유주식", "보유주식수", "보유비율", "보유수량",
+    }
+)
+#: The head noun that makes a phrase name a *filing* rather than a filer.  A
+#: filing name always ends in one of these; a holder's name does not.
+_REPORT_HEAD_NOUNS = ("보고서", "보고", "공시", "신고서", "신고")
+#: What a holding filing's own name is built out of, ahead of that head.  Same
+#: disclosure vocabulary ``_find_holding_metric`` already reads report titles
+#: with, kept as its own constant because this asks a different question of it:
+#: not "is this a holding question" but "is this surface the document".
+_REPORT_QUALIFIERS = (
+    "대량보유상황", "대량보유", "소유상황", "특정증권등소유", "특정증권등",
+    "임원주요주주", "주요주주", "임원", "주식등의", "주식등", "특수관계자", "소유",
+)
+#: The words that make a report the newest one.  These are the modifiers inside
+#: the frozen parser's own latest terms, which are written as one contiguous
+#: ``<modifier><head>`` string -- so a question that names the document between
+#: the two says the same thing in wording that parser cannot see.
+_LATEST_REPORT_MODIFIERS = ("최신", "최근", "마지막", "최종")
+#: ``최근 대량보유상황보고서`` -- a latest modifier, then this corpus's own holding
+#: document vocabulary, then the report head.  At least one qualifier is
+#: required, so ``최근 보고`` (already understood) is not touched and ``최근 계약``,
+#: ``최근 사업보고서`` and ``최근 실적`` are not holding-report wording at all: the
+#: qualifiers are the holding disclosure families and nothing else.
+_LATEST_HOLDING_REPORT = re.compile(
+    r"(?P<latest>" + "|".join(_LATEST_REPORT_MODIFIERS) + r")"
+    r"\s*(?:(?:" + "|".join(_REPORT_QUALIFIERS) + r")\s*)+"
+    r"(?P<head>" + "|".join(_REPORT_HEAD_NOUNS) + r")"
+)
+#: ``plan.evidence`` key carrying the actor a directed acquisition named, before
+#: anything corpus-aware has confirmed that such a holder exists.  Read by
+#: validation, which owns the identity question; never a reporter by itself.
+HOLDING_ACTOR_CANDIDATE_KEY = "holding_actor_candidate"
+#: What produced that candidate.  A consumer that cannot read this provenance
+#: has no business acting on the candidate.
+ACTOR_SOURCE_DIRECTED_HOLDER = "directed_holder_syntax"
+#: An acquisition unit price named outright: the price word bound directly to
+#: the acquisition word with nothing between them.  ``취득가액``, ``총 취득금액``
+#: and a bare ``단가`` all fail this on purpose.
+_ACQUISITION_UNIT_PRICE = re.compile(r"(?:취득|매수)단가")
+#: A disposal price is a different field.  A source column can be labelled
+#: 취득/처분단가, but only the row-level producer reads that header; a question
+#: that asks for the disposal side is asking a different question.
+_DISPOSAL_UNIT_PRICE = re.compile(r"(?:처분|매도|양도).{0,12}?단가")
+
+
 def _find_bounded_ownership_intent(
     query: str,
     companies: tuple[str, ...],
@@ -509,20 +636,26 @@ def _find_bounded_ownership_intent(
     comparison_frame: str | None,
     conflicting_intent: bool,
 ) -> tuple[bool, str | None, str | None, str | None]:
-    """Recognize closed two-company securities-ownership constructions.
+    """Recognize closed securities-ownership constructions.
 
     This classifier determines only the holding task family and, when the
     wording is explicit, its metric.  The canonical company tuple remains
     untouched: issuer/reporter direction belongs to validation and cannot be
     inferred from mention order here.
+
+    Two canonical mentions are the ordinary case.  A directed acquisition is
+    the one construction that also runs on a single mention, because the
+    acquirer it names is a holding-report filer and the company universe is
+    scoped to issuers -- see ``_directed_acquisition_from_unresolved_holder``.
     """
 
-    if (
-        len(companies) != 2
-        or len(mentions) != 2
-        or comparison_frame in {"cross_company", "uncertain"}
-        or conflicting_intent
-    ):
+    if comparison_frame in {"cross_company", "uncertain"} or conflicting_intent:
+        return False, None, None, None
+
+    if len(companies) == 1 and len(mentions) == 1:
+        return _directed_acquisition_from_unresolved_holder(query, mentions[0])
+
+    if len(companies) != 2 or len(mentions) != 2:
         return False, None, None, None
 
     (_first_start, first_end, _first), (second_start, second_end, _second) = mentions
@@ -530,6 +663,18 @@ def _find_bounded_ownership_intent(
     tail = re.sub(r"\s+", "", query[second_end:])
 
     family: str | None = None
+    acquisition_unit_price = (
+        _directed_acquisition_unit_price(tail)
+        if re.fullmatch(r"[이가]", gap)
+        else None
+    )
+    if acquisition_unit_price:
+        return (
+            True,
+            "acquisition_unit_price",
+            "company_acquires_company_shares",
+            acquisition_unit_price,
+        )
     if re.fullmatch(r"[이가]보유한", gap) and re.match(
         r"^주식(?:은|는|이|가|을|를)?", tail
     ):
@@ -553,7 +698,133 @@ def _find_bounded_ownership_intent(
     shares = re.search(r"몇\s*주|주식\s*수(?:량)?|보유\s*수량", query)
     if shares:
         return True, "holding_shares", family, shares.group(0)
+    # The holding family is already established, so an explicit acquisition
+    # unit-price noun phrase names the answer unit the same way 몇 주 and 지분율
+    # do above.  It stays a noun phrase: the price word has to be bound to the
+    # acquisition word, which is what separates it from 취득가액, 총 취득금액 and
+    # a bare 단가.
+    unit_price = _acquisition_unit_price_phrase(tail)
+    if unit_price:
+        return True, "acquisition_unit_price", family, unit_price
     return True, None, family, None
+
+
+def _directed_acquisition_from_unresolved_holder(
+    query: str,
+    mention: tuple[int, int, str],
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Recognize a directed acquisition whose acquirer no alias map can name.
+
+    The company universe is issuer-scoped, and a holding report's filer is an
+    asset manager, a fund, an individual or a foreign entity far more often
+    than it is one of those issuers.  So a real directed acquisition question
+    names one company this stage can canonicalize -- the issuer whose shares
+    were bought -- and one it never will.  Demanding two canonical mentions
+    asks this stage for corpus knowledge it does not have.
+
+    The acquirer is therefore bounded by *shape*, never resolved: it is the
+    whole subject of the sentence, and it is carried onward only as the
+    candidate ``directed_holder_candidate`` builds.  No company, no reporter
+    and no role is written from it, so issuer/reporter direction still belongs
+    entirely to validation.
+    """
+
+    _start, end, _canonical = mention
+    if directed_holder_candidate(query, mention) is None:
+        return False, None, None, None
+    evidence = _directed_acquisition_unit_price(re.sub(r"\s+", "", query[end:]))
+    if not evidence:
+        return False, None, None, None
+    return (
+        True,
+        "acquisition_unit_price",
+        "company_acquires_company_shares",
+        evidence,
+    )
+
+
+def directed_holder_candidate(
+    query: str,
+    mention: tuple[int, int, str],
+) -> dict[str, Any] | None:
+    """The acquirer a directed acquisition names, as syntax alone can see it.
+
+    Deliberately a *candidate*.  Syntax can prove that a surface stood in the
+    actor slot of a directed acquisition; it cannot prove that the surface is a
+    holder this corpus knows, and it must not claim to.  ``resolved`` stays
+    false until something that can read the corpus says otherwise.
+    """
+
+    start, _end, _canonical = mention
+    if start == 0:
+        return None
+    # ``_comparison_frame`` needs two canonical mentions to bind an operator,
+    # and an unresolved acquirer gives it only one.  Comparative or set
+    # vocabulary anywhere in the question therefore declines outright rather
+    # than passing an unchecked comparison into the holding lane.
+    if _has_comparison_vocabulary(query):
+        return None
+    subject = _HOLDER_SUBJECT.fullmatch(query[:start])
+    if subject is None:
+        return None
+    surface = subject.group("holder").strip()
+    key = canonical_reporter_key(surface)
+    if (
+        len(key) < 2
+        or key in _NON_HOLDER_SUBJECTS
+        or _BARE_PERIOD_SUBJECT.fullmatch(key)
+    ):
+        return None
+    return {
+        "surface": surface,
+        "reporter_key": key,
+        "source": ACTOR_SOURCE_DIRECTED_HOLDER,
+        "resolved": False,
+    }
+
+
+def _has_comparison_vocabulary(query: str) -> bool:
+    """Any wording ``_comparison_frame`` would weigh, read without operands."""
+
+    compact = re.sub(r"\s+", "", query)
+    return any(
+        term in compact
+        for group in (
+            _EXPLICIT_COMPARISON,
+            _CHOICE_MARKERS,
+            _ENUMERATION_MARKERS,
+            _COMPARATIVE_PREDICATES,
+            _COMPARISON_OPERATORS,
+        )
+        for term in group
+    )
+
+
+def _directed_acquisition_unit_price(tail: str) -> str | None:
+    """Match only a directed shares-acquisition request for a unit price."""
+
+    if not re.match(r"^주식(?:은|는|이|가|을|를)?", tail):
+        return None
+    # Query understanding activates only the acquisition side before the
+    # row-level producer interprets any source header.
+    if _DISPOSAL_UNIT_PRICE.search(tail):
+        return None
+    match = re.search(r"(?:취득|매수).{0,24}?단가", tail)
+    return match.group(0) if match else None
+
+
+def _acquisition_unit_price_phrase(tail: str) -> str | None:
+    """The acquisition unit price named as a noun phrase, if the tail names it.
+
+    Used where the holding family is already established by the construction
+    itself, so no acquisition verb has to carry the reading.  Only adjacency
+    counts: the price word bound to the acquisition word and nothing else.
+    """
+
+    if _DISPOSAL_UNIT_PRICE.search(tail):
+        return None
+    match = _ACQUISITION_UNIT_PRICE.search(tail)
+    return match.group(0) if match else None
 
 
 def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
@@ -632,6 +903,44 @@ def _routes(
     return ordered, confidence, evidence
 
 
+#: Wording that ties two dates together as the ends of one span.  A range says
+#: so; dates that merely both appear do not.
+_DATE_RANGE_MARKERS = ("부터", "까지", "사이", "~")
+
+
+def _states_one_date_range(
+    query: str, dates: Sequence[tuple[str | None, tuple[int, int]]]
+) -> bool:
+    """Whether these dates are the two ends of one span the question stated.
+
+    Several dates in one question are usually several *anchors*, not one
+    period: "A의 <date> 계약과 B의 <date> 계약 중 어느 쪽이 큰가" names one date
+    per item and no span at all.  Reading the first two as ``from``/``to``
+    invents a range the asker never asked for -- and when the earlier item
+    happens to carry the later date, it invents an inverted one, which is not a
+    period any more.
+
+    So a span has to be claimed rather than inferred.  Exactly two dates, said
+    to be a span, in the order a span runs.  Anything else keeps its dates and
+    leaves the period to the rest of this parser, which is what the itemized
+    lanes downstream read anyway.
+    """
+
+    if len(dates) != 2:
+        # Three anchors are not two ends.  Two ends is what a span has.
+        return False
+    (start, _start_span), (end, _end_span) = dates
+    if not start or not end:
+        return False
+    compact = re.sub(r"\s+", "", query)
+    if not any(marker in compact for marker in _DATE_RANGE_MARKERS):
+        return False
+    # A span runs forwards.  A backwards pair is not silently reordered -- the
+    # question did not say which end was meant, and guessing is how the wrong
+    # window gets searched.
+    return start <= end
+
+
 def _period_from_query(
     query: str,
     *,
@@ -670,7 +979,7 @@ def _period_from_query(
         )
     ]
     date_role, date_marker = _date_semantic_role(query, task_type)
-    if len(dates) >= 2:
+    if _states_one_date_range(query, dates):
         selected_spans = [span for _, span in dates[:2]]
         if date_role != "holding_reference":
             spans.extend(selected_spans)
@@ -1239,6 +1548,116 @@ def _find_reporter(query: str) -> str | None:
         return None
     value = match.group(1)
     return re.sub(r"^보고자\s*[:：]?\s*", "", value).strip()
+
+
+def _latest_report_wording(query: str) -> str:
+    """The question as the frozen report-relative parser can read its selector.
+
+    That parser recognizes "the newest report" as one contiguous string --
+    ``최신보고``, ``최근보고`` -- so naming the document in between (``최근 대량보유
+    보고 기준``) says exactly the same thing in wording it cannot see.  Dropping
+    the document's own qualifiers restores the adjacency and leaves the head
+    noun the parser is looking for.
+
+    Only the text handed to that one parser is rewritten; ``raw_query`` is what
+    every other stage still reads.  The rewrite is deliberately not a selector
+    decision: which report the wording then names, and whether an explicit date
+    outranks it, stay entirely that parser's answers.  An exact date still wins,
+    because it is tested before any latest term.
+    """
+
+    return _LATEST_HOLDING_REPORT.sub(r"\g<latest>\g<head>", query)
+
+
+def _names_a_filing(key: str) -> bool:
+    """Whether a canonical surface names the filing rather than the filer.
+
+    A holding question can put the document in the same relational slot the
+    holder occupies -- ``<issuer> 대량보유보고의 보유주식수`` asks about a filing,
+    not about anybody -- and reading the document as a holder invents a filer
+    the question never named.
+
+    Decided by composition, not by containment: the surface names a filing when
+    *all* of it is disclosure vocabulary -- qualifiers, optionally closed by a
+    head noun.  So ``대량보유상황보고서`` and ``주식등의대량보유상황보고서`` are filings,
+    and so is a bare fragment such as ``주식등``, which is what a spaced document
+    name leaves in the holder slot.  A holder whose name merely ends in one of
+    those words is not: ``보고펀드`` keeps its head elsewhere and ``대한보고`` has a
+    stem no qualifier explains, so both survive as reporters.
+    """
+
+    stem = key
+    for head in _REPORT_HEAD_NOUNS:
+        if stem.endswith(head):
+            stem = stem[: -len(head)]
+            break
+    while stem:
+        for qualifier in _REPORT_QUALIFIERS:
+            if stem.endswith(qualifier):
+                stem = stem[: -len(qualifier)]
+                break
+        else:
+            # Something no disclosure qualifier accounts for.  That is a name.
+            return False
+    # Nothing was left over, so the surface was the document all the way down.
+    # ``key`` is never empty here: the caller rejects a surface shorter than two
+    # characters before this runs.
+    return True
+
+
+def _natural_holding_reporter(
+    query: str,
+    mentions: tuple[tuple[int, int, str], ...],
+    *,
+    holding_metric: str | None,
+) -> str | None:
+    """The holder a holding question names in relation to its issuer.
+
+    Additive to :func:`_find_reporter`, which keeps its own two shapes.  This
+    reads the one construction that names a holder the company universe cannot
+    canonicalize -- an individual, a fund, a foreign entity -- and which is
+    therefore invisible to company-mention extraction.
+
+    Bounded by structure, not by vocabulary.  A surface qualifies only when the
+    question names exactly one corpus company, asks a holding-metric question
+    about it, and attaches the surface to that company through a possessive or
+    subject relation.  Two named companies are never read this way: an
+    issuer/reporter role pair is a corpus question, and
+    ``HoldingCompanyRoleResolver`` is what answers it.
+
+    The returned value is the surface as written.  Whether it names a holder
+    this corpus knows is decided downstream by ``canonical_reporter_key`` and
+    the report index, and this function must not anticipate that answer.
+    """
+
+    if holding_metric is None:
+        # Not a holding-metric question.  A possessive phrase in a financial or
+        # event question names something else entirely.
+        return None
+    if len(mentions) != 1:
+        # No issuer to be relative to, or two companies -- which is a role pair
+        # or a comparison, and neither is this parser's to interpret.
+        return None
+    if _has_comparison_vocabulary(query):
+        # Comparative or per-company wording puts more than one subject in play.
+        # ``_comparison_frame`` cannot bind an operator with a single canonical
+        # mention, so declining outright is the only fail-closed reading.
+        return None
+
+    _start, end, _canonical = mentions[0]
+    match = _NATURAL_REPORTER.match(query, end)
+    if match is None:
+        return None
+    surface = match.group("holder").strip()
+    key = canonical_reporter_key(surface)
+    if (
+        len(key) < 2
+        or key in _NON_REPORTER_SURFACES
+        or _names_a_filing(key)
+        or _BARE_PERIOD_SUBJECT.fullmatch(key)
+    ):
+        return None
+    return surface
 
 
 def _operation_from_query(

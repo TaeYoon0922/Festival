@@ -90,6 +90,12 @@ _QUERY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     # "취득 수량", "취득수량", "취득 주식수", "취득주식수".
     "acquired_shares": (r"취득\s*수량", r"취득\s*주식\s*수"),
 }
+#: The unit price is acquisition language this module deliberately cannot
+#: answer: ``holding_acquisition`` keeps the "취득/처분단가" column out of every
+#: extracted quantity and method.  It is recognised here only so callers can
+#: tell that a question is about an acquisition, never as a requested field --
+#: which is why it is absent from ``_QUERY_FIELD_ALIASES`` above.
+_ACQUISITION_SEMANTIC_PATTERNS = (r"취득\s*(?:/\s*처분\s*)?단가",)
 _QUERY_FIELD_CANONICAL = {
     "direction": "change_direction",
     "보고자/보유자": "reporter",
@@ -694,6 +700,74 @@ def _resolve_candidates(
     )
 
 
+#: The holding as it currently stands, reported the way the filing reports it:
+#: a share count and a ratio together, under one 합계.
+CURRENT_HOLDING_STATE_FIELDS = ("after_shares", "after_ratio")
+
+#: Bounded two-company ownership families published by the frozen query
+#: grammar at ``plan.evidence["holding_ownership_intent"]``.  Read here, never
+#: restated: this module consumes that decision rather than re-deriving it.
+_OWNERSHIP_FAMILIES = frozenset(
+    {
+        "company_holds_company_shares",
+        "company_has_company_shares",
+        "company_ownership_interest",
+    }
+)
+
+#: ``얼마나`` names a degree, not a unit.  These are the only predicates that
+#: make it a question about the holding as it now stands.
+_STATIVE_POSSESSION = (
+    # A closed set of ``되다`` endings.  ``되`` also opens compound verbs --
+    # 되팔다, 되사다, 되돌려받다, 되찾다 -- which are transactions, not states,
+    # so the stem is never accepted on its own: it must be followed either by
+    # one of these endings or by nothing further in the word.  The negative
+    # lookahead is what separates an ending from a following verb stem.
+    r"얼마나\s*(?:돼요?|됩니(?:까|다)|되(?:나요?|는지|죠|냐)?(?![가-힣]))",
+    r"얼마나[^?]{0,14}(?:들고|가지고)\s*(?:있|계)",
+    r"얼마나[^?]{0,14}보유\s*(?:하고\s*(?:있|계)|중)",
+)
+
+#: The same adverb attached to a different quantity.  Every one of these was
+#: observed entering an ownership family during diagnosis, so each is refused
+#: by name rather than left for the positive list to happen to miss.
+_NON_STATIVE_PREDICATES = (
+    r"매각|처분|취득|인수|양수|양도",
+    # 늘다/줄다 in both their plain and causative inflections: 늘었, 늘려(서),
+    # 늘렸 and the 줄- equivalents all describe a change, not a current state.
+    r"늘[었어난려렸]|줄[었어든여였]|증가|감소|증감|변동",
+    r"가치|금액|얼마\s*짜리",
+    r"오래|기간|언제부터",
+)
+
+#: ``지분`` heads an ownership family only as a bare noun.  These compounds are
+#: separate financial concepts the family's prefix match would otherwise admit.
+_OWNERSHIP_COMPOUNDS = (r"지분증권", r"비지배지분", r"지분법")
+
+
+def _generic_current_holding_amount(question: str, plan: Mapping[str, Any]) -> bool:
+    """Whether this asks, in generic terms, for the holding as it now stands.
+
+    The frozen grammar deliberately leaves ``metric`` unset when a question
+    says only "얼마나": the word selects no unit, and the filing itself answers
+    it with a share count and a ratio together.  This recognises that narrow
+    case so both can be requested, and refuses the neighbouring questions that
+    borrow the same adverb for a different quantity.
+    """
+
+    if _text(plan.get("metric")):
+        return False
+    family = _nested(plan, "evidence", "holding_ownership_intent")
+    if str(family or "") not in _OWNERSHIP_FAMILIES:
+        return False
+    text = str(question or "")
+    if any(re.search(pattern, text) for pattern in _OWNERSHIP_COMPOUNDS):
+        return False
+    if any(re.search(pattern, text) for pattern in _NON_STATIVE_PREDICATES):
+        return False
+    return any(re.search(pattern, text) for pattern in _STATIVE_POSSESSION)
+
+
 def _requested_fields(question: str, plan: Mapping[str, Any]) -> tuple[str, ...]:
     requested: list[str] = []
     configured = (
@@ -721,7 +795,37 @@ def _requested_fields(question: str, plan: Mapping[str, Any]) -> tuple[str, ...]
         field in requested for field in ("before_shares", "change_shares", "after_shares")
     ):
         requested.append("after_shares")
+    elif not any(
+        field in requested
+        for field in (
+            "before_shares", "change_shares", "after_shares",
+            "before_ratio", "change_ratio", "after_ratio",
+        )
+    ) and _generic_current_holding_amount(question, plan):
+        # No unit was named and none was inferred: ask for the pair the filing
+        # publishes together, rather than guessing which half was meant.
+        requested.extend(CURRENT_HOLDING_STATE_FIELDS)
     return tuple(requested)
+
+
+def has_acquisition_semantics(question: str, plan: Mapping[str, Any]) -> bool:
+    """Whether a question belongs to the holding acquisition family.
+
+    Wider than the acquisition fields this resolver can answer: it also covers
+    the acquisition unit price, which the row parser deliberately excludes from
+    every extracted quantity.  So a true result proves what the question is
+    about, never that the answer exists.  Callers use it as an intent firewall,
+    keeping acquisition wording from being reinterpreted as something else.
+
+    The answerable half is read through ``_requested_fields`` rather than a
+    second copy of its patterns, so this predicate cannot drift from it.
+    """
+
+    text = str(question or "")
+    if any(re.search(pattern, text) for pattern in _ACQUISITION_SEMANTIC_PATTERNS):
+        return True
+    requested = _requested_fields(text, dict(plan or {}))
+    return any(field in _ACQUISITION_FIELD_NAMES for field in requested)
 
 
 def _requested_direction(question: str) -> str | None:

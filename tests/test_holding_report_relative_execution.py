@@ -27,6 +27,7 @@ from app.reasoning.holding_report_index import (
     HoldingReportRecord,
     load_index,
 )
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.holding_report_relative_execution import (
     PROJECTION_CHUNK_AMBIGUOUS,
     PROJECTION_CHUNK_MISSING,
@@ -933,3 +934,264 @@ class RepositoryWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NaturalReporterEntersPhase3Tests(unittest.TestCase):
+    """A naturally named holder supplies the identity this lane already needed.
+
+    The selector, the index, the ordering and the projection are all unchanged
+    here.  What changes upstream is only that ``plan.reporter`` is populated for
+    a holder the company universe cannot canonicalize, which is the one input
+    the lane was missing.  Nothing in this module is modified to make these
+    pass.
+    """
+
+    HOLDER = "가상보유인"
+
+    def records(self):
+        older = replace(
+            OLD, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_natural_old",
+            projection_chunk_id="holding_natural_old:report",
+        )
+        newer = replace(
+            NEW, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_natural_new",
+            projection_chunk_id="holding_natural_new:report",
+        )
+        return older, newer
+
+    def test_a_natural_holder_reaches_the_authoritative_lane(self) -> None:
+        older, newer = self.records()
+        question = f"{COMPANY}에 대한 {self.HOLDER}의 최신 보고 보유주식수는?"
+        query_plan = plan(question)
+
+        # The upstream fix, stated as the precondition this lane depends on.
+        self.assertEqual(query_plan.reporter, self.HOLDER)
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            # Rank order is deliberately the wrong way round: the lane must
+            # answer by enumeration, not from what retrieval put first.
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+        self.assertEqual(outcome.selected_chunk_id, newer.projection_chunk_id)
+
+    def test_the_role_noun_shape_reaches_the_same_report(self) -> None:
+        older, newer = self.records()
+        question = (
+            f"{COMPANY} 최대주주 {self.HOLDER}의 가장 최근 보고 기준 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertEqual(query_plan.reporter, self.HOLDER)
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+
+    def test_an_issuer_without_a_named_holder_stays_outside_phase_3(self) -> None:
+        older, newer = self.records()
+        question = f"{COMPANY} 최신 보고 보유주식수는?"
+        query_plan = plan(question)
+
+        self.assertIsNone(query_plan.reporter)
+        self.assertIsNone(
+            adapter(index_of(older, newer)).adapt(
+                question,
+                query_plan,
+                execution(query_plan, candidate(older)),
+                routed_task_type="holding_event",
+            )
+        )
+
+    def test_a_natural_surface_still_has_to_match_the_index_identity(self) -> None:
+        """Extraction is not identity.  Strict canonical matching still decides."""
+
+        older, newer = self.records()
+        question = f"{COMPANY}에 대한 가상보유{'인이다'}의 최신 보고 보유주식수는?"
+        query_plan = plan(question)
+
+        self.assertIsNotNone(query_plan.reporter)
+        self.assertNotEqual(
+            canonical_reporter_key(query_plan.reporter),
+            canonical_reporter_key(self.HOLDER),
+        )
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertNotEqual(outcome.status, RESOLVED)
+        self.assertFalse(outcome.resolved)
+        self.assertEqual(outcome.results, ())
+
+
+class DocumentNounNeverStealsPhase3Tests(unittest.TestCase):
+    """A filing named in the holder slot must not open the authoritative lane.
+
+    The lane gates on a named holder.  A document read as one satisfies that
+    gate with an identity the corpus cannot match, so the lane engages, finds
+    nothing, and -- because an engaged lane is authoritative -- the ordinary
+    path that was answering the question never runs.  The holder staying
+    unresolved is what leaves that path in place.
+    """
+
+    def test_a_filing_noun_leaves_the_question_outside_phase_3(self) -> None:
+        question = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{COMPANY} 대량보유보고의 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertIsNone(query_plan.reporter)
+        self.assertEqual(query_plan.period.period_type, "receipt_date")
+        self.assertIsNone(
+            adapter(index_of(OLD, NEW)).adapt(
+                question,
+                query_plan,
+                execution(query_plan, candidate(OLD)),
+                routed_task_type="holding_event",
+            )
+        )
+
+    def test_a_named_holder_on_the_same_axis_still_enters(self) -> None:
+        """Control: the guard rejects documents, not the receipt-date lane."""
+
+        holder = "가상보유인"
+        older = replace(
+            OLD, reporter_key=holder, raw_reporter=holder,
+            doc_id="holding_axis_old", projection_chunk_id="holding_axis_old:report",
+        )
+        newer = replace(
+            NEW, reporter_key=holder, raw_reporter=holder,
+            doc_id="holding_axis_new", projection_chunk_id="holding_axis_new:report",
+        )
+        question = (
+            f"{COMPANY}에 대한 {holder}의 "
+            f"{newer.receipt_date[:4]}년 {int(newer.receipt_date[4:6])}월 "
+            f"{int(newer.receipt_date[6:])}일 접수 보고서 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertEqual(query_plan.reporter, holder)
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+
+
+class LatestHoldingDocumentWordingEntersPhase3Tests(unittest.TestCase):
+    """Naming the document must reach the same report as not naming it.
+
+    Nothing in this module changes: the selector is still ``latest``, the index
+    still orders by reference date, and the projection is still the one that
+    report carries.  What is new upstream is only that the wording is
+    recognized, so the two phrasings have to land on the same filing.
+    """
+
+    HOLDER = "가상보유인"
+
+    def records(self):
+        older = replace(
+            OLD, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_doc_old", projection_chunk_id="holding_doc_old:report",
+        )
+        newer = replace(
+            NEW, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_doc_new", projection_chunk_id="holding_doc_new:report",
+        )
+        return older, newer
+
+    def outcome(self, question, older, newer):
+        query_plan = plan(question)
+        return query_plan, adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            # Rank order inverted on purpose: the answer must come from
+            # enumeration, never from what retrieval happened to put first.
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+    def test_the_document_wording_reaches_the_latest_report(self) -> None:
+        older, newer = self.records()
+        question = (
+            f"{COMPANY} {self.HOLDER}의 최근 대량보유보고 기준 보유주식수는?"
+        )
+
+        query_plan, outcome = self.outcome(question, older, newer)
+
+        self.assertEqual(query_plan.reporter, self.HOLDER)
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+        self.assertEqual(outcome.selected_chunk_id, newer.projection_chunk_id)
+
+    def test_both_phrasings_select_the_same_report(self) -> None:
+        older, newer = self.records()
+        with_document = (
+            f"{COMPANY} {self.HOLDER}의 최근 대량보유보고 기준 보유주식수는?"
+        )
+        plain = f"{COMPANY} {self.HOLDER}의 최근 보고 기준 보유주식수는?"
+
+        _plan_a, first = self.outcome(with_document, older, newer)
+        _plan_b, second = self.outcome(plain, older, newer)
+
+        self.assertEqual(first.status, second.status)
+        self.assertEqual(
+            first.report_execution.record.doc_id,
+            second.report_execution.record.doc_id,
+        )
+        self.assertEqual(first.selected_chunk_id, second.selected_chunk_id)
+        self.assertEqual(
+            first.report_execution.selection.selector,
+            second.report_execution.selection.selector,
+        )
+
+    def test_an_exact_receipt_question_is_still_not_taken(self) -> None:
+        """The T9-1A.1 repair holds with a latest word in the sentence."""
+
+        older, newer = self.records()
+        question = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{COMPANY} 최근 대량보유보고의 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertIsNone(query_plan.reporter)
+        self.assertEqual(query_plan.period.period_type, "receipt_date")
+        self.assertIsNone(
+            adapter(index_of(older, newer)).adapt(
+                question,
+                query_plan,
+                execution(query_plan, candidate(older)),
+                routed_task_type="holding_event",
+            )
+        )

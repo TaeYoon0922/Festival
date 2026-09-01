@@ -19,14 +19,22 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from app.reasoning.holding_company_role_resolution import (
+    ROLE_PATH_FILER,
     ROLE_PROVENANCE_KEY,
     HoldingCompanyRoleResolver,
     role_provenance,
 )
-from app.reasoning.holding_evidence_coverage import requested_holding_fields
+from app.reasoning.holding_evidence_coverage import (
+    CURRENT_HOLDING_STATE_FIELDS,
+    requested_holding_fields,
+)
 from app.reasoning.holding_report_relative_execution import ACQUISITION_REQUEST_FIELDS
 from app.reasoning.holding_reporter import reporter_matches
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
+from app.reasoning.query_understanding import (
+    ACTOR_SOURCE_DIRECTED_HOLDER,
+    HOLDING_ACTOR_CANDIDATE_KEY,
+)
 
 
 class QueryState(str, Enum):
@@ -163,6 +171,29 @@ def _comparison_firewall_engaged(plan: QueryPlan) -> bool:
     return plan.evidence.get("comparison_frame") in _COMPARISON_FIREWALL_FRAMES
 
 
+def _generic_holding_amount_request(plan: QueryPlan) -> tuple[str, ...] | None:
+    """The current-state pair, when the shared request parser proves it.
+
+    Whether the wording is a generic present-tense possession question is
+    decided once, inside the holding request parser; this only reads the
+    result.  Any other tuple -- previous, change, acquisition, or half a pair
+    -- leaves the metric slot missing, so a question that named no unit and
+    asked for something else cannot slip through on non-emptiness alone.
+
+    The returned value is an internal slot filler.  ``QueryPlan.metric`` stays
+    ``None`` and no new metric name reaches the plan or the public contract.
+    """
+
+    if plan.metric:
+        return None
+    if not str(plan.evidence.get("holding_ownership_intent") or ""):
+        return None
+    requested = requested_holding_fields(str(plan.raw_query or ""), plan)
+    if requested != CURRENT_HOLDING_STATE_FIELDS:
+        return None
+    return requested
+
+
 def _holding_company_role_resolution_allowed(plan: QueryPlan) -> bool:
     """Whether a two-company plan may consult the holding relation corpus."""
 
@@ -183,6 +214,49 @@ def _holding_company_role_resolution_allowed(plan: QueryPlan) -> bool:
         return False
     requested = requested_holding_fields(str(plan.raw_query or ""), plan)
     return not ACQUISITION_REQUEST_FIELDS.intersection(requested)
+
+
+def _holding_filer_resolution_allowed(plan: QueryPlan) -> bool:
+    """Whether a one-company plan may look this issuer's own filers up.
+
+    The same holding-only gates as the two-company relation, with the operand
+    count inverted: exactly one company was recognizable, which is what a
+    question naming an issuer and a filer looks like when the universe holds
+    only issuers.  A reporter the asker's own wording already produced keeps
+    its pre-existing behaviour and is never overwritten here.
+    """
+
+    if len(plan.companies) != 1 or len(plan.corp_codes) != 1:
+        return False
+    if plan.reporter:
+        return False
+    if plan.task_type != "holding_change":
+        return False
+    if tuple(plan.disclosure_route) != ("holding",):
+        return False
+    if plan.event_type:
+        return False
+    if (
+        isinstance(plan.comparison, Mapping)
+        and plan.comparison.get("type") == "company_comparison"
+    ):
+        return False
+    if _comparison_firewall_engaged(plan):
+        return False
+    return bool(_directed_actor_surface(plan))
+
+
+def _directed_actor_surface(plan: QueryPlan) -> str:
+    """The actor surface query understanding recorded, if it recorded one."""
+
+    candidate = dict(plan.evidence or {}).get(HOLDING_ACTOR_CANDIDATE_KEY)
+    if not isinstance(candidate, Mapping):
+        return ""
+    if candidate.get("source") != ACTOR_SOURCE_DIRECTED_HOLDER:
+        return ""
+    if candidate.get("resolved"):
+        return ""
+    return str(candidate.get("surface") or "").strip()
 
 
 @dataclass(frozen=True)
@@ -553,7 +627,13 @@ class QueryValidator:
         issues.extend(conflicts)
 
         period_value = _period_value(normalized_plan)
-        metric_value = normalized_plan.metric
+        # A generic ownership question names no unit, so the plan carries no
+        # metric and must keep carrying none.  The slot is still satisfiable:
+        # the request parser can prove the question asks for the current-state
+        # pair, and that proof fills the slot without renaming the metric.
+        metric_value = normalized_plan.metric or _generic_holding_amount_request(
+            normalized_plan
+        )
         correction_intent = normalized_plan.evidence.get("correction_intent")
         set_intent = _set_intent(question, multi_plan)
         requested_state = _requested_state(question, multi_plan)
@@ -786,15 +866,18 @@ class QueryValidator:
                 if canonical != company:
                     plan = replace(plan, companies=(canonical,))
                     company = canonical
+            plan = self._bind_named_filer(plan)
             return _deterministic_slot("company", company), None, plan
         if self.corpus_scope is not None:
             resolved = self.corpus_scope.resolve_company(company)
             if resolved:
                 canonical, corp_code = resolved
-                normalized = replace(
-                    plan,
-                    companies=(canonical,),
-                    corp_codes=(corp_code,),
+                normalized = self._bind_named_filer(
+                    replace(
+                        plan,
+                        companies=(canonical,),
+                        corp_codes=(corp_code,),
+                    )
                 )
                 return _deterministic_slot("company", canonical), None, normalized
 
@@ -806,6 +889,37 @@ class QueryValidator:
                 )
             return _deterministic_slot("company", company), "company_out_of_corpus", plan
         return _deterministic_slot("company", company), None, plan
+
+    def _bind_named_filer(self, plan: QueryPlan) -> QueryPlan:
+        """Turn a named actor into this issuer's proven filer, or leave it be.
+
+        The plan arrives with an issuer the corpus resolved and a surface that
+        stood in the actor slot of a directed acquisition.  Only the corpus can
+        say whether that surface is one of this issuer's holders, so that is
+        the single question asked here, through the same index the two-company
+        relation uses.  An unknown or ambiguous filer changes nothing: the plan
+        keeps ``reporter=None`` and no provenance, which is what every holding
+        path already does for a question that named no holder.  Inventing one
+        would answer with some other holder's position.
+        """
+
+        if self.holding_company_role_resolver is None:
+            return plan
+        if not _holding_filer_resolution_allowed(plan):
+            return plan
+        role = self.holding_company_role_resolver.resolve_filer(
+            plan.companies[0], plan.corp_codes[0], _directed_actor_surface(plan)
+        )
+        if not role.resolved:
+            return plan
+        return replace(
+            plan,
+            reporter=str(role.reporter),
+            evidence={
+                **plan.evidence,
+                ROLE_PROVENANCE_KEY: role_provenance(role, path=ROLE_PATH_FILER),
+            },
+        )
 
     def _time_scope_issue(
         self,

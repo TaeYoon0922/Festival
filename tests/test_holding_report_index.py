@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from app.reasoning import holding_report_relative as report_relative
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.holding_report_index import (
     AMBIGUOUS,
     ARTIFACT_SCHEMA_VERSION,
@@ -1059,3 +1060,79 @@ class GenericTimelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReporterEnumerationTests(unittest.TestCase):
+    """Which holders this corpus records for one issuer, and nobody else's.
+
+    The filer of a holding report is usually outside an issuer-scoped company
+    universe, so a question naming one can only be checked against the holders
+    the corpus itself records.  This enumeration is that list, and it is worth
+    nothing unless it stays inside the issuer asked about.
+    """
+
+    HOLDER = "가상지주"
+    HOLDER_LEGAL_FORM = "(주)가상지주"
+    PENSION = "가상연금"
+    OTHER_HOLDER = "가상제삼사"
+
+    def setUp(self) -> None:
+        self.index = index_of(
+            # One holder, two filings, and a second spelling of the same name.
+            record(
+                reporter_key=canonical_reporter_key(self.HOLDER),
+                raw_reporter=self.HOLDER,
+                doc_id="holding_a1",
+                projection_chunk_id="holding_a1:ch_1",
+                reference_date="20240101",
+            ),
+            record(
+                reporter_key=canonical_reporter_key(self.HOLDER_LEGAL_FORM),
+                raw_reporter=self.HOLDER_LEGAL_FORM,
+                doc_id="holding_a2",
+                projection_chunk_id="holding_a2:ch_1",
+                reference_date="20240301",
+            ),
+            record(
+                reporter_key=canonical_reporter_key(self.PENSION),
+                raw_reporter=self.PENSION,
+                doc_id="holding_a3",
+                projection_chunk_id="holding_a3:ch_1",
+                reference_date="20240201",
+            ),
+            # A different issuer's holder, which this issuer must never see.
+            record(
+                issuer_corp_code=OTHER_ISSUER,
+                reporter_key=canonical_reporter_key(self.OTHER_HOLDER),
+                raw_reporter=self.OTHER_HOLDER,
+                doc_id="holding_b1",
+                projection_chunk_id="holding_b1:ch_1",
+                reference_date="20240101",
+            ),
+        )
+
+    def test_enumerate_reporters_is_issuer_scoped_and_deterministic(self) -> None:
+        first = self.index.enumerate_reporters(ISSUER)
+
+        # Canonical-key order, so two runs enumerate the corpus identically.
+        self.assertEqual(first, (self.PENSION, self.HOLDER))
+        self.assertEqual(first, self.index.enumerate_reporters(ISSUER))
+        # Two spellings of one holder are one holder, not two.
+        self.assertNotIn(self.HOLDER_LEGAL_FORM, first)
+        self.assertEqual(len(first), 2)
+        # No other issuer's holder leaks in, in either direction.
+        self.assertNotIn(self.OTHER_HOLDER, first)
+        self.assertEqual(
+            self.index.enumerate_reporters(OTHER_ISSUER), (self.OTHER_HOLDER,)
+        )
+        for absent in (self.HOLDER, self.PENSION):
+            self.assertNotIn(absent, self.index.enumerate_reporters(OTHER_ISSUER))
+
+    def test_unknown_or_empty_issuer_enumerates_nothing(self) -> None:
+        for label, code in (
+            ("unknown", "00009999"),
+            ("empty", ""),
+            ("whitespace", "   "),
+        ):
+            with self.subTest(issuer=label):
+                self.assertEqual(self.index.enumerate_reporters(code), ())

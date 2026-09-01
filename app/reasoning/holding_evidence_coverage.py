@@ -30,17 +30,49 @@ from itertools import combinations
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.evidence_builder import _evidence_item, _normalize_date
+from app.reasoning.holding_acquisition import DETAIL_PROJECTION, acquisition_facts
 from app.reasoning.holding_event_resolver import (
+    CURRENT_HOLDING_STATE_FIELDS,
     _FIELD_LABELS,
     _field_candidate,
     _normalize_text,
     _requested_fields,
+    has_acquisition_semantics,
 )
+from app.reasoning.holding_date_intent import exact_reference_date
+# Aliased on purpose.  This module already defines a ``requested_holding_fields``
+# answering "which resolver state fields did the question ask for"; the field
+# lane's function of the same name answers "which canonical answer field did it
+# ask for".  They are different questions and must not read as the same call.
+from app.reasoning.holding_field_evidence import (
+    ACQUISITION_UNIT_PRICE,
+    requested_holding_fields as requested_answer_fields,
+)
+from app.reasoning.holding_report_index import (
+    SELECTOR_EXACT_REFERENCE_DATE,
+    HoldingReportIndex,
+    HoldingReportRecord,
+)
+from app.reasoning.holding_reporter import canonical_reporter_key, reporter_matches
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
 #: The structured holding projections a rescue may promote.
 HOLDING_PROJECTION_TYPES = ("holding_detail_row", "holding_report")
+
+#: An internal coverage requirement, never a public answer field.  It means one
+#: thing: the frozen acquisition parser can prove an acquisition from this
+#: structural detail row.  A question that asks for an acquisition unit price
+#: needs such a row served, and no holding *state* field implies one -- a report
+#: projection can carry every share count the resolver reads and still prove no
+#: acquisition, which is how a served-and-covered request reached the resolver
+#: with nothing to resolve.
+ACQUISITION_PROOF = "acquisition_proof"
+
+#: Recorded when the acquisition lane appended proof rows.
+RESCUE_MODE_ACQUISITION_PROOF = "acquisition_proof"
+#: The acquisition lane ran and found no bounded proving row.
+STATUS_NO_ACQUISITION_PROOF = "no_acquisition_proof_candidate"
 
 #: Statuses recorded on the assessment, for diagnostics.
 STATUS_NOT_HOLDING = "not_holding_execution"
@@ -52,11 +84,33 @@ STATUS_NO_ANCHOR = "no_anchored_candidate"
 STATUS_RESCUED = "rescued"
 STATUS_PARTIAL = "rescued_partial_coverage"
 
+#: Internal diagnostic identifying which existing coverage path promoted rows.
+RESCUE_MODE_SERVED_ANCHOR = "served_anchor"
+RESCUE_MODE_CONTRACT_D = "contract_d"
+
 #: How firmly a candidate is tied to evidence retrieval already served.
 ANCHOR_STRONG = "strong"
 ANCHOR_MEDIUM = "medium"
 #: Strong outranks medium at the same served anchor.
 _ANCHOR_ORDER = {ANCHOR_STRONG: 0, ANCHOR_MEDIUM: 1}
+
+#: The acquisition lane's own anchor, and only its own.  A detail row's
+#: structural date is the day the shares changed hands; a report projection's
+#: is the day the position was reported, and a real acquisition normally
+#: precedes its own report.  The generic tiers compare those two dates to
+#: decide whether both items describe one event, which is right for completing
+#: a position and wrong here -- it would refuse nearly every acquisition for
+#: being older than the filing that reports it.  Named separately so a trace
+#: never reads an acquisition anchor as a generic one.
+ANCHOR_ACQUISITION_DOCUMENT = "acquisition_document"
+#: Preference within the acquisition lane.  A row that also satisfies a generic
+#: tier keeps saying so; the document anchor is the weakest and the fallback.
+#: Deliberately separate from ``_ANCHOR_ORDER``, which ordinary coverage owns.
+_ACQUISITION_ANCHOR_ORDER = {
+    ANCHOR_STRONG: 0,
+    ANCHOR_MEDIUM: 1,
+    ANCHOR_ACQUISITION_DOCUMENT: 2,
+}
 
 #: Projection labels that describe the holding event itself. A source ref is
 #: only an event anchor when it backs one of these; a ref backing document
@@ -91,6 +145,7 @@ class CoverageAssessment:
     results: tuple[RetrievalResult, ...] = ()
     evaluated: bool = False
     anchored_candidate_count: int = 0
+    rescue_mode: str | None = None
     #: (chunk_id, anchor tier, served rank of the item it completes)
     anchors: tuple[tuple[str, str, int], ...] = ()
 
@@ -111,6 +166,7 @@ class CoverageAssessment:
             "displaced_chunk_ids": list(self.displaced),
             "remaining_unresolved_fields": list(self.remaining_unresolved),
             "anchored_candidate_count": self.anchored_candidate_count,
+            "rescue_mode": self.rescue_mode,
             "anchors": [
                 {"chunk_id": chunk_id, "tier": tier, "served_rank": rank}
                 for chunk_id, tier, rank in self.anchors
@@ -127,6 +183,20 @@ def requested_holding_fields(question: str, plan: Any) -> tuple[str, ...]:
 
     mapping = plan.to_dict() if hasattr(plan, "to_dict") else plan
     return _requested_fields(str(question or ""), dict(mapping or {}))
+
+
+def has_holding_acquisition_semantics(question: str, plan: Any) -> bool:
+    """Whether this question is acquisition-family language.
+
+    Delegates to the resolver's own acquisition authority for the same reason
+    the coverage check drives its field reader: an upstream firewall and the
+    resolver must not disagree about what an acquisition question looks like.
+    A true result is an intent signal only -- it does not mean the acquisition
+    is answerable, and the unit price in particular is not.
+    """
+
+    mapping = plan.to_dict() if hasattr(plan, "to_dict") else plan
+    return has_acquisition_semantics(str(question or ""), dict(mapping or {}))
 
 
 def holding_projection_type(chunk: Mapping[str, Any]) -> str | None:
@@ -215,6 +285,59 @@ def _all_refs(chunk: Mapping[str, Any]) -> set[tuple[Any, Any, Any]]:
     return refs
 
 
+def _row_union(
+    refs: set[tuple[Any, Any, Any]]
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    """Which rows of each table these refs cover, as one canonical form.
+
+    Row ranges are closed intervals, and the same rows can be written either
+    per row or as a span.  Merging overlapping and directly adjacent intervals
+    reduces both encodings to the identical answer, so two items can be
+    compared on the rows they actually cover rather than on how those rows
+    happened to be recorded.
+    """
+
+    by_table: dict[str, list[tuple[int, int]]] = {}
+    for table_id, start, end in refs:
+        if not table_id or not isinstance(start, int) or not isinstance(end, int):
+            continue
+        if isinstance(start, bool) or isinstance(end, bool) or end < start:
+            continue
+        by_table.setdefault(str(table_id), []).append((start, end))
+
+    canonical: dict[str, tuple[tuple[int, int], ...]] = {}
+    for table_id, spans in by_table.items():
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            # ``start <= last_end + 1`` merges touching spans too: rows 2-3 and
+            # 4-5 cover 2-5, while a gap at row 4 must stay two spans.
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        canonical[table_id] = tuple(merged)
+    return canonical
+
+
+def _same_source_rows(
+    candidate: Mapping[str, Any], served: Mapping[str, Any]
+) -> bool:
+    """Whether some table is covered identically by both items.
+
+    Existential per table, as one shared table covered row-for-row already
+    establishes that the candidate renders evidence the served item carries.
+    Anything short of equality -- containment, partial overlap, adjacency, or
+    merely sharing a table -- is a different event and is not accepted here.
+    """
+
+    candidate_rows = _row_union(_event_refs(candidate))
+    served_rows = _row_union(_all_refs(served))
+    return any(
+        candidate_rows[table_id] == served_rows[table_id]
+        for table_id in candidate_rows.keys() & served_rows.keys()
+    )
+
+
 def _reference_date(chunk: Mapping[str, Any]) -> str | None:
     fields = dict(chunk.get("projection_fields") or {})
     for label in _FIELD_LABELS.get("reference_date", ()):
@@ -233,7 +356,10 @@ def anchor_tier(
 
     STRONG -- the two describe the same source rows: the candidate's event
     fields are backed by a row the served item also covers, so the candidate is
-    literally the structured rendering of evidence already retrieved.
+    literally the structured rendering of evidence already retrieved.  A
+    projection records those rows one per field while a served table chunk
+    records them as one span, so identical rows can be written two ways; both
+    spellings are read here, and neither widens what STRONG means.
 
     MEDIUM -- the exact row link is unavailable (a served projection and a
     candidate projection of the same filing draw on different tables), but both
@@ -247,6 +373,8 @@ def anchor_tier(
     if str(candidate.get("doc_id") or "") != str(served.get("doc_id") or ""):
         return None
     if _event_refs(candidate) & _all_refs(served):
+        return ANCHOR_STRONG
+    if _same_source_rows(candidate, served):
         return ANCHOR_STRONG
     served_date = _reference_date(served)
     if served_date and served_date == _reference_date(candidate):
@@ -303,9 +431,371 @@ def _eligible(
     )
 
 
+def _projection_reporter_key(chunk: Mapping[str, Any]) -> str:
+    fields = dict(chunk.get("projection_fields") or {})
+    for label in _FIELD_LABELS.get("reporter", ()):
+        value = fields.get(label)
+        if str(value or "").strip():
+            return canonical_reporter_key(value)
+    return canonical_reporter_key(chunk.get("reporter"))
+
+
+def _projection_event_matches(
+    candidate: CandidateChunk,
+    record: HoldingReportRecord,
+) -> bool:
+    """Whether this projection states the event identity selected by the index."""
+
+    chunk = candidate.chunk
+    reference_date = _reference_date(chunk)
+    return (
+        candidate.doc_id == record.doc_id
+        and str(chunk.get("doc_id") or candidate.doc_id) == record.doc_id
+        and str(chunk.get("projection_type") or "") == "holding_report"
+        and str(chunk.get("corp_code") or "") == record.issuer_corp_code
+        and _projection_reporter_key(chunk) == record.reporter_key
+        and str(reference_date or "").replace("-", "") == record.reference_date
+        and is_citable(chunk)
+    )
+
+
+def _record_projection_matches(
+    candidate: CandidateChunk,
+    record: HoldingReportRecord,
+) -> bool:
+    """Whether this is the frozen projection named by an index record."""
+
+    return (
+        candidate.chunk_id == record.projection_chunk_id
+        and _projection_event_matches(candidate, record)
+    )
+
+
+def _contract_d_candidate(
+    plan: Any,
+    chunks: Sequence[CandidateChunk],
+    results: Sequence[RetrievalResult],
+    requested: Sequence[str],
+    *,
+    report_index: HoldingReportIndex | None,
+    active_corpus_identity: Mapping[str, Any] | None,
+    ordinary_lane: bool,
+) -> tuple[CandidateChunk, int] | None:
+    """The one projection authorised by the Contract-D evidence relation.
+
+    Retrieval proves document relevance, the shared report index proves event
+    identity, and an exact raw-row bridge in the already-fetched pool proves
+    source identity.  None of the three is allowed to stand in for another.
+    """
+
+    approved_requests = frozenset(
+        {
+            ("after_shares",),
+            ("after_ratio",),
+            tuple(CURRENT_HOLDING_STATE_FIELDS),
+        }
+    )
+    if (
+        not ordinary_lane
+        or report_index is None
+        or not active_corpus_identity
+        or not report_index.identity
+        or not requested
+        or tuple(requested) not in approved_requests
+        or bool(getattr(plan, "comparison", None))
+    ):
+        return None
+
+    corp_code = str(getattr(plan, "corp_code", "") or "").strip()
+    corp_codes = tuple(getattr(plan, "corp_codes", ()) or ())
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    reference_date = exact_reference_date(plan)
+    if (
+        not corp_code
+        or (corp_codes and len(corp_codes) != 1)
+        or not canonical_reporter_key(reporter)
+        or not reference_date
+    ):
+        return None
+
+    try:
+        selection = report_index.select_report(
+            corp_code,
+            reporter,
+            SELECTOR_EXACT_REFERENCE_DATE,
+            reference_date=reference_date,
+            active_corpus_identity=active_corpus_identity,
+        )
+    except Exception:  # noqa: BLE001 - a deterministic guard fails closed
+        return None
+    if not selection.resolved or selection.selected is None:
+        return None
+    record = selection.selected
+
+    served = [result for result in results if result.doc_id == record.doc_id]
+    if not served:
+        return None
+
+    projections = [
+        candidate
+        for candidate in chunks
+        if candidate.chunk_id == record.projection_chunk_id
+    ]
+    if len(projections) != 1:
+        return None
+    projection = projections[0]
+    if (
+        projection.chunk_id in {result.chunk_id for result in results}
+        or not _record_projection_matches(projection, record)
+    ):
+        return None
+    event_matches = [
+        candidate
+        for candidate in chunks
+        if _projection_event_matches(candidate, record)
+    ]
+    if len(event_matches) != 1 or event_matches[0].chunk_id != projection.chunk_id:
+        return None
+
+    raw_matches = [
+        candidate
+        for candidate in chunks
+        if candidate.doc_id == record.doc_id
+        and str(candidate.chunk.get("chunk_type") or "") == "table"
+        and not candidate.chunk.get("projection_type")
+        and bool(candidate.chunk.get("is_indexable", True))
+        and _same_source_rows(projection.chunk, candidate.chunk)
+        and anchor_tier(projection.chunk, candidate.chunk, reporter) == ANCHOR_STRONG
+    ]
+    if len(raw_matches) != 1:
+        return None
+    raw = raw_matches[0]
+
+    # The raw rows must identify only the index-selected report projection.
+    # Otherwise the bridge merely proves that several projections copied the
+    # same evidence and cannot decide which event the question names.
+    bridged = [
+        candidate
+        for candidate in chunks
+        if candidate.doc_id == record.doc_id
+        and str(candidate.chunk.get("projection_type") or "") == "holding_report"
+        and _same_source_rows(candidate.chunk, raw.chunk)
+    ]
+    if len(bridged) != 1 or bridged[0].chunk_id != projection.chunk_id:
+        return None
+    return projection, min(result.rank for result in served)
+
+
 #: Marker written onto a promoted row so coverage-derived evidence stays
 #: distinguishable from what retrieval itself ranked.
 PROVENANCE_KEY = "holding_evidence_coverage"
+
+
+def proves_acquisition(chunk: Mapping[str, Any]) -> bool:
+    """Whether the frozen parser can prove an acquisition from this row.
+
+    A predicate and nothing more.  The parsed method, date and quantity are
+    deliberately discarded here: which transaction answers the question, and
+    what its unit price says, are decisions this lane must never make.
+    """
+
+    if str(chunk.get("projection_type") or "") != DETAIL_PROJECTION:
+        return False
+    return acquisition_facts(chunk) is not None
+
+
+def strict_reporter_identity(chunk: Mapping[str, Any], reporter: str | None) -> bool:
+    """Whether this row's holder *is* the bound reporter, on the frozen contract.
+
+    ``reporter_compatible`` accepts containment either way, which is right for
+    completing a holding position: a family name and its member describe one
+    holder's evidence.  An acquisition row is a different claim -- it says this
+    holder bought these shares on this day -- so a neighbouring holder whose
+    name merely contains the bound one must not supply it.  The frozen
+    ``reporter_matches`` is the identity contract, and it is read here whole.
+
+    An unbound reporter authorizes nothing: the acquisition lane runs only
+    after validation proved which holder the question named.
+    """
+
+    wanted = str(reporter or "").strip()
+    if not wanted:
+        return False
+    fields = dict(chunk.get("projection_fields") or {})
+    holder = str(fields.get("보고자/보유자") or chunk.get("reporter") or "").strip()
+    if not holder:
+        return False
+    return reporter_matches(holder, wanted)
+
+
+def _acquisition_anchor(
+    candidate: CandidateChunk,
+    served: Sequence[RetrievalResult],
+    by_id: Mapping[str, CandidateChunk],
+    reporter: str | None,
+) -> tuple[str, int] | None:
+    """The served report this proof row belongs to, if retrieval served one.
+
+    By the time this is asked, the caller has already proved three things about
+    the candidate: it is an eligible, citable holding projection; its holder
+    *is* the bound reporter on the frozen identity contract; and the frozen
+    parser reads an acquisition out of its own physical row.  What is left to
+    establish is only whether the filing it sits in is one baseline retrieval
+    actually served -- which is exact document identity, and nothing looser.
+    Same-document alone is never the authority here; it is the last of four
+    gates, and the other three are what keep another holder's row out.
+
+    The generic tiers are still preferred when they happen to apply, so a row
+    that really does complete a served item keeps saying so in the trace.  What
+    this no longer does is *require* one: the generic anchor asks whether two
+    items carry the same event date, and a detail row's date is when the shares
+    were acquired while the report's is when the position was reported.
+    Demanding they match would refuse every acquisition that preceded its own
+    filing, which is the ordinary case rather than the exception.
+    """
+
+    best: tuple[str, int] | None = None
+    for result in served:
+        if str(result.doc_id or "") != str(candidate.doc_id or ""):
+            # Another filing is another report's acquisition.
+            continue
+        served_chunk = by_id.get(result.chunk_id)
+        tier = (
+            anchor_tier(candidate.chunk, served_chunk.chunk, reporter)
+            if served_chunk is not None
+            else None
+        ) or ANCHOR_ACQUISITION_DOCUMENT
+        if (
+            best is None
+            or _ACQUISITION_ANCHOR_ORDER[tier] < _ACQUISITION_ANCHOR_ORDER[best[0]]
+        ):
+            best = (tier, result.rank)
+    return best
+
+
+def _recover_acquisition_proof(
+    assessment: CoverageAssessment,
+    chunks: Sequence[CandidateChunk],
+    reporter: str | None,
+) -> CoverageAssessment:
+    """Append every bounded row that proves an acquisition.  Choose none.
+
+    Ambiguity is the resolver's to see.  ``_minimum_subset`` exists to close a
+    field with the fewest rows, and one acquisition row closes this requirement
+    exactly as well as five do -- so using it here would silently keep one row
+    and drop the rest, turning a contested acquisition into a confident single
+    event.  Every legitimately bounded proof row is therefore promoted, and
+    whether they are one event, several, or an ambiguity that must fail closed
+    is decided downstream where the evidence can actually be compared.
+
+    Breadth is structural, not policed by a cutoff: a proof row must belong to
+    an already-served document, to the bound reporter on the frozen identity
+    contract, and must anchor to a served row of that document -- which ties
+    the set to one reporter's rows for one reference date inside one filing.
+
+    Baseline results are appended to, never reordered, rescored or displaced.
+    """
+
+    served = list(assessment.results)
+    served_ids = {result.chunk_id for result in served}
+    by_id = {candidate.chunk_id: candidate for candidate in chunks}
+
+    selected: list[RetrievalResult] = []
+    anchors: list[tuple[str, str, int]] = []
+    anchored_count = 0
+    for candidate in chunks:
+        if candidate.chunk_id in served_ids:
+            continue
+        if not _eligible(candidate, reporter):
+            continue
+        if not strict_reporter_identity(candidate.chunk, reporter):
+            continue
+        if not proves_acquisition(candidate.chunk):
+            continue
+        anchor = _acquisition_anchor(candidate, served, by_id, reporter)
+        if anchor is None:
+            continue
+        anchored_count += 1
+        tier, served_rank = anchor
+        selected.append(_synthetic(candidate, len(served) + len(selected) + 1))
+        anchors.append((candidate.chunk_id, tier, served_rank))
+
+    requested = tuple([*assessment.requested, ACQUISITION_PROOF])
+    if not selected:
+        return CoverageAssessment(
+            **{
+                **assessment.__dict__,
+                "requested": requested,
+                "unresolved": tuple([*assessment.unresolved, ACQUISITION_PROOF]),
+                "remaining_unresolved": tuple(
+                    [*assessment.remaining_unresolved, ACQUISITION_PROOF]
+                ),
+                "status": STATUS_NO_ACQUISITION_PROOF,
+                "anchored_candidate_count": (
+                    assessment.anchored_candidate_count + anchored_count
+                ),
+                "evaluated": True,
+            }
+        )
+    return CoverageAssessment(
+        **{
+            **assessment.__dict__,
+            "requested": requested,
+            "unresolved": tuple([*assessment.unresolved, ACQUISITION_PROOF]),
+            "served_coverage": tuple(
+                sorted({*assessment.served_coverage, ACQUISITION_PROOF})
+            ),
+            # Appended, so every baseline row keeps its object, order and rank.
+            "results": tuple([*served, *selected]),
+            "selected": tuple([*assessment.selected, *selected]),
+            "anchors": tuple([*assessment.anchors, *anchors]),
+            "anchored_candidate_count": (
+                assessment.anchored_candidate_count + anchored_count
+            ),
+            "rescue_mode": RESCUE_MODE_ACQUISITION_PROOF,
+            "status": STATUS_RESCUED,
+            "evaluated": True,
+        }
+    )
+
+
+def assess(
+    question: str,
+    plan: Any,
+    chunks: Sequence[CandidateChunk],
+    results: Sequence[RetrievalResult],
+    *,
+    routed_task_type: str | None = None,
+    report_index: HoldingReportIndex | None = None,
+    active_corpus_identity: Mapping[str, Any] | None = None,
+    ordinary_lane: bool = False,
+) -> CoverageAssessment:
+    """Field coverage, then the acquisition proof an answer field may also need.
+
+    The two are separate passes on purpose.  Ordinary coverage asks which of
+    the resolver's state fields the served rows can supply and closes any gap
+    with the fewest rows.  The acquisition lane asks a different question --
+    can any served row prove an acquisition at all -- and answers it without
+    choosing among the rows that can.
+    """
+
+    assessment = _assess_field_coverage(
+        question,
+        plan,
+        chunks,
+        results,
+        routed_task_type=routed_task_type,
+        report_index=report_index,
+        active_corpus_identity=active_corpus_identity,
+        ordinary_lane=ordinary_lane,
+    )
+    if routed_task_type != "holding_event":
+        return assessment
+    asked = str(getattr(plan, "raw_query", "") or question or "")
+    if ACQUISITION_UNIT_PRICE not in requested_answer_fields(asked):
+        return assessment
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    return _recover_acquisition_proof(assessment, chunks, reporter)
 
 
 def _synthetic(candidate: CandidateChunk, rank: int) -> RetrievalResult:
@@ -320,13 +810,16 @@ def _synthetic(candidate: CandidateChunk, rank: int) -> RetrievalResult:
     )
 
 
-def assess(
+def _assess_field_coverage(
     question: str,
     plan: Any,
     chunks: Sequence[CandidateChunk],
     results: Sequence[RetrievalResult],
     *,
     routed_task_type: str | None = None,
+    report_index: HoldingReportIndex | None = None,
+    active_corpus_identity: Mapping[str, Any] | None = None,
+    ordinary_lane: bool = False,
 ) -> CoverageAssessment:
     """Decide whether the served results can answer the requested fields.
 
@@ -396,6 +889,7 @@ def assess(
     remaining = list(unresolved)
     selected: list[RetrievalResult] = []
     picked: dict[str, tuple[str, int]] = {}
+    rescue_mode: str | None = None
     for result in results:                       # served rank order
         served_chunk = by_id.get(result.chunk_id)
         if served_chunk is None:
@@ -427,7 +921,41 @@ def assess(
                 seen.add(candidate.chunk_id)
                 contribution[candidate.chunk_id] = gained
                 picked[candidate.chunk_id] = (tier, result.rank)
+                rescue_mode = RESCUE_MODE_SERVED_ANCHOR
                 remaining = [n for n in remaining if n not in gained]
+
+    # A raw counterpart in the full pool is not relevance evidence: almost
+    # every report projection has one.  Contract D opens one narrower path only
+    # after ranked retrieval served the selected document and the shared index
+    # independently selected one active issuer/reporter/reference-date event.
+    # The exact raw bridge then proves that the selected projection renders the
+    # same physical rows.  No query, hydration, reranking or rescore occurs.
+    if remaining:
+        guarded = _contract_d_candidate(
+            plan,
+            chunks,
+            results,
+            requested,
+            report_index=report_index,
+            active_corpus_identity=active_corpus_identity,
+            ordinary_lane=ordinary_lane,
+        )
+        if guarded is not None:
+            candidate, served_rank = guarded
+            promoted = _synthetic(
+                candidate, len(results) + len(selected) + 1
+            )
+            all_covered = covered_fields(candidate, promoted, requested)
+            if set(requested).issubset(all_covered):
+                gained = all_covered.intersection(remaining)
+                if gained:
+                    selected.append(promoted)
+                    seen.add(candidate.chunk_id)
+                    contribution[candidate.chunk_id] = gained
+                    picked[candidate.chunk_id] = (ANCHOR_STRONG, served_rank)
+                    anchored_count += 1
+                    rescue_mode = RESCUE_MODE_CONTRACT_D
+                    remaining = [name for name in remaining if name not in gained]
 
     if not selected:
         # Policy: anchored only. A candidate that closes the gap but completes
@@ -454,6 +982,7 @@ def assess(
             "results": tuple(merged),
             "status": STATUS_RESCUED if not remaining else STATUS_PARTIAL,
             "anchored_candidate_count": anchored_count,
+            "rescue_mode": rescue_mode,
             "anchors": tuple(
                 (result.chunk_id, *picked[result.chunk_id]) for result in selected
             ),

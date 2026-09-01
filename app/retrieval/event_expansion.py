@@ -421,6 +421,11 @@ def _trace(
         "event_type": event_type,
         "event_expanded": status == "expanded",
         "event_status": status,
+        # P0-B state for the seeds, carried whole rather than flattened.  A
+        # sibling of the public block below, never inside it: the pipeline
+        # renders ``corporate_event_expansion`` and nothing else from here, so
+        # this stays an internal seam and no identifier reaches the API.
+        "event_member_states": dict(info.get("member_states") or {}),
         "event_id": first.get("event_id"),
         "event_family": _enum_text(first.get("event_family")),
         "event_lifecycle_status": _enum_text(first.get("lifecycle_status")),
