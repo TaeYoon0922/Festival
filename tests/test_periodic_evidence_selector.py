@@ -752,3 +752,85 @@ def test_peer_rate_company_compare_selects_exact_metric_rows_per_company() -> No
     assert selected.selected_chunk_ids == ("life:income", "fire:income")
     assert selected.resolution.facts
     assert "no_periodic_fact_evidence" not in selected.warnings
+
+
+def test_peer_rate_prefers_exact_rows_over_eligible_noise() -> None:
+    income_table = (
+        "| 열 1 | 제 56 (당) 기 | 제 55 (전) 기 |\n"
+        "| --- | --- | --- |\n"
+        "| 보험료수익 | 10,000 | 9,000 |"
+    )
+    life_noise = replace(
+        _item(
+            "life:noise",
+            "life-doc",
+            rank=1,
+            text="보험료수익 전기 대비 증가 보험료수익",
+            year=2024,
+            section="사업의 내용",
+        ),
+        corp_code="00126256",
+        corp_name="삼성생명",
+        company_id="00126256",
+    )
+    life_income = replace(
+        _item(
+            "life:income",
+            "life-doc",
+            rank=8,
+            text=income_table,
+            year=2024,
+            section_path=("III. 재무에 관한 사항", "요약연결재무정보", "연결 손익계산서"),
+            statement_scope="연결",
+        ),
+        corp_code="00126256",
+        corp_name="삼성생명",
+        company_id="00126256",
+    )
+    fire_income = replace(
+        _item(
+            "fire:income",
+            "fire-doc",
+            rank=9,
+            text=income_table.replace("보험료수익", "영업수익"),
+            year=2024,
+            section_path=("III. 재무에 관한 사항", "요약연결재무정보", "연결 손익계산서"),
+            statement_scope="연결",
+        ),
+        corp_code="00139214",
+        corp_name="삼성화재해상보험",
+        company_id="00139214",
+    )
+    evidence = _evidence(
+        [
+            _group("life_noise", life_noise),
+            _group("life_income", life_income),
+            _group("fire_income", fire_income),
+        ],
+        question=(
+            "삼성생명과 삼성화재 2024 사업보고서 보험료수익(또는 영업수익) "
+            "전기 대비 증감률을 비교하면 어느 쪽이 더 높아?"
+        ),
+        year=2024,
+        task_type="financial_metric",
+    )
+    plan = copy.deepcopy(dict(evidence.query_plan))
+    plan.update(
+        {
+            "metric": "보험료수익",
+            "lexical_query": "보험료수익 증감률",
+            "comparison": {"type": "company_comparison"},
+            "companies": ["삼성생명", "삼성화재해상보험"],
+            "corp_codes": ["00126256", "00139214"],
+            "evidence": {
+                "derived_metric": "peer_rate",
+                "metric_fallback": "영업수익",
+            },
+        }
+    )
+    resolution = resolve_periodic_facts(evidence, query_plan=plan)
+
+    selected = PeriodicEvidenceSelector().select(resolution, query_plan=plan)
+
+    assert selected.selected_chunk_ids == ("life:income", "fire:income")
+    assert not selected.resolution.temporal_ambiguity

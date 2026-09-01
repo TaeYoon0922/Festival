@@ -17,6 +17,8 @@ _INCOME_STATEMENT_MARKERS = (
     "손익계산서",
     "연결손익",
     "연결포괄손익",
+    "요약연결재무",
+    "요약재무정보",
 )
 _TABLE_SEP = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _METRIC_LABEL_ALIASES = {
@@ -111,8 +113,16 @@ def project_periodic_metric_table(
     return "\n".join(parts)
 
 
-def has_exact_metric_row(text: str, metric: str | None) -> bool:
-    return project_periodic_metric_table(text, metric=metric) is not None
+def has_exact_metric_row(
+    text: str,
+    metric: str | None,
+    *,
+    metric_fallback: str | None = None,
+) -> bool:
+    return (
+        project_periodic_metric_table(text, metric=metric, metric_fallback=metric_fallback)
+        is not None
+    )
 
 
 def is_income_statement_section(section_path: Sequence[Any] | None) -> bool:

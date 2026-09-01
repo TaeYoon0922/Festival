@@ -214,10 +214,12 @@ def select_periodic_evidence(
             annual_report_preferred = True
 
     candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
-    if not candidates and _suppress_peer_compare_temporal_ambiguity(plan):
-        candidates = list(
-            _peer_rate_exact_metric_candidates(resolution, plan)
-        )
+    if _suppress_peer_compare_temporal_ambiguity(plan):
+        exact_pool = list(_peer_rate_exact_metric_candidates(resolution, plan))
+        if exact_pool:
+            candidates = exact_pool
+        elif not candidates:
+            candidates = exact_pool
     if candidates:
         seed = candidates[0][4]
         candidates = [
@@ -746,23 +748,40 @@ def _peer_compare_metric_rows(
     """Prefer one high-scoring income-statement row per compared company."""
 
     target_codes = {
-        str(value)
+        str(value).strip()
         for value in (plan.get("corp_codes") or ())
         if str(value).strip()
     }
+    target_names = {
+        _normalize(str(value))
+        for value in (plan.get("companies") or ())
+        if str(value).strip()
+    }
     picked: list[tuple[float, int, str, Any, PeriodicFactSource]] = []
-    seen_codes: set[str] = set()
+    seen_companies: set[str] = set()
     for row in candidates:
         fact = row[3]
         corp_code = str(getattr(fact, "corp_code", "") or "").strip()
-        if target_codes and corp_code not in target_codes:
+        corp_name = _normalize(str(getattr(fact, "corp_name", "") or ""))
+        if target_codes and corp_code and corp_code not in target_codes:
             continue
-        if corp_code and corp_code in seen_codes:
+        if (
+            target_codes
+            and not corp_code
+            and target_names
+            and corp_name
+            and corp_name not in target_names
+        ):
+            continue
+        company_key = corp_code or corp_name or str(getattr(fact, "company_id", "") or "")
+        if company_key and company_key in seen_companies:
             continue
         picked.append(row)
-        if corp_code:
-            seen_codes.add(corp_code)
-        if target_codes and seen_codes >= target_codes:
+        if company_key:
+            seen_companies.add(company_key)
+        if target_codes and len(picked) >= len(target_codes):
+            break
+        if target_names and len(picked) >= len(target_names):
             break
         if len(picked) >= max_evidence:
             break
@@ -816,22 +835,12 @@ def _selected_resolution(
         warnings.append("same_period_fact_conflict")
     if any(fact.period_evolution for fact in facts):
         warnings.append("period_evolution_preserved")
-    selected_period_count = len(
-        {
-            signature
-            for fact in facts
-            for signature in (
-                _period_signature(period) for period in fact.reporting_periods
-            )
-            if signature
-        }
-    )
     return replace(
         original,
         facts=facts,
         matching_fact_count=len(facts),
         temporal_ambiguity=(
-            selected_period_count > 1
+            False
             if suppress_temporal_ambiguity
             else original.temporal_ambiguity
         ),

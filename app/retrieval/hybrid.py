@@ -1142,7 +1142,12 @@ def _statement_section_matches_metric(
     normalized = re.sub(r"[^0-9a-z가-힣]+", "", section_text.casefold())
     income_metrics = _INCOME_STATEMENT_METRICS | {"보험료수익", "영업수익"}
     if metric in income_metrics or metric_fallback in income_metrics:
-        return "손익계산서" in normalized or "포괄손익계산서" in normalized
+        return (
+            "손익계산서" in normalized
+            or "포괄손익계산서" in normalized
+            or "요약연결재무" in normalized
+            or "요약재무정보" in normalized
+        )
     if metric in _BALANCE_SHEET_METRICS:
         return (
             "재무상태표" in normalized
