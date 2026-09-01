@@ -1303,6 +1303,27 @@ _CORRECTION_LATEST_TERMS = (
 _CORRECTION_ORIGINAL_TERMS = (
     "최초공시", "원공시", "정정전", "최초제출", "최초로공시", "원본공시",
 )
+#: Naming the before state and the after state together: "정정 전후",
+#: "정정 전과 정정 후", "정정 전 대비 정정 후".  That is a history question, not
+#: a question about the original alone, but every one of these phrasings
+#: contains the literal "정정전" that ``_CORRECTION_ORIGINAL_TERMS`` matches once
+#: whitespace is stripped, so the pair has to be read before that scan runs.
+#:
+#: Written as structure rather than as a list of phrasings because the pair is
+#: productive: the "전" marker anchored on 정정, an optional connector that
+#: coordinates the two sides and may repeat the 정정 anchor, then the "후"
+#: marker.  The window is deliberately narrow -- only a connector may sit
+#: between the two markers -- so an unrelated noun starting with 후 cannot close
+#: a pair, and "정정 전 금액" stays the original question it is.  Whitespace is
+#: significant here and is not stripped first: "정정 전후" fuses the two markers
+#: into one compound, while the space in "정정 전 후속조치" separates them.
+_CORRECTION_PAIR = re.compile(
+    r"정정\s*전"
+    r"(?:\s*(?:과|와|랑|이랑|하고|및|에서|대비|[,·/~\-])\s*(?:정정\s*)?|)"
+    r"후"
+    # The "후" has to end its own token, so "후속"/"후반" is not an after marker.
+    r"(?=[\s\W]|$|[은는이가을를에의로도만와과랑으])"
+)
 
 
 def _correction_intent_from_query(query: str) -> tuple[str | None, str | None]:
@@ -1322,6 +1343,14 @@ def _correction_intent_from_query(query: str) -> tuple[str | None, str | None]:
     ):
         for term in terms:
             if term in compact:
+                if intent == "original":
+                    # The term matched on the compacted query, where a
+                    # before/after pair collapses into the original marker.
+                    # Only the pair can rescue it, and only from the spacing the
+                    # question actually used.
+                    pair = _CORRECTION_PAIR.search(query)
+                    if pair is not None:
+                        return "history", pair.group(0)
                 return intent, term
     return None, None
 
