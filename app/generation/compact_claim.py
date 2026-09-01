@@ -28,6 +28,13 @@ from typing import Any
 # live in a frozen module, so the coupling is stable.
 from app.generation.answer_generator import _numeric_text, _text
 
+# The role label tables live beside the roles themselves, so this renderer and
+# the deterministic multi-event renderer cannot drift apart.
+from app.reasoning.correction_pair_roles import (
+    CORRECTION_ROLE_LABELS,
+    ROLE_FIELD_LABELS,
+)
+
 
 #: The task the router assigns to holding questions.
 SUPPORTED_TASK_TYPE = "holding_event"
@@ -51,6 +58,7 @@ NUMERIC_FIELDS: tuple[tuple[str, str, str], ...] = (
 
 _TEXT_LABELS = dict(TEXT_FIELDS)
 _NUMERIC_LABELS = {field: (label, unit) for field, label, unit in NUMERIC_FIELDS}
+
 
 #: Guardrails.  A claim that grows past these is no longer compact, and the
 #: failure this module exists to prevent starts coming back.
@@ -185,6 +193,10 @@ class _ClaimBuilder:
     def add_event(
         self, event_index: int, event: Mapping[str, Any], requested: Sequence[str]
     ) -> bool:
+        # Set only when the correction graph bound this filing to a version
+        # role, so an ordinary event is labelled exactly as it always was.
+        role = event.get("correction_role")
+        role = str(role) if isinstance(role, str) and role else None
         for field in requested:
             value = _field_value(event, field)
             if value is None:
@@ -197,7 +209,7 @@ class _ClaimBuilder:
             self.fields.append(
                 ClaimField(
                     name=field,
-                    label=_label(field),
+                    label=_label(field, role),
                     value=value,
                     marker=marker,
                     chunk_id=str(citation["chunk_id"]),
@@ -300,7 +312,15 @@ def _field_value(event: Mapping[str, Any], field: str) -> str | None:
     return _text(value) if isinstance(value, str) else None
 
 
-def _label(field: str) -> str:
+def _label(field: str, role: str | None = None) -> str:
+    prefix = CORRECTION_ROLE_LABELS.get(role or "")
+    if prefix:
+        base = ROLE_FIELD_LABELS.get(field) or _frozen_label(field)
+        return f"{prefix} {base}"
+    return _frozen_label(field)
+
+
+def _frozen_label(field: str) -> str:
     if field in _NUMERIC_LABELS:
         return _NUMERIC_LABELS[field][0]
     return _TEXT_LABELS.get(field, field)

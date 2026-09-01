@@ -412,6 +412,19 @@ def _trace(
         "correction_root_doc_id": first.get("root_doc_id"),
         "correction_latest_doc_id": first.get("latest_doc_id"),
         "correction_group_count": len(groups),
+        # Every expanded chain keeps its own endpoints. The flat keys above
+        # describe only the first, so with several chains the rest used to be
+        # unrecoverable: the count said "more than one" and nothing said which.
+        # Added beside them rather than replacing them, so existing readers see
+        # exactly what they saw.
+        "correction_groups": [
+            {
+                "correction_group_id": group.get("correction_group_id"),
+                "root_doc_id": group.get("root_doc_id"),
+                "latest_doc_id": group.get("latest_doc_id"),
+            }
+            for group in groups
+        ],
         "correction_added_doc_ids": list(added_doc_ids),
         "correction_added_result_count": int(added_result_count),
     }

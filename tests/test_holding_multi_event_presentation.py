@@ -465,8 +465,8 @@ class RowLocalFallbackTests(unittest.TestCase):
         ]
         real_row = _holding_compact_row
 
-        def lossy(event, marker, *, omit_company):
-            row = real_row(event, marker, omit_company=omit_company)
+        def lossy(event, marker, *, omit_company, **kwargs):
+            row = real_row(event, marker, omit_company=omit_company, **kwargs)
             if event is events[0]:
                 return row.replace(f"({shared}%p)", "")
             return row
@@ -480,8 +480,8 @@ class RowLocalFallbackTests(unittest.TestCase):
         events = [_event("2024-06-27"), _event("2024-03-26")]
         real_row = _holding_compact_row
 
-        def lossy(event, marker, *, omit_company):
-            row = real_row(event, marker, omit_company=omit_company)
+        def lossy(event, marker, *, omit_company, **kwargs):
+            row = real_row(event, marker, omit_company=omit_company, **kwargs)
             return row.replace("테스트기금", "") if event is events[1] else row
 
         with mock.patch(
