@@ -39,7 +39,7 @@ is, and what every non-correction filing is.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 
 #: The state a filing prints to record what it used to say.
@@ -80,6 +80,41 @@ _MARKER_BOUNDARY = r"(?=[\s\W]|$|[은는이가을를에의로도만와과랑으]
 _PRIOR_MARKER = re.compile(r"정정\s*전" + _MARKER_BOUNDARY)
 _CORRECTED_MARKER = re.compile(r"정정\s*후" + _MARKER_BOUNDARY)
 
+#: The name a 정정신고 grid writes in a cell instead of reprinting the region
+#: there, and that the reprinted table then carries as its own caption.  Matched
+#: as a whole bracketed token so a caption that merely mentions 내용 is not one.
+_REGION_REFERENCE = re.compile(r"<[^<>]*내용[^<>]*>")
+
+#: The two nested headings that identify the report's own holding-summary
+#: region.  Correction notices can quote the second heading in a table caption,
+#: so this proof deliberately reads ``section_path`` only: the canonical body
+#: is a region in the filing hierarchy, not text that happens to mention one.
+_REPORT_BODY_ROOT = re.compile(r"제\s*1\s*부.*보고\s*의\s*개요")
+_HOLDING_SUMMARY = re.compile(r"보유\s*주식.*보유\s*비율")
+
+
+def _markers(text: str) -> tuple[bool, bool]:
+    """Which markers a single piece of label text carries.
+
+    The placeholder is removed first, exactly as before: it is a statement about
+    a row rather than a heading over a region, and its own ``정정 전`` must not
+    be read as one.
+    """
+
+    cleaned = _UNCHANGED_ROW.sub(" ", text)
+    return (
+        bool(_PRIOR_MARKER.search(cleaned)),
+        bool(_CORRECTED_MARKER.search(cleaned)),
+    )
+
+
+def _state(prior: bool, corrected: bool) -> str | None:
+    """One state, or nothing when the markers name both or neither."""
+
+    if prior == corrected:
+        return None
+    return PRIOR_STATE if prior else CORRECTED_STATE
+
 
 def _labels(chunk: Mapping[str, Any]) -> Iterator[str]:
     """Every structural label the chunker attached to this projection.
@@ -117,14 +152,10 @@ def declared_correction_state(chunk: Mapping[str, Any] | None) -> str | None:
     for label in _labels(chunk):
         if not label:
             continue
-        text = _UNCHANGED_ROW.sub(" ", label)
-        if _PRIOR_MARKER.search(text):
-            prior = True
-        if _CORRECTED_MARKER.search(text):
-            corrected = True
-    if prior == corrected:
-        return None
-    return PRIOR_STATE if prior else CORRECTED_STATE
+        label_prior, label_corrected = _markers(label)
+        prior = prior or label_prior
+        corrected = corrected or label_corrected
+    return _state(prior, corrected)
 
 
 def item_correction_state(item: Any) -> str | None:
@@ -165,11 +196,154 @@ def current_state_is_authoritative(plan: Mapping[str, Any] | None) -> bool:
     return str(plan.get("correction_policy") or "") not in _PRIOR_STATE_POLICIES
 
 
+# -- the filing's own 정정사항 grid -------------------------------------------
+# A filer may write the correction state on the reprinted table itself, which
+# ``declared_correction_state`` reads.  The DART form offers a second, equally
+# official placement: a grid at the head of the filing whose columns *are* the
+# two states, naming for each corrected item the region that states it.  The
+# reprints then carry only that name -- ``<내용 1-5>`` -- and no marker of their
+# own, so a chunk read in isolation looks unmarked while the filing has in fact
+# labelled it.
+#
+# Reading that grid needs the whole filing rather than one chunk, so it lives
+# here as a separate entry point and is resolved once, where a document is
+# available.  The markers are the ones above and no others: what is added is
+# where they are looked for, never what they mean.
+
+
+def _squeezed(value: Any) -> str:
+    """Label text with whitespace removed.
+
+    Filings letter-space the headings of these grids -- ``정 정 전`` -- which a
+    section title never does, so the reader above has never had to handle it.
+    Removing whitespace lets one marker set read both spellings; it cannot widen
+    what the markers match, because every marker already tolerates whitespace
+    inside itself and the both-markers refusal is applied afterwards either way.
+    """
+
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _heading_state(text: Any) -> str | None:
+    """The state a grid column's heading declares, or nothing."""
+
+    return _state(*_markers(_squeezed(text)))
+
+
+def _state_columns(chunk: Mapping[str, Any]) -> dict[int, str]:
+    """Column positions this table's headings give a state to.
+
+    A grid qualifies only when its headings name *both* states.  One state alone
+    is a table about one side of a correction, which says nothing about where
+    the other side is, and reading it would leave the current state unproven.
+    """
+
+    columns: dict[int, str] = {}
+    for row in chunk.get("header_rows") or ():
+        for position, cell in enumerate(row or ()):
+            text = cell.get("text") if isinstance(cell, Mapping) else cell
+            state = _heading_state(text)
+            if state is not None:
+                columns.setdefault(position, state)
+    if set(columns.values()) != {PRIOR_STATE, CORRECTED_STATE}:
+        return {}
+    return columns
+
+
+def _referenced_states(chunks: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """Region name -> the state the filing's grids put it under.
+
+    A name the grids place under both states is dropped rather than resolved:
+    the filing is then saying two things about one region, and this module does
+    not choose between them.
+    """
+
+    seen: dict[str, set[str]] = {}
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            continue
+        columns = _state_columns(chunk)
+        if not columns:
+            continue
+        for row in chunk.get("table_rows") or ():
+            for position, cell in enumerate(row or ()):
+                state = columns.get(position)
+                if state is None:
+                    continue
+                text = cell.get("text") if isinstance(cell, Mapping) else cell
+                for token in _REGION_REFERENCE.findall(str(text or "")):
+                    seen.setdefault(_squeezed(token), set()).add(state)
+    return {name: states.pop() for name, states in seen.items() if len(states) == 1}
+
+
+def document_correction_states(
+    chunks: Sequence[Mapping[str, Any]]
+) -> dict[str, str]:
+    """Correction state per chunk id, for the chunks of one filing.
+
+    A chunk's own labels are read first and are final where they decide
+    anything: a filer who wrote the state on the table meant it.  Only a chunk
+    they leave undecided is looked up in the filing's grids, by the region name
+    its caption carries.
+
+    Chunks with no state are absent from the result rather than present with
+    ``None``, so a caller cannot mistake "this filing says nothing about it" for
+    "this filing was never read".
+    """
+
+    states: dict[str, str] = {}
+    references = _referenced_states(chunks)
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            continue
+        chunk_id = str(chunk.get("chunk_id") or "")
+        if not chunk_id:
+            continue
+        declared = declared_correction_state(chunk)
+        if declared is not None:
+            states[chunk_id] = declared
+            continue
+        if not references:
+            continue
+        named = {
+            references[_squeezed(token)]
+            for token in _REGION_REFERENCE.findall(str(chunk.get("table_title") or ""))
+            if _squeezed(token) in references
+        }
+        if len(named) == 1:
+            states[chunk_id] = named.pop()
+    return states
+
+
+def is_canonical_holding_body(chunk: Mapping[str, Any] | None) -> bool:
+    """Whether a projection is in the filing's own holding-report body.
+
+    This is a structural role, not a fallback for an unmarked correction state.
+    In particular, a projection does not become the body merely because
+    ``declared_correction_state`` returned ``None``.  Both canonical ancestors
+    must be present in the chunker's section hierarchy, which keeps correction
+    notice reprints and their captions outside this role.
+    """
+
+    if not isinstance(chunk, Mapping):
+        return False
+    path = chunk.get("section_path") or ()
+    if isinstance(path, str):
+        path = (path,)
+    labels = [str(label or "") for label in path]
+    return (
+        any(_REPORT_BODY_ROOT.search(label) for label in labels)
+        and any(_HOLDING_SUMMARY.search(label) for label in labels)
+    )
+
+
 __all__ = [
     "CORRECTED_STATE",
     "PRIOR_STATE",
     "PRIOR_STATE_SUPERSEDED",
     "current_state_is_authoritative",
     "declared_correction_state",
+    "document_correction_states",
+    "is_canonical_holding_body",
     "item_correction_state",
 ]

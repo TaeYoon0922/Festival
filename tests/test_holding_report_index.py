@@ -7,6 +7,10 @@ from pathlib import Path
 
 from app.reasoning import holding_report_relative as report_relative
 from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.holding_correction_state import (
+    CORRECTED_STATE,
+    PRIOR_STATE,
+)
 from app.reasoning.holding_report_index import (
     AMBIGUOUS,
     ARTIFACT_SCHEMA_VERSION,
@@ -198,6 +202,158 @@ class CorrectionSafetyTests(unittest.TestCase):
         self.assertEqual(result.status, RESOLVED)
 
 
+class ProjectionAuthorityTests(unittest.TestCase):
+    """Repeated projections inside one final document use filing structure."""
+
+    @staticmethod
+    def _triplet(*, body_after: str = "200"):
+        prior = record(
+            projection_chunk_id="holding_1:prior",
+            after_shares="100",
+            change_shares="10",
+            is_correction=True,
+            correction_state=PRIOR_STATE,
+            document_event_projection_count=3,
+        )
+        corrected = record(
+            projection_chunk_id="holding_1:corrected",
+            after_shares="200",
+            change_shares="20",
+            is_correction=True,
+            correction_state=CORRECTED_STATE,
+            document_event_projection_count=3,
+        )
+        body = record(
+            projection_chunk_id="holding_1:body",
+            after_shares=body_after,
+            change_shares="20",
+            is_correction=True,
+            is_canonical_body=True,
+            document_event_projection_count=3,
+        )
+        return prior, corrected, body
+
+    def test_direct_prior_corrected_and_body_resolve_to_the_body(self) -> None:
+        result = index_of(*self._triplet()).select_report(
+            ISSUER, "Holder", SELECTOR_EXACT_REFERENCE_DATE,
+            reference_date="20240101",
+        )
+
+        self.assertEqual(result.status, RESOLVED)
+        self.assertEqual(result.selected.projection_chunk_id, "holding_1:body")
+        self.assertEqual(
+            result.detail["projection_authority_rule"],
+            "canonical_report_body",
+        )
+        self.assertEqual(
+            result.detail["superseded_projection_chunk_ids"],
+            ["holding_1:prior"],
+        )
+
+    def test_mapping_table_states_have_the_same_index_semantics(self) -> None:
+        # The artifact stores the structural conclusion, so selector semantics
+        # do not depend on whether the filing printed a direct label or a
+        # correction-grid region reference.
+        prior, corrected, body = self._triplet()
+        result = index_of(prior, corrected, body).select_report(
+            ISSUER, "Holder", SELECTOR_LATEST
+        )
+
+        self.assertEqual(result.status, RESOLVED)
+        self.assertEqual(result.selected.projection_chunk_id, "holding_1:body")
+
+    def test_corrected_and_body_values_must_agree(self) -> None:
+        result = index_of(*self._triplet(body_after="201")).select_report(
+            ISSUER, "Holder", SELECTOR_LATEST
+        )
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertIsNone(result.selected)
+        self.assertEqual(
+            result.detail["projection_authority"],
+            "current_projection_conflict",
+        )
+        self.assertIn("after_shares", result.detail["conflicting_projection_fields"])
+
+    def test_only_unmarked_conflicting_projections_remain_ambiguous(self) -> None:
+        body = record(
+            projection_chunk_id="holding_1:body",
+            after_shares="200",
+            is_canonical_body=True,
+            document_event_projection_count=2,
+        )
+        other = record(
+            projection_chunk_id="holding_1:other",
+            after_shares="100",
+            document_event_projection_count=2,
+        )
+
+        result = index_of(body, other).select_report(
+            ISSUER, "Holder", SELECTOR_LATEST
+        )
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertEqual(result.detail["projection_authority"], "unproven")
+
+    def test_omitted_projection_metadata_keeps_the_event_closed(self) -> None:
+        visible_body = record(
+            projection_chunk_id="holding_1:body",
+            is_canonical_body=True,
+            document_event_projection_count=3,
+        )
+
+        result = index_of(visible_body).select_report(
+            ISSUER, "Holder", SELECTOR_LATEST
+        )
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertEqual(
+            result.detail["reason"],
+            "document event projection set is incomplete",
+        )
+        self.assertEqual(result.detail["indexed_projection_count"], 1)
+        self.assertEqual(result.detail["expected_projection_counts"], [3])
+
+    def test_projection_state_never_breaks_a_two_document_tie(self) -> None:
+        one = record(
+            doc_id="holding_a",
+            projection_chunk_id="holding_a:corrected",
+            correction_state=CORRECTED_STATE,
+        )
+        two = record(
+            doc_id="holding_b",
+            projection_chunk_id="holding_b:body",
+            is_canonical_body=True,
+        )
+
+        result = index_of(one, two).select_report(
+            ISSUER, "Holder", SELECTOR_LATEST
+        )
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertEqual(result.detail["doc_ids"], ["holding_a", "holding_b"])
+
+    def test_projection_state_never_crosses_a_reporter_boundary(self) -> None:
+        ours = record(
+            correction_state=PRIOR_STATE,
+            after_shares="100",
+        )
+        theirs = record(
+            reporter_key="other",
+            raw_reporter="Other",
+            projection_chunk_id="holding_1:other",
+            correction_state=CORRECTED_STATE,
+            after_shares="200",
+        )
+
+        result = index_of(ours, theirs).select_report(
+            ISSUER, "Holder", SELECTOR_LATEST
+        )
+
+        self.assertEqual(result.status, RESOLVED)
+        self.assertEqual(result.selected.after_shares, "100")
+
+
 class ExactDateSelectorTests(unittest.TestCase):
     def test_reference_and_receipt_are_different_axes(self) -> None:
         """A filing's arrival day is not the day its holdings are stated for."""
@@ -335,6 +491,18 @@ class ReporterScopeTests(unittest.TestCase):
 
 
 class IndexIntegrityTests(unittest.TestCase):
+    def test_projection_authority_metadata_round_trips(self) -> None:
+        original = record(
+            correction_state=CORRECTED_STATE,
+            is_canonical_body=True,
+        )
+
+        parsed = HoldingReportRecord.from_dict(original.to_dict())
+
+        self.assertEqual(parsed.correction_state, CORRECTED_STATE)
+        self.assertTrue(parsed.is_canonical_body)
+        self.assertEqual(parsed.document_event_projection_count, 1)
+
     def test_a_stale_index_refuses_to_answer(self) -> None:
         index = index_of(record())
 
@@ -395,6 +563,49 @@ class IndexIntegrityTests(unittest.TestCase):
 
     def test_a_missing_artifact_yields_no_index(self) -> None:
         self.assertIsNone(load_index(Path("does/not/exist.json")))
+
+    def test_schema_1_1_rows_missing_authority_metadata_are_refused(self) -> None:
+        row = record().to_dict()
+        del row["correction_state"]
+        del row["is_canonical_body"]
+        del row["document_event_projection_count"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old-row-under-new-schema.json"
+            path.write_text(json.dumps({
+                "identity": {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                },
+                "complete": True,
+                "records": [row],
+            }), encoding="utf-8")
+
+            self.assertIsNone(load_index(path))
+
+    def test_malformed_projection_authority_metadata_is_refused(self) -> None:
+        malformed = (
+            {"correction_state": "invented"},
+            {"is_canonical_body": "false"},
+            {
+                "correction_state": PRIOR_STATE,
+                "is_canonical_body": True,
+            },
+            {"document_event_projection_count": 0},
+            {"document_event_projection_count": "3"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for number, changes in enumerate(malformed):
+                with self.subTest(changes=changes):
+                    row = record().to_dict()
+                    row.update(changes)
+                    path = Path(tmp) / f"malformed-{number}.json"
+                    path.write_text(json.dumps({
+                        "identity": {
+                            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                        },
+                        "complete": True,
+                        "records": [row],
+                    }), encoding="utf-8")
+                    self.assertIsNone(load_index(path))
 
 
 @unittest.skipUnless(ARTIFACT.is_file(), "generated index not present")
@@ -470,6 +681,77 @@ class GeneratorCompletenessGateTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_builder_reuses_direct_and_mapping_table_state_proof(self) -> None:
+        generator = self._generator()
+        body = {
+            "chunk_id": "doc:body",
+            "projection_type": "holding_report",
+            "section_path": [
+                "제1부 보고의 개요",
+                "3. 보유주식등의 수 및 보유비율",
+            ],
+            "table_title": "3. 보유주식등의 수 및 보유비율",
+        }
+        cases = {
+            "direct_labels": [
+                {
+                    "chunk_id": "doc:prior",
+                    "projection_type": "holding_report",
+                    "section_path": ["정정 신고", "정정 전"],
+                },
+                {
+                    "chunk_id": "doc:corrected",
+                    "projection_type": "holding_report",
+                    "section_path": ["정정 신고", "정정 후"],
+                },
+                body,
+            ],
+            "mapping_table_references": [
+                {
+                    "chunk_id": "doc:grid",
+                    "header_rows": [[
+                        {"text": "항목"},
+                        {"text": "정 정 전"},
+                        {"text": "정 정 후"},
+                    ]],
+                    "table_rows": [[
+                        {"text": "보유현황"},
+                        {"text": "<내용 1-5> 참조"},
+                        {"text": "<내용 1-6> 참조"},
+                    ]],
+                },
+                {
+                    "chunk_id": "doc:prior",
+                    "projection_type": "holding_report",
+                    "section_path": ["정 정 신 고 (보고)"],
+                    "table_title": "<내용 1-5>",
+                },
+                {
+                    "chunk_id": "doc:corrected",
+                    "projection_type": "holding_report",
+                    "section_path": ["정 정 신 고 (보고)"],
+                    "table_title": "<내용 1-6>",
+                },
+                body,
+            ],
+        }
+
+        for source, chunks in cases.items():
+            with self.subTest(source=source):
+                authority = generator._projection_authority(chunks)
+                self.assertEqual(
+                    authority["doc:prior"]["correction_state"], PRIOR_STATE
+                )
+                self.assertEqual(
+                    authority["doc:corrected"]["correction_state"],
+                    CORRECTED_STATE,
+                )
+                self.assertTrue(authority["doc:body"]["is_canonical_body"])
+                self.assertIsNone(authority["doc:body"]["correction_state"])
+                self.assertEqual(
+                    authority["doc:body"]["document_event_projection_count"], 3
+                )
 
     def test_an_incomplete_source_is_refused_and_writes_nothing(self) -> None:
         generator = self._generator()
