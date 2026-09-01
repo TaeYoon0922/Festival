@@ -284,8 +284,14 @@ class QueryUnderstanding:
             )
         # The named-holder shapes stay in precedence order: an explicitly
         # labelled reporter, then the one this question relates to its issuer.
-        reporter = _find_reporter(raw_query) or _natural_holding_reporter(
-            raw_query, company_mentions, holding_metric=holding_metric
+        reporter = (
+            _find_reporter(raw_query)
+            or _natural_holding_reporter(
+                raw_query, company_mentions, holding_metric=holding_metric
+            )
+            or _reporter_first_holding_reporter(
+                raw_query, company_mentions, holding_metric=holding_metric
+            )
         )
         # Syntax's half of the role question: which surface stood in the actor
         # slot.  Whether that surface names a holder of this issuer is a corpus
@@ -572,6 +578,33 @@ _NATURAL_REPORTER = re.compile(
     + _REPORTER_TOKEN
     + r")"
     + _REPORTER_PARTICLE
+)
+#: The inverse surface order of ``_NATURAL_REPORTER``: the filer is the
+#: sentence subject, and the issuer follows the reporting verb it governs --
+#: ``<holder>가 ... 보고한 <issuer> 보유주식수``.  This expression reads only
+#: the leading subject.  The relation between it and the issuer is checked
+#: separately below rather than hidden inside an unbounded regex.
+_REPORTER_FIRST_SUBJECT = re.compile(
+    r"\s*(?P<holder>"
+    + _REPORTER_LEGAL_FORM
+    + _REPORTER_TOKEN
+    + r")\s*(?:이|가)\s*"
+)
+#: A reporting verb must close the bridge immediately before the issuer.  The
+#: bounded endings describe a filer reporting an issuer's holding state; a
+#: generic verb elsewhere in the sentence proves no role.
+_REPORTER_FIRST_RELATION = re.compile(r"(?:보고|신고)\s*(?:한|하는)\s*$")
+#: Another grammatical actor inside the bridge makes the leading subject's
+#: role ambiguous.  This also rejects coordinated filers instead of choosing
+#: the first one.
+_REPORTER_FIRST_NESTED_ACTOR = re.compile(
+    _REPORTER_TOKEN + r"\s*(?:이|가|와|과)\s+"
+)
+#: The issuer must be followed by the holding object the report is about.  It
+#: may carry a possessive particle, but a company followed by unrelated prose
+#: is not enough merely because holding vocabulary appears later.
+_REPORTER_FIRST_HOLDING_OBJECT = re.compile(
+    r"^\s*(?:의\s*)?(?:보유\s*주식|주식|지분|보유\s*비율)"
 )
 #: Surfaces that fill the holder slot without naming a holder: a role, a bare
 #: document qualifier, or the requested quantity itself.  ``최대주주의 보유비율``
@@ -1678,6 +1711,56 @@ def _natural_holding_reporter(
     if match is None:
         return None
     surface = match.group("holder").strip()
+    key = canonical_reporter_key(surface)
+    if (
+        len(key) < 2
+        or key in _NON_REPORTER_SURFACES
+        or _names_a_filing(key)
+        or _BARE_PERIOD_SUBJECT.fullmatch(key)
+    ):
+        return None
+    return surface
+
+
+def _reporter_first_holding_reporter(
+    query: str,
+    mentions: tuple[tuple[int, int, str], ...],
+    *,
+    holding_metric: str | None,
+) -> str | None:
+    """The filer in ``<filer>가 ... 보고한 <issuer> <holding field>``.
+
+    This is the subject-first counterpart of ``_natural_holding_reporter``.
+    Exactly one corpus company must already identify the issuer.  If the
+    leading surface is itself another corpus company, ``mentions`` contains two
+    entries and the existing corpus-backed T8 role resolver keeps authority.
+
+    The reporting relation, not "whatever was not the issuer", proves the
+    role.  A second actor or coordinated filer in the bridge declines, and a
+    non-holding question never enters this rule.
+    """
+
+    if holding_metric is None or len(mentions) != 1:
+        return None
+    if _has_comparison_vocabulary(query):
+        return None
+
+    issuer_start, issuer_end, _canonical = mentions[0]
+    subject = _REPORTER_FIRST_SUBJECT.match(query)
+    if subject is None or subject.end() > issuer_start:
+        return None
+
+    bridge = query[subject.end():issuer_start]
+    relation = _REPORTER_FIRST_RELATION.search(bridge)
+    if relation is None:
+        return None
+    modifier = bridge[:relation.start()]
+    if _REPORTER_FIRST_NESTED_ACTOR.search(modifier):
+        return None
+    if not _REPORTER_FIRST_HOLDING_OBJECT.match(query[issuer_end:]):
+        return None
+
+    surface = subject.group("holder").strip()
     key = canonical_reporter_key(surface)
     if (
         len(key) < 2
