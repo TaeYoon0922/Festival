@@ -229,6 +229,11 @@ class HoldingEvent:
     acquisition_date: str | None = None
     acquired_shares: NumericValue | None = None
     transaction_method: str | None = None
+    #: Which version of a corrected report this event was filed in, set only by
+    #: ``correction_pair_roles`` once the correction graph has named the chain's
+    #: root and final document.  ``None`` everywhere else, so an event that is
+    #: not half of a bound pair keeps exactly the shape it had.
+    correction_role: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -272,6 +277,11 @@ class HoldingEvent:
             "confidence": copy.deepcopy(dict(self.confidence)),
             "completeness": copy.deepcopy(dict(self.completeness)),
             "warnings": list(self.warnings),
+            **(
+                {"correction_role": self.correction_role}
+                if self.correction_role is not None
+                else {}
+            ),
         }
 
 

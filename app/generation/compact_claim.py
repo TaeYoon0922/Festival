@@ -52,6 +52,23 @@ NUMERIC_FIELDS: tuple[tuple[str, str, str], ...] = (
 _TEXT_LABELS = dict(TEXT_FIELDS)
 _NUMERIC_LABELS = {field: (label, unit) for field, label, unit in NUMERIC_FIELDS}
 
+#: How a correction version role is named in the answer.
+CORRECTION_ROLE_LABELS: dict[str, str] = {
+    "correction_before": "정정 전",
+    "correction_after": "정정 후",
+}
+
+#: What a field is called once a correction role owns the before/after axis.
+#: The frozen labels describe a position inside one filing's own change ("변동
+#: 후 주식수"); a correction role describes which *version of the filing* states
+#: the value.  Naming both on one line would read as one axis, so a field that
+#: states the holding as of the filing is named by what it measures instead.
+#: Any other field keeps its frozen label and only gains the role prefix.
+ROLE_FIELD_LABELS: dict[str, str] = {
+    "after_shares": "보유주식수",
+    "after_ratio": "보유비율",
+}
+
 #: Guardrails.  A claim that grows past these is no longer compact, and the
 #: failure this module exists to prevent starts coming back.
 MAX_CLAIM_EVENTS = 3
@@ -185,6 +202,10 @@ class _ClaimBuilder:
     def add_event(
         self, event_index: int, event: Mapping[str, Any], requested: Sequence[str]
     ) -> bool:
+        # Set only when the correction graph bound this filing to a version
+        # role, so an ordinary event is labelled exactly as it always was.
+        role = event.get("correction_role")
+        role = str(role) if isinstance(role, str) and role else None
         for field in requested:
             value = _field_value(event, field)
             if value is None:
@@ -197,7 +218,7 @@ class _ClaimBuilder:
             self.fields.append(
                 ClaimField(
                     name=field,
-                    label=_label(field),
+                    label=_label(field, role),
                     value=value,
                     marker=marker,
                     chunk_id=str(citation["chunk_id"]),
@@ -300,7 +321,15 @@ def _field_value(event: Mapping[str, Any], field: str) -> str | None:
     return _text(value) if isinstance(value, str) else None
 
 
-def _label(field: str) -> str:
+def _label(field: str, role: str | None = None) -> str:
+    prefix = CORRECTION_ROLE_LABELS.get(role or "")
+    if prefix:
+        base = ROLE_FIELD_LABELS.get(field) or _frozen_label(field)
+        return f"{prefix} {base}"
+    return _frozen_label(field)
+
+
+def _frozen_label(field: str) -> str:
     if field in _NUMERIC_LABELS:
         return _NUMERIC_LABELS[field][0]
     return _TEXT_LABELS.get(field, field)

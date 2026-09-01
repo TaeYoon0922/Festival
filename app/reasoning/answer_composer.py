@@ -323,6 +323,13 @@ def _holding_event_content(event: HoldingEvent) -> dict[str, Any]:
         "completeness": copy.deepcopy(dict(event.completeness)),
         "confidence": copy.deepcopy(dict(event.confidence)),
         "evidence_chunk_ids": list(event.evidence_chunk_ids),
+        # Only for an event bound to a correction version role, so every other
+        # event's content keeps exactly the keys it had.
+        **(
+            {"correction_role": event.correction_role}
+            if getattr(event, "correction_role", None) is not None
+            else {}
+        ),
         # Only for an event whose own row proved an acquisition, so every other
         # event's content keeps exactly the keys it had.
         **(

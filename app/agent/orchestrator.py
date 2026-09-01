@@ -35,6 +35,10 @@ from app.reasoning.holding_date_intent import (
     exact_reference_date,
     execution_plan as holding_execution_plan,
 )
+from app.reasoning.correction_pair_roles import (
+    apply_correction_pair,
+    bind_correction_pair,
+)
 from app.reasoning.holding_event_fusion import fuse as fuse_holding_events
 from app.reasoning.holding_event_selection import (
     EXACT,
@@ -290,6 +294,23 @@ class AgentOrchestrator:
             resolution = self.holding_resolver.resolve(
                 evidence, query_plan=holding_plan
             )
+            # A "정정 전과 정정 후" question is answered by one event that two
+            # filings state differently, not by two events. The resolver groups
+            # by document and so reports both without saying which version each
+            # is; the correction graph already knows, and its expansion trace
+            # names the chain's root and final filing. Bind those two roles
+            # here, before the composer renders the rows and the citations that
+            # attribute them. Declining leaves the resolution exactly as it was.
+            correction_pair = bind_correction_pair(
+                resolution,
+                correction_trace=getattr(
+                    retrieval_execution, "correction_expansion", None
+                ),
+                query_plan=query_plan,
+            )
+            if correction_pair is not None:
+                trace.append("correction_pair_roles")
+                resolution = apply_correction_pair(resolution, correction_pair)
             resolution_before = copy.deepcopy(resolution.to_dict())
             trace.append("answer_composer")
             # What the question itself said about which event is wanted, read
