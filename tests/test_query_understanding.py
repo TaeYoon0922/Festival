@@ -10,12 +10,16 @@ from app.reasoning import (
     QueryUnderstanding,
 )
 from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.correction_policy import POLICY_ORIGINAL_ONLY, document_allowed
 from app.reasoning.query_understanding import (
     ACTOR_SOURCE_DIRECTED_HOLDER,
     HOLDING_ACTOR_CANDIDATE_KEY,
+    _correction_from_query,
+    _correction_intent_from_query,
     _latest_report_wording,
     _names_a_filing,
 )
+from app.retrieval.correction_expansion import EXPANDING_INTENTS
 from app.retrieval.interfaces import (
     CandidateChunk,
     CandidateDocument,
@@ -2342,3 +2346,112 @@ class LatestHoldingReportSelectorTests(unittest.TestCase):
         query = f"{self.ISSUER} 최근 대량보유보고의 보유주식수는?"
 
         self.assertIsNone(self.plan(query).reporter)
+
+
+class CorrectionPairIntentTest(unittest.TestCase):
+    """T2-A: "정정 전과 정정 후" asks for both states, not for the original.
+
+    Every before/after phrasing contains the literal ``정정전`` that
+    ``_CORRECTION_ORIGINAL_TERMS`` matches once whitespace is stripped, so each
+    one used to be read as naming the original alone and ``original_only``
+    hard-filtered the correcting document out of the candidate set.  A pair
+    question is a history question: it is the whole chain that answers it.
+    """
+
+    def intent(self, query: str) -> str | None:
+        return _correction_intent_from_query(query)[0]
+
+    def policy(self, query: str) -> str:
+        return _correction_from_query(query)[0]
+
+    def assert_pair(self, query: str) -> None:
+        self.assertEqual(self.intent(query), "history", query)
+        self.assertNotEqual(self.policy(query), POLICY_ORIGINAL_ONLY, query)
+        # The point of not being ``original_only``: the correcting document
+        # survives the hard filter and can be served.
+        self.assertTrue(
+            document_allowed(self.policy(query), is_correction=True, state=None),
+            query,
+        )
+
+    def test_a_before_after_pair_is_a_history_question(self) -> None:
+        for query in (
+            "정정 전후로 어떻게 바뀌었어?",
+            "정정 전과 정정 후가 각각 얼마야?",
+            "정정 전·후를 비교해줘",
+            "정정 전 / 후 차이는?",
+            "정정 전 대비 정정 후에는?",
+            "정정 전에서 정정 후로 어떻게 변했어?",
+        ):
+            with self.subTest(query=query):
+                self.assert_pair(query)
+
+    def test_the_pair_may_leave_the_second_anchor_out(self) -> None:
+        """"정정 전과 후" coordinates the same two markers with one anchor."""
+
+        for query in (
+            "정정 전과 후 보유주식수는?",
+            "정정 전, 후 계약금액은?",
+        ):
+            with self.subTest(query=query):
+                self.assert_pair(query)
+
+    def test_the_pair_reaches_the_plan_the_executor_reads(self) -> None:
+        """The intent has to survive ``understand``, not just the parser."""
+
+        plan = QueryUnderstanding().understand(
+            "정정 전과 정정 후 보유주식수는 각각 몇 주야?"
+        )
+
+        self.assertEqual(plan.evidence.get("correction_intent"), "history")
+        self.assertNotEqual(plan.correction_policy, POLICY_ORIGINAL_ONLY)
+        # ``history`` is an expanding intent, so the chain member that the
+        # question's own date anchor could never retrieve is fetched back.
+        self.assertIn(plan.evidence["correction_intent"], EXPANDING_INTENTS)
+
+    def test_one_sided_before_wording_still_names_the_original(self) -> None:
+        """A question about the before state alone keeps its frozen reading."""
+
+        for query in (
+            "정정 전 금액은?",
+            "정정 전 수치는?",
+            "최초 공시 기준 금액은?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.intent(query), "original", query)
+                self.assertEqual(self.policy(query), POLICY_ORIGINAL_ONLY, query)
+
+    def test_a_noun_beginning_with_the_after_marker_does_not_close_a_pair(self) -> None:
+        """"정정 전 후속조치" separates the markers; "후속" is not "후"."""
+
+        query = "정정 전 후속조치는?"
+
+        self.assertEqual(self.intent(query), "original")
+        self.assertEqual(self.policy(query), POLICY_ORIGINAL_ONLY)
+
+    def test_before_wording_without_a_correction_anchor_is_unchanged(self) -> None:
+        """``정정하기 전`` keeps whatever the frozen parser already read."""
+
+        self.assertIsNone(self.intent("정정하기 전 보유주식수는?"))
+
+    def test_after_wording_never_falls_back_to_the_original(self) -> None:
+        for query, intent in (
+            ("정정 후 금액은?", None),
+            ("정정 후 기준으로 얼마야?", "latest"),
+            ("최종 정정 후 값은?", "latest"),
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.intent(query), intent, query)
+                self.assertNotEqual(self.policy(query), POLICY_ORIGINAL_ONLY, query)
+
+    def test_an_unrelated_before_after_word_is_not_a_correction(self) -> None:
+        """The pair is anchored on 정정; a bare 전후 is not a correction question."""
+
+        for query in (
+            "변경 전후 매출액은?",
+            "변동 전후 지분율은?",
+            "계약 체결 전후 주가는?",
+            "삼성전자 2024년 매출액은?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.intent(query), query)
