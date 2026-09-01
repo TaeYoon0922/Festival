@@ -10,6 +10,7 @@ rendered answer and falls back to it whenever validation fails.
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -20,6 +21,7 @@ from app.api.settings import ApiSettings
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
+    GeneratedCitation,
 )
 from app.generation.hcx_verbalizer import (
     SKIPPED_MULTI_EVENT_CLAIM,
@@ -399,26 +401,39 @@ class AnswerPipeline:
                 "skipped_answerability_guard",
                 answerability.status.value,
             )
+        public_context = retrieved_context(
+            evidence,
+            self.settings.top_k
+            + _expanded_count(execution)
+            + _multi_document_count(multi),
+        )
+        public_answer, citation_alignment = align_public_citations(
+            _non_empty(outcome.text, generated.answer_text),
+            generated.citations,
+            public_context,
+        )
+        trace = think_trace(
+            result,
+            generated,
+            outcome,
+            execution,
+            multi_document=multi,
+            query_validation=validation,
+            answerability=answerability,
+            clarification_decision=clarification_decision,
+        )
+        if citation_alignment["unmapped"]:
+            trace["warnings"] = list(
+                dict.fromkeys(
+                    [*trace["warnings"], "citation_alignment_unmapped"]
+                )
+            )
         return {
             "question_id": question_id,
             "question": question,
-            "retrieved_context": retrieved_context(
-                evidence,
-                self.settings.top_k
-                + _expanded_count(execution)
-                + _multi_document_count(multi),
-            ),
-            "think_trace": think_trace(
-                result,
-                generated,
-                outcome,
-                execution,
-                multi_document=multi,
-                query_validation=validation,
-                answerability=answerability,
-                clarification_decision=clarification_decision,
-            ),
-            "answer": _non_empty(outcome.text, generated.answer_text),
+            "retrieved_context": public_context,
+            "think_trace": trace,
+            "answer": _non_empty(public_answer),
         }
 
     @property
@@ -795,6 +810,140 @@ def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+_PUBLIC_CITATION_MARKER = re.compile(r"\[(\d{1,2})\]")
+
+
+def align_public_citations(
+    answer_text: str,
+    citations: Sequence[GeneratedCitation],
+    context: Sequence[Mapping[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Translate internal citation ordinals to the served rank namespace.
+
+    A generated marker identifies a citation object, not a retrieval position.
+    The public API contract is different: ``[n]`` names the row whose
+    ``retrieved_context.rank`` is ``n``.  Join those namespaces by exact
+    ``(chunk_id, doc_id)`` identity after the final context has been built.
+
+    Any marker without one unambiguous exact match is removed in the same regex
+    pass used for successful rewrites.  This fails closed without changing the
+    served evidence or allowing replacements such as ``[1] -> [2] -> [4]`` to
+    cascade.
+    """
+
+    markers = tuple(
+        dict.fromkeys(
+            match.group(0)
+            for match in _PUBLIC_CITATION_MARKER.finditer(answer_text)
+        )
+    )
+    if not markers:
+        return answer_text, {
+            "attempted": False,
+            "mapped": [],
+            "unmapped": [],
+            "status": "not_needed",
+        }
+
+    ranks_by_identity: dict[tuple[str, str], set[int]] = {}
+    identities_by_rank: dict[int, set[tuple[str, str]]] = {}
+    for row in context:
+        chunk_id = str(row.get("chunk_id") or "")
+        doc_id = str(row.get("doc_id") or "")
+        try:
+            rank = int(row.get("rank"))
+        except (TypeError, ValueError):
+            continue
+        if not chunk_id or not doc_id:
+            continue
+        identity = (chunk_id, doc_id)
+        ranks_by_identity.setdefault(identity, set()).add(rank)
+        identities_by_rank.setdefault(rank, set()).add(identity)
+
+    citations_by_marker: dict[str, list[GeneratedCitation]] = {}
+    for citation in citations:
+        citations_by_marker.setdefault(str(citation.citation_id), []).append(citation)
+
+    replacements: dict[str, str] = {}
+    mapped: list[dict[str, Any]] = []
+    unmapped: list[dict[str, Any]] = []
+    for marker in markers:
+        marker_number = int(marker[1:-1])
+        marker_citations = citations_by_marker.get(marker, [])
+        identities = {
+            (str(citation.chunk_id), str(citation.doc_id))
+            for citation in marker_citations
+            if citation.chunk_id and citation.doc_id
+        }
+        if len(identities) != 1:
+            replacements[marker] = ""
+            unmapped.append(
+                {
+                    "internal_marker": marker_number,
+                    "reason": (
+                        "marker_not_generated"
+                        if not marker_citations
+                        else "ambiguous_generated_identity"
+                    ),
+                }
+            )
+            continue
+
+        identity = next(iter(identities))
+        ranks = ranks_by_identity.get(identity, set())
+        if len(ranks) != 1:
+            replacements[marker] = ""
+            unmapped.append(
+                {
+                    "internal_marker": marker_number,
+                    "doc_id": identity[1],
+                    "chunk_id": identity[0],
+                    "reason": (
+                        "identity_not_served"
+                        if not ranks
+                        else "identity_rank_ambiguous"
+                    ),
+                }
+            )
+            continue
+
+        public_rank = next(iter(ranks))
+        if identities_by_rank.get(public_rank) != {identity}:
+            replacements[marker] = ""
+            unmapped.append(
+                {
+                    "internal_marker": marker_number,
+                    "doc_id": identity[1],
+                    "chunk_id": identity[0],
+                    "reason": "served_rank_ambiguous",
+                }
+            )
+            continue
+
+        replacements[marker] = f"[{public_rank}]"
+        mapped.append(
+            {
+                "internal_marker": marker_number,
+                "public_rank": public_rank,
+                "doc_id": identity[1],
+                "chunk_id": identity[0],
+            }
+        )
+
+    aligned = _PUBLIC_CITATION_MARKER.sub(
+        lambda match: replacements.get(match.group(0), ""), answer_text
+    )
+    status = "aligned"
+    if unmapped:
+        status = "partial" if mapped else "unmapped"
+    return aligned, {
+        "attempted": True,
+        "mapped": mapped,
+        "unmapped": unmapped,
+        "status": status,
+    }
 
 
 def _vector_degradation_warning(execution: Any) -> str | None:
