@@ -27,6 +27,7 @@ from app.reasoning.holding_report_index import (
     HoldingReportRecord,
     load_index,
 )
+from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.holding_report_relative_execution import (
     PROJECTION_CHUNK_AMBIGUOUS,
     PROJECTION_CHUNK_MISSING,
@@ -933,3 +934,112 @@ class RepositoryWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NaturalReporterEntersPhase3Tests(unittest.TestCase):
+    """A naturally named holder supplies the identity this lane already needed.
+
+    The selector, the index, the ordering and the projection are all unchanged
+    here.  What changes upstream is only that ``plan.reporter`` is populated for
+    a holder the company universe cannot canonicalize, which is the one input
+    the lane was missing.  Nothing in this module is modified to make these
+    pass.
+    """
+
+    HOLDER = "가상보유인"
+
+    def records(self):
+        older = replace(
+            OLD, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_natural_old",
+            projection_chunk_id="holding_natural_old:report",
+        )
+        newer = replace(
+            NEW, reporter_key=self.HOLDER, raw_reporter=self.HOLDER,
+            doc_id="holding_natural_new",
+            projection_chunk_id="holding_natural_new:report",
+        )
+        return older, newer
+
+    def test_a_natural_holder_reaches_the_authoritative_lane(self) -> None:
+        older, newer = self.records()
+        question = f"{COMPANY}에 대한 {self.HOLDER}의 최신 보고 보유주식수는?"
+        query_plan = plan(question)
+
+        # The upstream fix, stated as the precondition this lane depends on.
+        self.assertEqual(query_plan.reporter, self.HOLDER)
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            # Rank order is deliberately the wrong way round: the lane must
+            # answer by enumeration, not from what retrieval put first.
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+        self.assertEqual(outcome.selected_chunk_id, newer.projection_chunk_id)
+
+    def test_the_role_noun_shape_reaches_the_same_report(self) -> None:
+        older, newer = self.records()
+        question = (
+            f"{COMPANY} 최대주주 {self.HOLDER}의 가장 최근 보고 기준 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertEqual(query_plan.reporter, self.HOLDER)
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)
+
+    def test_an_issuer_without_a_named_holder_stays_outside_phase_3(self) -> None:
+        older, newer = self.records()
+        question = f"{COMPANY} 최신 보고 보유주식수는?"
+        query_plan = plan(question)
+
+        self.assertIsNone(query_plan.reporter)
+        self.assertIsNone(
+            adapter(index_of(older, newer)).adapt(
+                question,
+                query_plan,
+                execution(query_plan, candidate(older)),
+                routed_task_type="holding_event",
+            )
+        )
+
+    def test_a_natural_surface_still_has_to_match_the_index_identity(self) -> None:
+        """Extraction is not identity.  Strict canonical matching still decides."""
+
+        older, newer = self.records()
+        question = f"{COMPANY}에 대한 가상보유{'인이다'}의 최신 보고 보유주식수는?"
+        query_plan = plan(question)
+
+        self.assertIsNotNone(query_plan.reporter)
+        self.assertNotEqual(
+            canonical_reporter_key(query_plan.reporter),
+            canonical_reporter_key(self.HOLDER),
+        )
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertNotEqual(outcome.status, RESOLVED)
+        self.assertFalse(outcome.resolved)
+        self.assertEqual(outcome.results, ())

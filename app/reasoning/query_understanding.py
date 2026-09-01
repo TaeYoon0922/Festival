@@ -282,7 +282,11 @@ class QueryUnderstanding:
                     or extracted.get("doc_group") not in {None, "holding"}
                 ),
             )
-        reporter = _find_reporter(raw_query)
+        # The named-holder shapes stay in precedence order: an explicitly
+        # labelled reporter, then the one this question relates to its issuer.
+        reporter = _find_reporter(raw_query) or _natural_holding_reporter(
+            raw_query, company_mentions, holding_metric=holding_metric
+        )
         # Syntax's half of the role question: which surface stood in the actor
         # slot.  Whether that surface names a holder of this issuer is a corpus
         # question, and validation is where the corpus is readable.
@@ -532,6 +536,55 @@ _NON_HOLDER_SUBJECTS = frozenset(
 )
 #: A date or a quantity standing where an acquirer should.
 _BARE_PERIOD_SUBJECT = re.compile(r"\d+(?:년|월|일|분기|기|주)?")
+#: How a holding question attaches the holder it asks about to the issuer.  Only
+#: the relational bridges such a question actually uses, plus bare whitespace for
+#: the commonest shape (``<issuer> <holder>의 최근 보고``).  Whitespace is safe
+#: here only because the holder must also carry a possessive or subject particle
+#: below; without that requirement it would match any following word.
+_REPORTER_BRIDGE = r"(?:\s*에\s*(?:대|관)(?:한|해서?|하여)\s*|\s+)"
+#: A role noun may name the holder's standing before naming the holder itself.
+#: It is consumed, never returned: the holder is the name that follows it.
+_REPORTER_ROLE = r"(?:(?:최대|대|주요|지배)\s*주주\s+)?"
+#: A leading legal form is written as its own word.  It is kept in the surface
+#: rather than stripped: canonical identity is ``canonical_reporter_key``'s job,
+#: and this parser must not do that work a second time.
+_REPORTER_LEGAL_FORM = r"(?:(?:주식회사|유한회사|유한책임회사|재단법인|사단법인)\s+)?"
+#: One name token, with no internal whitespace.  The only multi-word holder
+#: accepted is a legal form followed by one token, which is why the legal form
+#: above is a separate group rather than part of this character class.
+_REPORTER_TOKEN = r"[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{0,31}"
+#: The holder must stand in a possessive or subject relation to the report.
+#: Object and topic particles are deliberately absent: with 을/를/은/는 accepted,
+#: ``보유주식수는`` and ``보유비율을`` would themselves read as holders.  The
+#: trailing space ends the surface, so the boundary is a token boundary rather
+#: than a guess about how much of the sentence belongs to the holder.
+_REPORTER_PARTICLE = r"\s*(?:의|이|가)\s"
+#: ``<issuer><bridge>[role ]<holder><particle>``, anchored at the end of the
+#: issuer mention.  The anchoring is the whole safety argument: the holder is
+#: read out of the issuer's own relational structure and never searched for in
+#: the sentence, so metrics, dates, document nouns and question suffixes
+#: elsewhere in the question can never be reached.
+_NATURAL_REPORTER = re.compile(
+    _REPORTER_BRIDGE
+    + _REPORTER_ROLE
+    + r"(?P<holder>"
+    + _REPORTER_LEGAL_FORM
+    + _REPORTER_TOKEN
+    + r")"
+    + _REPORTER_PARTICLE
+)
+#: Surfaces that fill the holder slot without naming a holder: a role, a
+#: document, or the requested quantity itself.  ``최대주주의 보유비율`` names no
+#: holder, and reading the role noun as one would answer about nobody.  Compared
+#: against the canonical key, never against raw text.
+_NON_REPORTER_SURFACES = _NON_HOLDER_SUBJECTS | frozenset(
+    {
+        "최대주주", "대주주", "주요주주", "지배주주", "소액주주", "특수관계자",
+        "보고", "보고서", "공시", "대량보유상황보고서", "대량보유보고서",
+        "대량보유상황", "소유상황보고서",
+        "지분", "지분율", "주식", "보유주식", "보유주식수", "보유비율", "보유수량",
+    }
+)
 #: ``plan.evidence`` key carrying the actor a directed acquisition named, before
 #: anything corpus-aware has confirmed that such a holder exists.  Read by
 #: validation, which owns the identity question; never a reporter by itself.
@@ -1469,6 +1522,60 @@ def _find_reporter(query: str) -> str | None:
         return None
     value = match.group(1)
     return re.sub(r"^보고자\s*[:：]?\s*", "", value).strip()
+
+
+def _natural_holding_reporter(
+    query: str,
+    mentions: tuple[tuple[int, int, str], ...],
+    *,
+    holding_metric: str | None,
+) -> str | None:
+    """The holder a holding question names in relation to its issuer.
+
+    Additive to :func:`_find_reporter`, which keeps its own two shapes.  This
+    reads the one construction that names a holder the company universe cannot
+    canonicalize -- an individual, a fund, a foreign entity -- and which is
+    therefore invisible to company-mention extraction.
+
+    Bounded by structure, not by vocabulary.  A surface qualifies only when the
+    question names exactly one corpus company, asks a holding-metric question
+    about it, and attaches the surface to that company through a possessive or
+    subject relation.  Two named companies are never read this way: an
+    issuer/reporter role pair is a corpus question, and
+    ``HoldingCompanyRoleResolver`` is what answers it.
+
+    The returned value is the surface as written.  Whether it names a holder
+    this corpus knows is decided downstream by ``canonical_reporter_key`` and
+    the report index, and this function must not anticipate that answer.
+    """
+
+    if holding_metric is None:
+        # Not a holding-metric question.  A possessive phrase in a financial or
+        # event question names something else entirely.
+        return None
+    if len(mentions) != 1:
+        # No issuer to be relative to, or two companies -- which is a role pair
+        # or a comparison, and neither is this parser's to interpret.
+        return None
+    if _has_comparison_vocabulary(query):
+        # Comparative or per-company wording puts more than one subject in play.
+        # ``_comparison_frame`` cannot bind an operator with a single canonical
+        # mention, so declining outright is the only fail-closed reading.
+        return None
+
+    _start, end, _canonical = mentions[0]
+    match = _NATURAL_REPORTER.match(query, end)
+    if match is None:
+        return None
+    surface = match.group("holder").strip()
+    key = canonical_reporter_key(surface)
+    if (
+        len(key) < 2
+        or key in _NON_REPORTER_SURFACES
+        or _BARE_PERIOD_SUBJECT.fullmatch(key)
+    ):
+        return None
+    return surface
 
 
 def _operation_from_query(
