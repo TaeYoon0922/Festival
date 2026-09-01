@@ -573,17 +573,28 @@ _NATURAL_REPORTER = re.compile(
     + r")"
     + _REPORTER_PARTICLE
 )
-#: Surfaces that fill the holder slot without naming a holder: a role, a
-#: document, or the requested quantity itself.  ``최대주주의 보유비율`` names no
-#: holder, and reading the role noun as one would answer about nobody.  Compared
+#: Surfaces that fill the holder slot without naming a holder: a role, a bare
+#: document qualifier, or the requested quantity itself.  ``최대주주의 보유비율``
+#: names no holder, and reading the role noun as one would answer about nobody.
+#: The filing *names* themselves are not listed: they are a productive family,
+#: so ``_names_a_filing`` derives them instead of enumerating them.  Compared
 #: against the canonical key, never against raw text.
 _NON_REPORTER_SURFACES = _NON_HOLDER_SUBJECTS | frozenset(
     {
         "최대주주", "대주주", "주요주주", "지배주주", "소액주주", "특수관계자",
-        "보고", "보고서", "공시", "대량보유상황보고서", "대량보유보고서",
-        "대량보유상황", "소유상황보고서",
         "지분", "지분율", "주식", "보유주식", "보유주식수", "보유비율", "보유수량",
     }
+)
+#: The head noun that makes a phrase name a *filing* rather than a filer.  A
+#: filing name always ends in one of these; a holder's name does not.
+_REPORT_HEAD_NOUNS = ("보고서", "보고", "공시", "신고서", "신고")
+#: What a holding filing's own name is built out of, ahead of that head.  Same
+#: disclosure vocabulary ``_find_holding_metric`` already reads report titles
+#: with, kept as its own constant because this asks a different question of it:
+#: not "is this a holding question" but "is this surface the document".
+_REPORT_QUALIFIERS = (
+    "대량보유상황", "대량보유", "소유상황", "특정증권등소유", "특정증권등",
+    "임원주요주주", "주요주주", "임원", "주식등의", "주식등", "특수관계자", "소유",
 )
 #: ``plan.evidence`` key carrying the actor a directed acquisition named, before
 #: anything corpus-aware has confirmed that such a holder exists.  Read by
@@ -1524,6 +1535,42 @@ def _find_reporter(query: str) -> str | None:
     return re.sub(r"^보고자\s*[:：]?\s*", "", value).strip()
 
 
+def _names_a_filing(key: str) -> bool:
+    """Whether a canonical surface names the filing rather than the filer.
+
+    A holding question can put the document in the same relational slot the
+    holder occupies -- ``<issuer> 대량보유보고의 보유주식수`` asks about a filing,
+    not about anybody -- and reading the document as a holder invents a filer
+    the question never named.
+
+    Decided by composition, not by containment: the surface names a filing when
+    *all* of it is disclosure vocabulary -- qualifiers, optionally closed by a
+    head noun.  So ``대량보유상황보고서`` and ``주식등의대량보유상황보고서`` are filings,
+    and so is a bare fragment such as ``주식등``, which is what a spaced document
+    name leaves in the holder slot.  A holder whose name merely ends in one of
+    those words is not: ``보고펀드`` keeps its head elsewhere and ``대한보고`` has a
+    stem no qualifier explains, so both survive as reporters.
+    """
+
+    stem = key
+    for head in _REPORT_HEAD_NOUNS:
+        if stem.endswith(head):
+            stem = stem[: -len(head)]
+            break
+    while stem:
+        for qualifier in _REPORT_QUALIFIERS:
+            if stem.endswith(qualifier):
+                stem = stem[: -len(qualifier)]
+                break
+        else:
+            # Something no disclosure qualifier accounts for.  That is a name.
+            return False
+    # Nothing was left over, so the surface was the document all the way down.
+    # ``key`` is never empty here: the caller rejects a surface shorter than two
+    # characters before this runs.
+    return True
+
+
 def _natural_holding_reporter(
     query: str,
     mentions: tuple[tuple[int, int, str], ...],
@@ -1572,6 +1619,7 @@ def _natural_holding_reporter(
     if (
         len(key) < 2
         or key in _NON_REPORTER_SURFACES
+        or _names_a_filing(key)
         or _BARE_PERIOD_SUBJECT.fullmatch(key)
     ):
         return None

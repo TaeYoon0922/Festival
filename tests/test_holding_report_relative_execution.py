@@ -1043,3 +1043,64 @@ class NaturalReporterEntersPhase3Tests(unittest.TestCase):
         self.assertNotEqual(outcome.status, RESOLVED)
         self.assertFalse(outcome.resolved)
         self.assertEqual(outcome.results, ())
+
+
+class DocumentNounNeverStealsPhase3Tests(unittest.TestCase):
+    """A filing named in the holder slot must not open the authoritative lane.
+
+    The lane gates on a named holder.  A document read as one satisfies that
+    gate with an identity the corpus cannot match, so the lane engages, finds
+    nothing, and -- because an engaged lane is authoritative -- the ordinary
+    path that was answering the question never runs.  The holder staying
+    unresolved is what leaves that path in place.
+    """
+
+    def test_a_filing_noun_leaves_the_question_outside_phase_3(self) -> None:
+        question = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{COMPANY} 대량보유보고의 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertIsNone(query_plan.reporter)
+        self.assertEqual(query_plan.period.period_type, "receipt_date")
+        self.assertIsNone(
+            adapter(index_of(OLD, NEW)).adapt(
+                question,
+                query_plan,
+                execution(query_plan, candidate(OLD)),
+                routed_task_type="holding_event",
+            )
+        )
+
+    def test_a_named_holder_on_the_same_axis_still_enters(self) -> None:
+        """Control: the guard rejects documents, not the receipt-date lane."""
+
+        holder = "가상보유인"
+        older = replace(
+            OLD, reporter_key=holder, raw_reporter=holder,
+            doc_id="holding_axis_old", projection_chunk_id="holding_axis_old:report",
+        )
+        newer = replace(
+            NEW, reporter_key=holder, raw_reporter=holder,
+            doc_id="holding_axis_new", projection_chunk_id="holding_axis_new:report",
+        )
+        question = (
+            f"{COMPANY}에 대한 {holder}의 "
+            f"{newer.receipt_date[:4]}년 {int(newer.receipt_date[4:6])}월 "
+            f"{int(newer.receipt_date[6:])}일 접수 보고서 보유주식수는?"
+        )
+        query_plan = plan(question)
+
+        self.assertEqual(query_plan.reporter, holder)
+
+        outcome = adapter(index_of(older, newer)).adapt(
+            question,
+            query_plan,
+            execution(query_plan, candidate(older), candidate(newer)),
+            routed_task_type="holding_event",
+        )
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, RESOLVED)
+        self.assertEqual(outcome.report_execution.record.doc_id, newer.doc_id)

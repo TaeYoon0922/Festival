@@ -13,6 +13,7 @@ from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.query_understanding import (
     ACTOR_SOURCE_DIRECTED_HOLDER,
     HOLDING_ACTOR_CANDIDATE_KEY,
+    _names_a_filing,
 )
 from app.retrieval.interfaces import (
     CandidateChunk,
@@ -2014,4 +2015,154 @@ class NaturalHoldingReporterTests(unittest.TestCase):
         self.assertEqual(
             plan.evidence[HOLDING_ACTOR_CANDIDATE_KEY]["source"],
             ACTOR_SOURCE_DIRECTED_HOLDER,
+        )
+
+
+class DocumentNounIsNotAReporterTests(unittest.TestCase):
+    """A holding question can name the filing where a holder would stand.
+
+    ``<issuer> 대량보유보고의 보유주식수`` asks about a document, not about
+    anybody.  Reading that document as a holder invents a filer the question
+    never named, and -- because a named filer is what the authoritative report
+    lane gates on -- it also takes the question away from the path that was
+    answering it.  These cases fix the family, not one phrase.
+    """
+
+    ISSUER = "가상발행사"
+    OTHER = "가상상대사"
+    HOLDER = "가상보유인"
+    SECOND = "가상보유이"
+
+    def setUp(self) -> None:
+        self.understanding = QueryUnderstanding(
+            {name: {name} for name in (self.ISSUER, self.OTHER)}
+        )
+
+    def reporter(self, query: str):
+        return self.understanding.understand(query).reporter
+
+    # --------------------------------------------------- the document family
+    def test_a_filing_name_in_the_holder_slot_names_nobody(self) -> None:
+        for document in (
+            "대량보유보고",
+            "대량보유상황보고",
+            "대량보유상황보고서",
+            "대량보유보고서",
+            "주식등의 대량보유상황보고서",
+            "소유상황보고서",
+            "보고서",
+            "보고",
+            "공시",
+        ):
+            for question in (
+                f"{self.ISSUER} {document}의 보유주식수는?",
+                f"{self.ISSUER} {document}의 보유비율은?",
+            ):
+                with self.subTest(document=document, question=question):
+                    self.assertIsNone(self.reporter(question))
+
+    def test_the_family_is_derived_rather_than_enumerated(self) -> None:
+        """Composition, not membership: qualifiers may stack in any depth."""
+
+        for key in (
+            "보고",
+            "보고서",
+            "공시",
+            "신고서",
+            "대량보유보고",
+            "대량보유상황보고",
+            "대량보유상황보고서",
+            "소유상황보고서",
+            "주식등의대량보유상황보고서",
+            "임원주요주주소유상황보고서",
+            "특정증권등소유상황보고서",
+            # Bare fragments too: a spaced document name leaves one of these in
+            # the holder slot, and they are what the frozen set no longer lists.
+            "대량보유상황",
+            "주식등",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(_names_a_filing(key))
+
+    def test_a_holder_whose_name_ends_in_a_report_word_survives(self) -> None:
+        """The rule is compositional, so it cannot eat a real legal entity.
+
+        Containment would reject every one of these.  Requiring the whole
+        surface to be qualifiers plus a head is what keeps them holders.
+        """
+
+        for key in ("보고펀드", "대한보고", "신고전자", "보고서적", "가상공시투자"):
+            with self.subTest(key=key):
+                self.assertFalse(_names_a_filing(key))
+
+    def test_such_a_holder_is_still_read_as_the_reporter(self) -> None:
+        for holder in ("보고펀드", "대한보고"):
+            question = f"{self.ISSUER}에 대한 {holder}의 최신 보고 보유비율은?"
+            with self.subTest(holder=holder):
+                self.assertEqual(self.reporter(question), holder)
+
+    # ----------------------------------------- exact receipt date regression
+    def test_an_exact_receipt_date_question_is_not_given_a_false_holder(
+        self,
+    ) -> None:
+        """The measured regression, as its structure rather than its identities.
+
+        A filer stated ahead of the issuer, an exact receipt date, and the
+        filing named after the issuer.  Reading the filing as the holder would
+        hand this question to the authoritative report lane, which then has an
+        identity the corpus cannot match -- and the receipt-date path that was
+        answering it never runs.  The holder stays unresolved, which is what
+        leaves that path in place.
+        """
+
+        question = (
+            f"가상금융이 2025년 10월 10일에 접수한 "
+            f"{self.ISSUER} 대량보유보고의 보유주식수는?"
+        )
+        plan = self.understanding.understand(question)
+
+        self.assertIsNone(plan.reporter)
+        # The receipt-date axis this question is answered on is untouched.
+        self.assertEqual(plan.period.period_type, "receipt_date")
+        self.assertEqual(plan.period.from_date, "2025-10-10")
+        self.assertEqual(plan.period.to_date, "2025-10-10")
+        self.assertEqual(plan.metric, "holding_shares")
+
+    # ------------------------------------------------ T9-1A shapes preserved
+    def test_the_valid_natural_shapes_still_resolve(self) -> None:
+        for query in (
+            f"{self.ISSUER} {self.HOLDER}의 최신 보고 보유주식수는?",
+            f"{self.ISSUER}에 대한 {self.HOLDER}의 최신 보고 보유비율은?",
+            f"{self.ISSUER}에 대해 {self.HOLDER}가 최신 보고한 보유비율은?",
+            f"{self.ISSUER} 최대주주 {self.HOLDER}의 가장 최근 보고 기준 보유주식수는?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.reporter(query), self.HOLDER)
+
+    def test_a_legal_form_holder_is_unchanged(self) -> None:
+        self.assertEqual(
+            self.reporter(
+                f"{self.ISSUER}에 대해 주식회사 {self.HOLDER}가 최신 보고한 보유비율은?"
+            ),
+            f"주식회사 {self.HOLDER}",
+        )
+
+    def test_the_frozen_fail_closed_shapes_are_unchanged(self) -> None:
+        for query in (
+            # issuer only
+            f"{self.ISSUER} 최신 보고 보유주식수는?",
+            # two named holders
+            f"{self.ISSUER}에 대한 {self.HOLDER}와 {self.SECOND}의 최신 보고 보유비율은?",
+            # two corpus companies -- the role pair belongs to the corpus lane
+            f"{self.OTHER}가 보유한 {self.ISSUER} 주식은 몇 주인가?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
+    def test_the_labelled_and_pension_paths_are_unchanged(self) -> None:
+        self.assertEqual(
+            self.reporter(f"{self.ISSUER} 보고자: 가상투자 보유비율은?"), "가상투자"
+        )
+        self.assertEqual(
+            self.reporter(f"국민연금 {self.ISSUER} 최신 보고 보유주식수"), "국민연금"
         )
