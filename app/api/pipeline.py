@@ -882,6 +882,13 @@ def think_trace(
                 "correction_added_doc_ids",
             )
         }
+    pair = getattr(result, "correction_pair", None)
+    if isinstance(pair, Mapping) and pair:
+        # Whether a correction before/after pair was bound, and why not when it
+        # was not. Written beside the existing correction summary rather than
+        # into it, so every field a reader already had is unchanged, and absent
+        # entirely for a question that never reached the binder.
+        trace["correction_pair"] = dict(pair)
     event = getattr(execution, "event_expansion", None)
     if isinstance(event, Mapping) and event.get("event_expanded"):
         # Which lifecycle contributed which filings. An execution summary, not

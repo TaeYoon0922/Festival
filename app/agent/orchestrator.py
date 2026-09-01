@@ -37,7 +37,8 @@ from app.reasoning.holding_date_intent import (
 )
 from app.reasoning.correction_pair_roles import (
     apply_correction_pair,
-    bind_correction_pair,
+    decide_correction_pair,
+    pair_trace,
 )
 from app.reasoning.holding_event_fusion import fuse as fuse_holding_events
 from app.reasoning.holding_event_selection import (
@@ -90,6 +91,10 @@ class AgentResult:
     execution_trace: tuple[str, ...]
     #: Internal diagnostic only; never serialised into the public response.
     holding_coverage: CoverageAssessment = field(default_factory=CoverageAssessment)
+    #: Whether a correction before/after pair was bound, and the deterministic
+    #: reason when it was not.  Internal diagnostic, additive: it is reported
+    #: beside the existing trace and never replaces any field a reader has.
+    correction_pair: Mapping[str, Any] = field(default_factory=dict)
     #: The served evidence the answer was actually built from.  This equals the
     #: retrieval output unless a post-retrieval stage enriched it; because that
     #: output is immutable, an enriched list can only be carried out here.  The
@@ -288,6 +293,7 @@ class AgentOrchestrator:
 
         evidence_before = copy.deepcopy(evidence.to_dict())
         resolution: HoldingResolution | PeriodicFactResolution | None
+        correction_pair_trace: dict[str, Any] = {}
 
         if decision.task_type == "holding_event":
             trace.append("holding_event_resolver")
@@ -301,16 +307,20 @@ class AgentOrchestrator:
             # names the chain's root and final filing. Bind those two roles
             # here, before the composer renders the rows and the citations that
             # attribute them. Declining leaves the resolution exactly as it was.
-            correction_pair = bind_correction_pair(
+            correction_pair = decide_correction_pair(
                 resolution,
                 correction_trace=getattr(
                     retrieval_execution, "correction_expansion", None
                 ),
                 query_plan=query_plan,
             )
-            if correction_pair is not None:
+            # Diagnostic only: a decline used to be invisible, so a question
+            # that should have paired and did not looked the same as one that
+            # was never a pair. Recording it changes nothing about execution.
+            correction_pair_trace = pair_trace(correction_pair)
+            if correction_pair.claim is not None:
                 trace.append("correction_pair_roles")
-                resolution = apply_correction_pair(resolution, correction_pair)
+                resolution = apply_correction_pair(resolution, correction_pair.claim)
             resolution_before = copy.deepcopy(resolution.to_dict())
             trace.append("answer_composer")
             # What the question itself said about which event is wanted, read
@@ -416,6 +426,7 @@ class AgentOrchestrator:
             warnings=warnings,
             execution_trace=tuple(trace),
             holding_coverage=coverage,
+            correction_pair=correction_pair_trace,
             evidence_results=tuple(evidence_input.results),
             evidence_chunks=tuple(evidence_input.chunks),
             evidence_overridden=bool(

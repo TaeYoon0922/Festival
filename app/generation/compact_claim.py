@@ -28,6 +28,13 @@ from typing import Any
 # live in a frozen module, so the coupling is stable.
 from app.generation.answer_generator import _numeric_text, _text
 
+# The role label tables live beside the roles themselves, so this renderer and
+# the deterministic multi-event renderer cannot drift apart.
+from app.reasoning.correction_pair_roles import (
+    CORRECTION_ROLE_LABELS,
+    ROLE_FIELD_LABELS,
+)
+
 
 #: The task the router assigns to holding questions.
 SUPPORTED_TASK_TYPE = "holding_event"
@@ -52,22 +59,6 @@ NUMERIC_FIELDS: tuple[tuple[str, str, str], ...] = (
 _TEXT_LABELS = dict(TEXT_FIELDS)
 _NUMERIC_LABELS = {field: (label, unit) for field, label, unit in NUMERIC_FIELDS}
 
-#: How a correction version role is named in the answer.
-CORRECTION_ROLE_LABELS: dict[str, str] = {
-    "correction_before": "정정 전",
-    "correction_after": "정정 후",
-}
-
-#: What a field is called once a correction role owns the before/after axis.
-#: The frozen labels describe a position inside one filing's own change ("변동
-#: 후 주식수"); a correction role describes which *version of the filing* states
-#: the value.  Naming both on one line would read as one axis, so a field that
-#: states the holding as of the filing is named by what it measures instead.
-#: Any other field keeps its frozen label and only gains the role prefix.
-ROLE_FIELD_LABELS: dict[str, str] = {
-    "after_shares": "보유주식수",
-    "after_ratio": "보유비율",
-}
 
 #: Guardrails.  A claim that grows past these is no longer compact, and the
 #: failure this module exists to prevent starts coming back.

@@ -50,6 +50,40 @@ ROLE_AFTER = "correction_after"
 #: final version alone and ``original`` wants the first, so neither binds a pair.
 PAIR_INTENT = "history"
 
+#: How a document-version role is named in an answer.  Defined here, beside the
+#: roles themselves, because two renderers state them: the compact claim the
+#: verbalizer is given, and the deterministic multi-event rows that are served
+#: whenever the verbalizer skips.  One table, so the two cannot drift apart.
+CORRECTION_ROLE_LABELS: dict[str, str] = {
+    ROLE_BEFORE: "정정 전",
+    ROLE_AFTER: "정정 후",
+}
+
+#: What a field is called once a correction role owns the before/after axis.
+#: The frozen labels describe a position inside one filing's own change ("변동
+#: 후 주식수"); a correction role describes which *version of the filing* states
+#: the value.  Naming both on one line would read as one axis, so a field that
+#: states the holding as of the filing is named by what it measures instead.
+#: Any other field keeps its frozen label and only gains the role prefix.
+ROLE_FIELD_LABELS: dict[str, str] = {
+    "after_shares": "보유주식수",
+    "after_ratio": "보유비율",
+}
+
+#: Why a pair was not bound.  Deterministic, and diagnostic only: nothing reads
+#: these to decide anything, they are written to the execution trace so a
+#: decline is visible instead of silent.
+REASON_BOUND = "bound"
+REASON_INTENT_NOT_HISTORY = "intent_not_history"
+REASON_NO_REQUESTED_FIELDS = "no_requested_fields"
+REASON_NO_MATCHING_GROUP = "no_matching_group"
+REASON_MULTIPLE_MATCHING_GROUPS = "multiple_matching_groups"
+REASON_EVENT_COUNT_MISMATCH = "event_count_mismatch"
+REASON_ENDPOINT_EVENT_MISSING = "endpoint_event_missing"
+REASON_SUBJECT_MISMATCH = "subject_mismatch"
+REASON_FIELD_MISSING = "field_missing"
+REASON_FIELD_CONFLICT = "field_conflict"
+
 
 @dataclass(frozen=True)
 class CorrectionPairClaim:
@@ -94,27 +128,51 @@ def correction_intent(query_plan: Any) -> str | None:
     return str(value) if value else None
 
 
-def _chain_endpoints(trace: Any) -> tuple[str, str, str] | None:
-    """The root and final document of the one chain this execution expanded.
+def _chain_endpoints(trace: Any) -> list[tuple[str, str, str]]:
+    """Every chain this execution expanded, as ``(root, latest, group_id)``.
 
-    More than one chain leaves every filing unattributable: the trace reports
-    its documents as a single list without saying which chain each came from.
-    So the discipline ``corporate_event_authority`` already applies is applied
-    here too -- exactly one group, or nothing.
+    One execution can expand several chains: a reporter's filings for two
+    different reference events are corrected independently, and a question about
+    one of them retrieves both.  The trace carries each chain's own endpoints in
+    ``correction_groups``; the flat ``correction_root_doc_id`` keys describe only
+    the first group and are read as a single-group fallback, so a trace written
+    before those per-group entries existed still resolves.
+
+    Which of several chains the question is about is not decided here -- see
+    ``_qualifying_pairs``, which asks which chain's endpoints are the served
+    events, rather than picking one by order, recency, or rank.
     """
 
     if not isinstance(trace, Mapping):
-        return None
-    if int(trace.get("correction_group_count") or 0) != 1:
-        return None
-    group_id = str(trace.get("correction_group_id") or "")
-    root = str(trace.get("correction_root_doc_id") or "")
-    latest = str(trace.get("correction_latest_doc_id") or "")
-    if not group_id or not root or not latest or root == latest:
-        # A chain whose root is its own final version has no two versions to
-        # compare, and an unnamed endpoint cannot be attributed to a filing.
-        return None
-    return root, latest, group_id
+        return []
+    groups = trace.get("correction_groups")
+    entries: list[Mapping[str, Any]] = []
+    if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes)):
+        entries = [group for group in groups if isinstance(group, Mapping)]
+    if not entries:
+        if int(trace.get("correction_group_count") or 0) != 1:
+            # Several chains, and the trace names only one chain's endpoints:
+            # the rest are unattributable, so nothing here can be trusted.
+            return []
+        entries = [
+            {
+                "correction_group_id": trace.get("correction_group_id"),
+                "root_doc_id": trace.get("correction_root_doc_id"),
+                "latest_doc_id": trace.get("correction_latest_doc_id"),
+            }
+        ]
+    endpoints: list[tuple[str, str, str]] = []
+    for entry in entries:
+        group_id = str(entry.get("correction_group_id") or "")
+        root = str(entry.get("root_doc_id") or "")
+        latest = str(entry.get("latest_doc_id") or "")
+        if not group_id or not root or not latest or root == latest:
+            # A chain whose root is its own final version has no two versions to
+            # compare, and an unnamed endpoint cannot be attributed to a filing.
+            continue
+        if (root, latest, group_id) not in endpoints:
+            endpoints.append((root, latest, group_id))
+    return endpoints
 
 
 def _event_for_document(
@@ -163,54 +221,145 @@ def _states_every_field(event: HoldingEvent, fields: Sequence[str]) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class CorrectionPairDecision:
+    """Whether a pair was bound, and the deterministic reason when it was not."""
+
+    claim: CorrectionPairClaim | None
+    reason: str
+
+    @property
+    def bound(self) -> bool:
+        return self.claim is not None
+
+
+def _qualifying_pairs(
+    resolution: HoldingResolution,
+    endpoints: Sequence[tuple[str, str, str]],
+    fields: Sequence[str],
+) -> tuple[list[CorrectionPairClaim], str]:
+    """Every chain whose two endpoints are the served events of this question.
+
+    A chain qualifies only when the events it names are the ones the resolver
+    matched, so the question own constraints -- which is what ``matches_query``
+    records -- decide which chain is in scope.  A chain for another reference
+    event fails because its filings are not what the question matched, not
+    because anything here reads its date or its rank.
+
+    Several qualifying chains means the question singled none of them out.  The
+    caller declines then: choosing between them would need a preference this
+    module refuses to invent.
+    """
+
+    matching = [event for event in resolution.events if event.matches_query is True]
+    if len(matching) < 2:
+        # A pair needs two matched filings; one version answers alone.
+        return [], REASON_EVENT_COUNT_MISMATCH
+
+    claims: list[CorrectionPairClaim] = []
+    reason = REASON_NO_MATCHING_GROUP
+    for root_doc_id, latest_doc_id, group_id in endpoints:
+        before = _event_for_document(matching, root_doc_id)
+        after = _event_for_document(matching, latest_doc_id)
+        if before is None or after is None or before is after:
+            reason = _narrow(reason, REASON_ENDPOINT_EVENT_MISSING)
+            continue
+        if not _same_subject(before, after):
+            reason = _narrow(reason, REASON_SUBJECT_MISMATCH)
+            continue
+        missing = _missing_field_reason(before, fields) or _missing_field_reason(
+            after, fields
+        )
+        if missing is not None:
+            # Half a pair is not a pair, and the missing half is never guessed.
+            reason = _narrow(reason, missing)
+            continue
+        claims.append(
+            CorrectionPairClaim(
+                fields=tuple(fields),
+                before_doc_id=root_doc_id,
+                after_doc_id=latest_doc_id,
+                before_event=before,
+                after_event=after,
+                correction_group_id=group_id,
+                reference_date=before.reference_date or after.reference_date,
+                reporter=before.reporter or after.reporter,
+                corp_name=before.corp_name or after.corp_name,
+            )
+        )
+    return claims, reason
+
+
+#: Least to most specific, so the chain that got furthest explains the decline.
+_REASON_ORDER = (
+    REASON_NO_MATCHING_GROUP,
+    REASON_ENDPOINT_EVENT_MISSING,
+    REASON_SUBJECT_MISMATCH,
+    REASON_FIELD_MISSING,
+    REASON_FIELD_CONFLICT,
+)
+
+
+def _narrow(current: str, candidate: str) -> str:
+    order = {reason: index for index, reason in enumerate(_REASON_ORDER)}
+    return candidate if order.get(candidate, 0) > order.get(current, 0) else current
+
+
+def _missing_field_reason(event: HoldingEvent, fields: Sequence[str]) -> str | None:
+    for field in fields:
+        if getattr(event, field, None) is None:
+            return REASON_FIELD_MISSING
+        provenance = event.field_provenance.get(field)
+        if provenance is None:
+            return REASON_FIELD_MISSING
+        if provenance.field_conflict:
+            return REASON_FIELD_CONFLICT
+    return None
+
+
+def decide_correction_pair(
+    resolution: HoldingResolution,
+    *,
+    correction_trace: Any,
+    query_plan: Any,
+) -> CorrectionPairDecision:
+    """Read the two versions a pair question asks about, or decline with a reason.
+
+    Declining is the frozen behaviour: the caller keeps the resolution it
+    already had, warnings and all.  Nothing here guesses a pair into existence,
+    and the reason is diagnostic only -- no caller branches on it.
+    """
+
+    if correction_intent(query_plan) != PAIR_INTENT:
+        return CorrectionPairDecision(None, REASON_INTENT_NOT_HISTORY)
+    fields = tuple(resolution.requested_fields)
+    if not fields:
+        # A history question naming no metric wants the timeline, which the
+        # composer already reports in full.
+        return CorrectionPairDecision(None, REASON_NO_REQUESTED_FIELDS)
+    endpoints = _chain_endpoints(correction_trace)
+    if not endpoints:
+        return CorrectionPairDecision(None, REASON_NO_MATCHING_GROUP)
+
+    claims, reason = _qualifying_pairs(resolution, endpoints, fields)
+    if len(claims) == 1:
+        return CorrectionPairDecision(claims[0], REASON_BOUND)
+    if len(claims) > 1:
+        return CorrectionPairDecision(None, REASON_MULTIPLE_MATCHING_GROUPS)
+    return CorrectionPairDecision(None, reason)
+
+
 def bind_correction_pair(
     resolution: HoldingResolution,
     *,
     correction_trace: Any,
     query_plan: Any,
 ) -> CorrectionPairClaim | None:
-    """Read the two versions a pair question asks about, or decline.
+    """The bound pair alone, for callers that do not report the decline."""
 
-    Declining is the frozen behaviour: the caller keeps the resolution it
-    already had, warnings and all.  Nothing here guesses a pair into existence.
-    """
-
-    if correction_intent(query_plan) != PAIR_INTENT:
-        return None
-    fields = tuple(resolution.requested_fields)
-    if not fields:
-        # A history question naming no metric wants the timeline, which the
-        # composer already reports in full.
-        return None
-    endpoints = _chain_endpoints(correction_trace)
-    if endpoints is None:
-        return None
-    root_doc_id, latest_doc_id, group_id = endpoints
-
-    matching = [event for event in resolution.events if event.matches_query is True]
-    if len(matching) != 2:
-        # One version answers alone; three or more is a timeline, not a pair.
-        return None
-    before = _event_for_document(matching, root_doc_id)
-    after = _event_for_document(matching, latest_doc_id)
-    if before is None or after is None or before is after:
-        return None
-    if not _same_subject(before, after):
-        return None
-    if not _states_every_field(before, fields) or not _states_every_field(after, fields):
-        # Half a pair is not a pair, and the missing half must not be guessed.
-        return None
-    return CorrectionPairClaim(
-        fields=fields,
-        before_doc_id=root_doc_id,
-        after_doc_id=latest_doc_id,
-        before_event=before,
-        after_event=after,
-        correction_group_id=group_id,
-        reference_date=before.reference_date or after.reference_date,
-        reporter=before.reporter or after.reporter,
-        corp_name=before.corp_name or after.corp_name,
-    )
+    return decide_correction_pair(
+        resolution, correction_trace=correction_trace, query_plan=query_plan
+    ).claim
 
 
 def apply_correction_pair(
@@ -240,9 +389,21 @@ def apply_correction_pair(
     return replace(resolution, events=tuple(ordered))
 
 
-def pair_trace(claim: CorrectionPairClaim | None) -> dict[str, Any]:
-    """What the execution record says about role binding, bound or not."""
+def pair_trace(
+    decision: CorrectionPairDecision | CorrectionPairClaim | None,
+) -> dict[str, Any]:
+    """What the execution record says about role binding, bound or not.
 
+    Diagnostic only.  It is written beside the existing trace fields and never
+    replaces one, so a reader that does not know about it sees what it always
+    saw.
+    """
+
+    if isinstance(decision, CorrectionPairDecision):
+        claim, reason = decision.claim, decision.reason
+    else:
+        claim = decision
+        reason = REASON_BOUND if claim is not None else REASON_NO_MATCHING_GROUP
     if claim is None:
-        return {"correction_pair_bound": False}
-    return {"correction_pair_bound": True, **copy.deepcopy(claim.to_dict())}
+        return {"bound": False, "reason": reason}
+    return {"bound": True, "reason": reason, **copy.deepcopy(claim.to_dict())}

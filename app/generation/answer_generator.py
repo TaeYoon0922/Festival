@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.answer_composer import AnswerDraft
+from app.reasoning.correction_pair_roles import (
+    CORRECTION_ROLE_LABELS,
+    ROLE_FIELD_LABELS,
+)
 from app.reasoning.periodic_metric_view import project_periodic_metric_table
 
 
@@ -195,7 +199,7 @@ def _holding_sections(
         # One line per event instead of eleven, but only when every verified
         # value survives the compression.  All events or none: a half-compact
         # answer would make two events look like different kinds of fact.
-        compact = _holding_compact_lines(events, markers)
+        compact = _holding_compact_lines(events, markers, requested_fields)
     if compact is not None:
         return (
             _holding_section_list(draft, compact, [id for ids in markers for id in ids]),
@@ -312,6 +316,7 @@ def _holding_section_list(
 def _holding_compact_lines(
     events: Sequence[Mapping[str, Any]],
     markers: Sequence[Sequence[str]],
+    requested_fields: Sequence[str] = (),
 ) -> list[str] | None:
     """State each verified event on one line, or return ``None``.
 
@@ -329,7 +334,12 @@ def _holding_compact_lines(
 
     shared_company = _holding_shared_company(events)
     rows = [
-        _holding_compact_row(event, marker, omit_company=shared_company is not None)
+        _holding_compact_row(
+            event,
+            marker,
+            omit_company=shared_company is not None,
+            requested_fields=requested_fields,
+        )
         for event, marker in zip(events, markers)
     ]
     if any(row is None for row in rows):
@@ -362,9 +372,19 @@ def _holding_shared_company(events: Sequence[Mapping[str, Any]]) -> str | None:
 
 
 def _holding_compact_row(
-    event: Mapping[str, Any], marker: Sequence[str], *, omit_company: bool
+    event: Mapping[str, Any],
+    marker: Sequence[str],
+    *,
+    omit_company: bool,
+    requested_fields: Sequence[str] = (),
 ) -> str | None:
-    """Render one event as ``date | reporter | shares | ratio | filing [n]``."""
+    """Render one event as ``date | reporter | shares | ratio | filing [n]``.
+
+    A row for an event the correction graph bound to a document-version role
+    additionally states the requested metric under that role, because two
+    filings of one corrected report are otherwise two rows the reader cannot
+    tell apart.  Every other row is byte-identical to what it always was.
+    """
 
     date = _text(event.get("reference_date"))
     if not date or not marker:
@@ -379,11 +399,19 @@ def _holding_compact_row(
     if reporter:
         parts.append(reporter)
 
+    role = _holding_correction_role_statement(event, requested_fields)
+    if role:
+        parts.append(role)
+
+    # A movement the role statement already spells out in full would print the
+    # same figure twice on one row.  Only an exact restatement is dropped, so a
+    # movement carrying anything more -- a before value, a change, a direction --
+    # is always kept and no verified value is lost.
     shares = _holding_compact_movement(event, _SHARES)
-    if shares:
+    if shares and not (role and shares in role):
         parts.append(shares)
     ratio = _holding_compact_movement(event, _RATIO)
-    if ratio:
+    if ratio and not (role and ratio in role):
         parts.append(ratio)
 
     filing = _holding_compact_filing(event)
@@ -501,6 +529,49 @@ _DIRECTION_PREDICATES = {
 
 _SHARES = 0
 _RATIO = 1
+
+
+#: The unit each requested holding field is stated in, matching the frozen
+#: movement renderer so a role statement and a movement print one value the
+#: same way.
+_ROLE_FIELD_UNITS = {
+    "before_shares": _SHARE_UNIT,
+    "after_shares": _SHARE_UNIT,
+    "change_shares": _SHARE_UNIT,
+    "before_ratio": _RATIO_UNIT,
+    "after_ratio": _RATIO_UNIT,
+    "change_ratio": _RATIO_CHANGE_UNIT,
+}
+
+
+def _holding_correction_role_statement(
+    event: Mapping[str, Any], requested_fields: Sequence[str]
+) -> str | None:
+    """State the requested metric under this filing's correction role.
+
+    Returns ``None`` for every event the correction graph did not bind, which
+    is every event outside a "정정 전과 정정 후" question -- so the frozen row
+    format is untouched wherever no role exists.
+
+    The role names which *version of the filing* states the value, while the
+    frozen field labels name a position inside one filing's own change.  Saying
+    both on one line would read as a single axis, so a field that states the
+    holding as of the filing is named by what it measures.
+    """
+
+    label = CORRECTION_ROLE_LABELS.get(str(event.get("correction_role") or ""))
+    if not label:
+        return None
+    stated = []
+    for field in requested_fields:
+        unit = _ROLE_FIELD_UNITS.get(field)
+        if unit is None:
+            continue
+        value = _numeric_text(event.get(field), unit)
+        if not value:
+            continue
+        stated.append(f"{label} {ROLE_FIELD_LABELS.get(field, field)} {value}")
+    return " ".join(stated) if stated else None
 
 
 def _holding_prose_lines(
