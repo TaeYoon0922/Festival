@@ -357,10 +357,17 @@ def seed_expansion_targets(
     present: set[str] = set(seeds)
     seed_member: dict[str, str] = {}
     seed_event: dict[str, str] = {}
+    # The same batched lookup, additionally kept whole.  A downstream consumer
+    # that needs to know which filing of a lifecycle is the canonical one --
+    # and whether P0-A positively established that -- would otherwise have to
+    # re-derive it from the flattened trace, which cannot express it.  Nothing
+    # here computes state; it is carried instead of discarded.
+    member_states: dict[str, dict[str, Any]] = {}
     for doc_id, state in (resolver.event_states(seeds) or {}).items():
         seed_member[doc_id] = state.doc_id
         seed_event[doc_id] = state.event_id
         present.add(state.doc_id)
+        member_states[doc_id] = state.to_dict()
 
     seen_events: set[str] = set()
     wanted: list[str] = []
@@ -468,5 +475,6 @@ def seed_expansion_targets(
         "skipped": skipped,
         "truncated": truncated,
         "seed_member_doc_ids": dict(seed_member),
+        "member_states": dict(member_states),
         "events_considered": len(seen_events),
     }

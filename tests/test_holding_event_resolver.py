@@ -11,6 +11,8 @@ from app.reasoning.evidence_builder import (
 from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
     NumericValue,
+    _requested_fields,
+    has_acquisition_semantics,
     resolve_holding_events,
 )
 from app.reasoning.query_plan import QueryPlan
@@ -494,6 +496,44 @@ class HoldingEventResolverTests(unittest.TestCase):
         self.assertTrue(
             event.field_provenance["after_shares"].sources[0].direct_field_ref
         )
+
+
+class AcquisitionSemanticAuthorityTests(unittest.TestCase):
+    """The acquisition family a question belongs to, answerable or not."""
+
+    def test_answerable_acquisition_wording_is_acquisition_semantics(self):
+        for question in ("취득일", "취득 일자", "취득 수량", "취득 주식수", "취득주식수"):
+            with self.subTest(question=question):
+                self.assertTrue(has_acquisition_semantics(question, {}))
+                # These stay answerable request fields; the predicate reads
+                # them through the canonical parser rather than restating it.
+                self.assertTrue(_requested_fields(question, {}))
+
+    def test_unit_price_wording_is_acquisition_semantics_but_not_a_field(self):
+        for question in ("취득단가", "취득 단가", "취득/처분단가"):
+            with self.subTest(question=question):
+                self.assertTrue(has_acquisition_semantics(question, {}))
+                # Recognising the family must not invent an answer field.
+                self.assertEqual(_requested_fields(question, {}), ())
+
+    def test_generic_holding_language_is_not_acquisition_semantics(self):
+        for question in (
+            "보유주식수는?",
+            "보유비율은?",
+            "지분율은 얼마인가요?",
+            "증감주식수는?",
+            "보고자는 누구인가요?",
+            "주식을 얼마나 들고 있어?",
+            "단가는 얼마인가요?",
+        ):
+            with self.subTest(question=question):
+                self.assertFalse(has_acquisition_semantics(question, {}))
+
+    def test_a_requested_acquisition_field_on_the_plan_is_honoured(self):
+        plan = {"evidence": {"requested_holding_fields": ["acquired_shares"]}}
+
+        self.assertTrue(has_acquisition_semantics("보유 현황", plan))
+        self.assertFalse(has_acquisition_semantics("보유 현황", {}))
 
 
 if __name__ == "__main__":

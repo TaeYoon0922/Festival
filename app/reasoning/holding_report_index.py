@@ -311,6 +311,24 @@ class HoldingReportIndex:
             return ()
         return self._by_pair.get((str(issuer_corp_code), key), ())
 
+    def enumerate_reporters(self, issuer_corp_code: str) -> tuple[str, ...]:
+        """Every holder this corpus records as filing about one issuer.
+
+        The filing's own holder string is returned, not the key, because the
+        caller compares identities with the frozen reporter matcher and a key
+        has already thrown away the legal form that matcher reads.  Ordering is
+        by canonical key so two runs enumerate the same corpus identically.
+        """
+
+        code = str(issuer_corp_code or "").strip()
+        if not code:
+            return ()
+        return tuple(
+            records[0].raw_reporter
+            for (issuer, _key), records in sorted(self._by_pair.items())
+            if issuer == code and records
+        )
+
     # -------------------------------------------------------------- selection
     def select_report(
         self,

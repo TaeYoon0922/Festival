@@ -104,6 +104,29 @@ class EvidenceSet:
     warnings: tuple[str, ...]
     ambiguity: Mapping[str, Any]
 
+    @property
+    def served_items(self) -> tuple[EvidenceItem, ...]:
+        """Every served item once, in retrieval order.
+
+        Grouping can place one item in more than one group; a consumer that
+        needs the served evidence itself -- a field-evidence producer reading
+        the structured row behind a chunk -- wants each item exactly once, and
+        wants them in the order they were served rather than the order the
+        groups happened to be built in.
+        """
+
+        by_id = {
+            item.chunk_id: item
+            for group in self.evidence_groups
+            for item in group.items
+        }
+        ordered = [
+            by_id.pop(chunk_id)
+            for chunk_id in self.retrieval_order
+            if chunk_id in by_id
+        ]
+        return tuple([*ordered, *by_id.values()])
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "question": self.question,

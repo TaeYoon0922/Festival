@@ -96,6 +96,23 @@ class ClarificationTrace(BaseModel):
     options: list[ClarificationOptionTrace] = Field(default_factory=list)
 
 
+class BoundedClarificationCandidateTrace(BaseModel):
+    id: str
+    label: str
+    semantic_type: str
+    provenance: str
+
+
+class BoundedClarificationDecisionTrace(BaseModel):
+    state: str
+    reason: str
+    candidate_count: int
+    candidates: list[BoundedClarificationCandidateTrace] = Field(default_factory=list)
+    selected_candidate_id: str | None = None
+    classifier_status: str
+    truncated: bool = False
+
+
 class HcxSemanticDiagnosticTrace(BaseModel):
     transport_status: str
     response_shape: str | None = None
@@ -141,6 +158,23 @@ class AnswerabilityTrace(BaseModel):
     citable: bool = False
     relevant_to_request: bool | None = None
     answerable: bool = False
+    #: STEP 11-C.  Present only when a domain producer answered for a canonical
+    #: field, so every question outside the two fielded lanes keeps the exact
+    #: key set it had.
+    unavailable_fields: list[str] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+    unavailable_evidence: list[dict[str, Any]] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+
+
+class HoldingEvidenceCoverageTrace(BaseModel):
+    status: str
+    rescued: bool
+    rescue_mode: str
 
 
 class ThinkTrace(BaseModel):
@@ -179,6 +213,14 @@ class ThinkTrace(BaseModel):
         exclude_if=lambda value: value is None,
     )
     answerability: AnswerabilityTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    holding_evidence_coverage: HoldingEvidenceCoverageTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    clarification: BoundedClarificationDecisionTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

@@ -7,6 +7,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from app.reasoning.field_evidence import (
+    FieldEvidence,
+    FieldReason,
+    FieldStatus,
+    field_evidence_trace,
+    resolve_field_states,
+    served_chunk_ids,
+)
 from app.reasoning.multi_document_evidence import (
     LIFECYCLE_NO_MEMBERS,
     LIFECYCLE_NONE,
@@ -39,6 +47,15 @@ class AnswerabilityResult:
     missing_fields: tuple[str, ...] = ()
     reason: str | None = None
     relevant_to_request: bool | None = None
+    #: STEP 11-C.  Canonical fields an authoritative source states no value for.
+    unavailable_fields: tuple[str, ...] = ()
+    #: The normalized producer findings this verdict was reached from.  Empty
+    #: for every question outside the two fielded lanes.
+    unavailable_evidence: tuple[Mapping[str, Any], ...] = ()
+    #: The refusal wording and the served citation supporting it, when a field
+    #: was proved unavailable by evidence the caller was actually shown.
+    refusal_reason: str | None = None
+    refusal_citation: str | None = None
 
     @property
     def citable(self) -> bool:
@@ -64,6 +81,10 @@ class AnswerabilityResult:
             "citable": self.citable,
             "relevant_to_request": self.relevant_to_request,
             "answerable": self.answerable,
+            "unavailable_fields": list(self.unavailable_fields),
+            "unavailable_evidence": [
+                dict(record) for record in self.unavailable_evidence
+            ],
         }
 
 
@@ -82,47 +103,35 @@ class AnswerabilityGuard:
         evidence_count = len(list(getattr(execution, "results", ()) or ()))
         citation_count = len(tuple(getattr(generated, "citations", ()) or ()))
 
-        facts = getattr(multi_document, "facts", None)
-        if facts is not None:
-            complete = bool(getattr(facts, "complete", False))
-            unresolved = int(getattr(facts, "unresolved_count", 0) or 0)
-            logical_count = int(getattr(facts, "logical_count", 0) or 0)
-            lifecycle = getattr(facts, "lifecycle_answer", None)
-            if unresolved > 0 or not complete:
-                return AnswerabilityResult(
-                    AnswerabilityStatus.INSUFFICIENT_EVIDENCE,
-                    evidence_count,
-                    citation_count,
-                    complete=False,
-                    reason="incomplete_multi_document_set",
-                )
-            if logical_count == 0 or lifecycle in {LIFECYCLE_NONE, LIFECYCLE_NO_MEMBERS}:
-                return AnswerabilityResult(
-                    AnswerabilityStatus.NOT_FOUND,
-                    evidence_count,
-                    citation_count,
-                    complete=True,
-                    reason=(
-                        "complete_set_without_matching_lifecycle"
-                        if lifecycle == LIFECYCLE_NONE
-                        else "complete_empty_set"
-                    ),
-                )
-            if citation_count == 0:
-                return AnswerabilityResult(
-                    AnswerabilityStatus.INSUFFICIENT_EVIDENCE,
-                    evidence_count,
-                    citation_count,
-                    complete=True,
-                    reason="citation_capable_evidence_missing",
-                )
-            return AnswerabilityResult(
-                AnswerabilityStatus.ANSWERABLE,
-                evidence_count,
-                citation_count,
-                complete=True,
-                reason="complete_multi_document_evidence",
+        # STEP 11-C.2.  P0-C answers a different question from the field lane:
+        # whether the set of filings this request is about is even complete.  A
+        # supported single field says nothing about that, so a blocking P0-C
+        # verdict is returned first and cannot be overridden -- an incomplete
+        # document set stays insufficient however well one field is evidenced.
+        multi_result = _multi_document_result(
+            getattr(multi_document, "facts", None), evidence_count, citation_count
+        )
+        if multi_result is not None and not multi_result.answerable:
+            return multi_result
+
+        # When a domain producer established what an authoritative source says
+        # about a requested field, that finding decides the field: a count says
+        # how much evidence was served, this says what the served evidence
+        # states.  Producers decline unless they hold the identity to speak, so
+        # a question no producer claimed takes exactly the path it always did.
+        states = resolve_field_states(
+            getattr(agent_result, "field_evidence", ()) or (),
+            served=served_chunk_ids(execution),
+        )
+        if states:
+            return _field_result(
+                states,
+                generated=generated,
+                evidence_count=evidence_count,
+                citation_count=citation_count,
             )
+        if multi_result is not None:
+            return multi_result
 
         semantic_relevance = _semantic_evidence_relevance(
             plan, generated=generated, execution=execution
@@ -207,6 +216,179 @@ class AnswerabilityGuard:
         )
 
 
+def _multi_document_result(
+    facts: Any, evidence_count: int, citation_count: int
+) -> AnswerabilityResult | None:
+    """P0-C's own verdict, unchanged, or ``None`` when P0-C did not engage.
+
+    Lifted out of ``evaluate`` verbatim so the set-completeness question can be
+    asked before the field question without either being rewritten.
+    """
+
+    if facts is None:
+        return None
+    complete = bool(getattr(facts, "complete", False))
+    unresolved = int(getattr(facts, "unresolved_count", 0) or 0)
+    logical_count = int(getattr(facts, "logical_count", 0) or 0)
+    lifecycle = getattr(facts, "lifecycle_answer", None)
+    if unresolved > 0 or not complete:
+        return AnswerabilityResult(
+            AnswerabilityStatus.INSUFFICIENT_EVIDENCE,
+            evidence_count,
+            citation_count,
+            complete=False,
+            reason="incomplete_multi_document_set",
+        )
+    if logical_count == 0 or lifecycle in {LIFECYCLE_NONE, LIFECYCLE_NO_MEMBERS}:
+        return AnswerabilityResult(
+            AnswerabilityStatus.NOT_FOUND,
+            evidence_count,
+            citation_count,
+            complete=True,
+            reason=(
+                "complete_set_without_matching_lifecycle"
+                if lifecycle == LIFECYCLE_NONE
+                else "complete_empty_set"
+            ),
+        )
+    if citation_count == 0:
+        return AnswerabilityResult(
+            AnswerabilityStatus.INSUFFICIENT_EVIDENCE,
+            evidence_count,
+            citation_count,
+            complete=True,
+            reason="citation_capable_evidence_missing",
+        )
+    return AnswerabilityResult(
+        AnswerabilityStatus.ANSWERABLE,
+        evidence_count,
+        citation_count,
+        complete=True,
+        reason="complete_multi_document_evidence",
+    )
+
+
+#: How each producer-issued reason is stated back to the asker.  Keyed on the
+#: reason the producer reached, so the sentence describes the evidence rather
+#: than restating a question or a benchmark.
+_REFUSAL_TEXT = {
+    FieldReason.NOT_STATED: (
+        "해당 공시의 요청 항목에는 값이 제시되어 있지 않아 확인할 수 없습니다."
+    ),
+    FieldReason.OMITTED: (
+        "해당 보고서에는 요청한 값이 기재되지 않은 것으로 명시되어 있어 "
+        "확인할 수 없습니다."
+    ),
+    FieldReason.WITHHELD_OR_DEFERRED: (
+        "해당 공시에서는 요청한 값이 현재 공개되지 않았거나 추후 공개될 예정인 "
+        "것으로 명시되어 있어 확인할 수 없습니다."
+    ),
+}
+
+
+def _field_result(
+    states: Mapping[str, FieldEvidence],
+    *,
+    generated: Any,
+    evidence_count: int,
+    citation_count: int,
+) -> AnswerabilityResult:
+    """Decide answerability from what the producers found, and nothing else.
+
+    Every field carries its own state, so a request for two fields keeps both:
+    one supported field does not confirm the other, and one unsupported field
+    does not erase the one that was.  Completeness stays what it always was --
+    every requested field has to be supported.
+    """
+
+    confirmed = tuple(
+        sorted(
+            field
+            for field, state in states.items()
+            if state.status is FieldStatus.AVAILABLE
+        )
+    )
+    missing = tuple(sorted(set(states) - set(confirmed)))
+    unavailable = tuple(
+        sorted(
+            field
+            for field, state in states.items()
+            if state.status is FieldStatus.UNAVAILABLE
+        )
+    )
+    trace = tuple(field_evidence_trace(states))
+
+    if not missing:
+        return AnswerabilityResult(
+            AnswerabilityStatus.ANSWERABLE,
+            evidence_count,
+            citation_count,
+            complete=True,
+            confirmed_fields=confirmed,
+            reason="requested_field_value_is_supported",
+            unavailable_evidence=trace,
+        )
+
+    refusal = next(
+        (
+            states[field]
+            for field in unavailable
+            if states[field].reason is not None and states[field].citable
+        ),
+        None,
+    )
+    return AnswerabilityResult(
+        (
+            AnswerabilityStatus.PARTIALLY_ANSWERABLE
+            if confirmed and citation_count > 0
+            else AnswerabilityStatus.INSUFFICIENT_EVIDENCE
+        ),
+        evidence_count,
+        citation_count,
+        complete=False,
+        confirmed_fields=confirmed,
+        missing_fields=missing,
+        reason=(
+            "some_requested_fields_are_supported"
+            if confirmed
+            else f"requested_field_{_dominant_status(states, missing)}"
+        ),
+        unavailable_fields=unavailable,
+        unavailable_evidence=trace,
+        refusal_reason=None if refusal is None else refusal.reason.value,
+        refusal_citation=_citation_id(
+            generated, None if refusal is None else refusal.chunk_id
+        ),
+    )
+
+
+def _dominant_status(
+    states: Mapping[str, FieldEvidence], missing: Sequence[str]
+) -> str:
+    """The one unsupported state to report when every requested field failed."""
+
+    found = {states[field].status for field in missing}
+    if len(found) == 1:
+        return next(iter(found)).value
+    return "unsupported"
+
+
+def _citation_id(generated: Any, chunk_id: str | None) -> str | None:
+    """The marker the answer already gave this chunk, or nothing.
+
+    A refusal may only point at evidence the caller was actually shown.  When
+    the proving chunk was never cited there is no marker to give, and inventing
+    one would attach the refusal to somebody else's evidence.
+    """
+
+    if not chunk_id:
+        return None
+    for citation in getattr(generated, "citations", ()) or ():
+        if str(getattr(citation, "chunk_id", "")) == str(chunk_id):
+            return str(getattr(citation, "citation_id", "") or "") or None
+    return None
+
+
 def guarded_answer_text(
     result: AnswerabilityResult,
     deterministic_answer: str,
@@ -218,6 +400,12 @@ def guarded_answer_text(
     status = result.status
     if status is AnswerabilityStatus.ANSWERABLE:
         return deterministic_answer
+    cited_refusal = _cited_refusal(result)
+    if cited_refusal is not None:
+        # Not a categorical negative and deliberately not firewalled: this does
+        # not say the thing never happened, it says the source states no value
+        # for the field -- which is exactly what the cited evidence shows.
+        return cited_refusal
     if status is AnswerabilityStatus.NOT_FOUND:
         facts = getattr(multi_document, "facts", None)
         lifecycle = getattr(facts, "lifecycle_answer", None)
@@ -237,6 +425,24 @@ def guarded_answer_text(
         "현재 확보된 공시 근거만으로는 해당 내용을 확인하기 어렵습니다.",
         status,
     )
+
+
+def _cited_refusal(result: AnswerabilityResult) -> str | None:
+    """The field-bound refusal this verdict earned, with its own citation.
+
+    Both halves come from the producer's finding: the sentence from the reason
+    it reached, the marker from the served citation it was read from.  Without
+    a served citation there is nothing to point at and the ordinary wording
+    stands, because a refusal must never invent the evidence it cites.
+    """
+
+    if result.refusal_reason is None or not result.refusal_citation:
+        return None
+    try:
+        text = _REFUSAL_TEXT[FieldReason(result.refusal_reason)]
+    except (KeyError, ValueError):
+        return None
+    return f"{text} {result.refusal_citation}"
 
 
 def contains_categorical_negative(text: str) -> bool:
