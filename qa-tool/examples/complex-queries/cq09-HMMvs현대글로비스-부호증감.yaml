@@ -1,0 +1,39 @@
+# 2사 sign-flip multi-year
+
+question_id: CQ09
+question: HMM과 현대글로비스 2023·2024 사업보고서 연결 당기순이익 부호(흑자/적자)와 전기 대비 증감률을 각각 비교해, 2024년 실적 개선폭이 더 큰 쪽은?
+
+listed_name: HMM
+corp_name: HMMpeer_listed_name: 현대글로비스
+peer_corp_name: 현대글로비스
+
+theme: 2사 sign-flip multi-year
+focus: 당기순이익 부호·증감률 peer compare
+
+reasoning_types:
+  - compare
+  - compute
+  - multi_doc
+  - correction
+
+doc_group: periodic
+task_type (기대): cross_company · sign_flip · peer_rate · multi_period · multi_corp
+
+expected_behavior: stretch_goal  # partial_answer 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 각사 2023·2024 당기순이익·부호
+  - 전기 대비 증감률(파생)
+  - 2024 개선폭 더 큰 corp
+
+must_NOT_invent:
+  - 정정 전 수치를 최종값으로 혼동
+  - 코퍼스 밖 invent · 두 기업 숫자 혼동
+
+related_agent_gaps:
+  - dual-corp sign_flip
+  - multi-year periodic compare
+
+
+notes: |
+  SP17 패턴 2사 확장.

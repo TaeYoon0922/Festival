@@ -1,0 +1,39 @@
+# 2사 cross-domain ratio
+
+question_id: CQ07
+question: 삼성SDI와 LG에너지솔루션 2024년 exchange 신규시설투자 금액 합계와 각 사 2024 사업보고서 연결 자산총계 대비 투자비중(%)을 계산해 비교하면 어느 쪽이 더 높아?
+
+listed_name: 삼성SDI
+corp_name: 삼성SDIpeer_listed_name: LG에너지솔루션
+peer_corp_name: LG에너지솔루션
+
+theme: 2사 cross-domain ratio
+focus: 시설투자 합 / 자산총계 비중 peer
+
+reasoning_types:
+  - compare
+  - compute
+  - multi_doc
+  - correction
+
+doc_group: exchange · periodic
+task_type (기대): cross_company · facility_investment · balance_ratio · multi_corp
+
+expected_behavior: stretch_goal  # partial_answer 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 각사 2024 시설투자 합(파생)
+  - 각사 2024 연결 자산총계
+  - 투자비중 %(파생) · 더 높은 쪽
+
+must_NOT_invent:
+  - 정정 전 수치를 최종값으로 혼동
+  - 코퍼스 밖 invent · 두 기업 숫자 혼동
+
+related_agent_gaps:
+  - cross-domain ratio
+  - exchange + periodic dual retrieval
+
+
+notes: |
+  exchange aggregate + periodic BS same year.

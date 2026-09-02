@@ -1,0 +1,39 @@
+# 2사 분기합 vs 연간
+
+question_id: CQ06
+question: 크래프톤과 엔씨소프트 2024년 1·2·3·4분기 연결 영업이익 합계와 각 사 2024 사업보고서 연결 영업이익을 나란히 비교해, 분기합과 연간보고서 차이가 더 큰 쪽은?
+
+listed_name: 크래프톤
+corp_name: 크래프톤peer_listed_name: 엔씨소프트
+peer_corp_name: 엔씨소프트
+
+theme: 2사 분기합 vs 연간
+focus: 4분기 영업이익 합 vs 사업보고서 diff peer
+
+reasoning_types:
+  - compare
+  - compute
+  - multi_doc
+  - correction
+
+doc_group: periodic
+task_type (기대): cross_company · quarter_sum_vs_annual · multi_corp
+
+expected_behavior: stretch_goal  # partial_answer 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 각사 4분기 영업이익 합(파생)
+  - 각사 2024 사업보고서 영업이익
+  - 차이(파생) · 더 큰 차이 corp
+
+must_NOT_invent:
+  - 정정 전 수치를 최종값으로 혼동
+  - 코퍼스 밖 invent · 두 기업 숫자 혼동
+
+related_agent_gaps:
+  - dual-corp quarter_sum_vs_annual
+  - annual vs quarter subtype filter
+
+
+notes: |
+  PC18 패턴 2사 확장.

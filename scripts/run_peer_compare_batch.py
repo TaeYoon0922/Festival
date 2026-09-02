@@ -1,4 +1,4 @@
-"""Run peer-compare questions (PC01–PC30) through the Festival answer stack.
+"""Run QA batch questions (PC/CQ/…) through the Festival answer stack.
 
 Two modes mirror how taeyoon actually executes ``GET /answer``:
 
@@ -29,6 +29,7 @@ Examples::
 
     python scripts/run_peer_compare_batch.py --mode routing
     FESTIVAL_HCX_ENABLED=false python scripts/run_peer_compare_batch.py --mode e2e
+    python scripts/run_peer_compare_batch.py --batch qa-tool/examples/complex-queries-batch.txt --mode e2e
     python scripts/run_peer_compare_batch.py --ids PC01 PC03 --save-full
 """
 
@@ -65,23 +66,37 @@ DEFAULT_OUTPUT_E2E = PROJECT_ROOT / "qa-tool" / "output" / "peer-compare-e2e.jso
 PIPELINE_REFERENCE = "origin/taeyoon + feat/qa-driven-routing (P0-D/C/A/B serving path)"
 
 
+def _default_id_prefix(batch_path: Path) -> str:
+    stem = batch_path.stem.casefold()
+    if "complex" in stem:
+        return "CQ"
+    return "PC"
+
+
+def _default_output(batch_path: Path, *, mode: str) -> Path:
+    stem = batch_path.stem
+    if stem.endswith("-batch"):
+        stem = stem[: -len("-batch")]
+    return PROJECT_ROOT / "qa-tool" / "output" / f"{stem}-{mode}.json"
+
+
 def load_questions(
     batch_path: Path,
     *,
     ids: set[str] | None = None,
+    id_prefix: str | None = None,
 ) -> list[tuple[str, str]]:
     lines = [
         line.strip()
         for line in batch_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    if len(lines) != 30:
-        raise ValueError(
-            f"expected 30 questions in {batch_path}, found {len(lines)}"
-        )
+    if not lines:
+        raise ValueError(f"no questions found in {batch_path}")
+    prefix = (id_prefix or _default_id_prefix(batch_path)).upper()
     rows: list[tuple[str, str]] = []
     for index, question in enumerate(lines, start=1):
-        question_id = f"PC{index:02d}"
+        question_id = f"{prefix}{index:02d}"
         if ids is not None and question_id not in ids:
             continue
         rows.append((question_id, question))
@@ -345,6 +360,11 @@ def main(argv: list[str] | None = None) -> int:
         help="routing = P0-D + planner + route (no DB); e2e = full AnswerPipeline.",
     )
     parser.add_argument(
+        "--id-prefix",
+        default=None,
+        help="Question id prefix (default: CQ for complex-queries-batch, else PC).",
+    )
+    parser.add_argument(
         "--batch",
         type=Path,
         default=DEFAULT_BATCH,
@@ -353,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         default=None,
-        help="Defaults to qa-tool/output/peer-compare-probe-full.json or -e2e.json.",
+        help="Defaults to qa-tool/output/<batch-stem>-<mode>.json.",
     )
     parser.add_argument("--ids", nargs="*", default=None)
     parser.add_argument(
@@ -363,11 +383,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    output = args.output or (
-        DEFAULT_OUTPUT_E2E if args.mode == "e2e" else DEFAULT_OUTPUT_ROUTING
-    )
+    output = args.output or _default_output(args.batch, mode=args.mode)
     id_filter = {value.upper() for value in args.ids} if args.ids else None
-    questions = load_questions(args.batch, ids=id_filter)
+    questions = load_questions(
+        args.batch,
+        ids=id_filter,
+        id_prefix=args.id_prefix,
+    )
 
     summaries: list[dict[str, Any]] = []
     details: dict[str, Any] = {}

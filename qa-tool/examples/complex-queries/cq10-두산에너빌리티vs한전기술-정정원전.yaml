@@ -1,0 +1,38 @@
+# 2사 정정 dedupe exchange
+
+question_id: CQ10
+question: 두산에너빌리티와 한전기술 2024·2025년 원전 관련 exchange 공급계약 중 기재정정 체인이 있는 건은 최종 계약금액 기준으로 건수·합계·최대 단일 계약금액을 비교해, 정정 반영 전후 합계 차이도 알려줘
+
+listed_name: 두산에너빌리티
+corp_name: 두산에너빌리티peer_listed_name: 한전기술
+peer_corp_name: 한전기술
+
+theme: 2사 정정 dedupe exchange
+focus: 원전 공급계약 정정 반영 aggregate peer
+
+reasoning_types:
+  - compare
+  - compute
+  - multi_doc
+  - correction
+
+doc_group: exchange
+task_type (기대): cross_company · correction · supply_contract · exchange_aggregate · multi_corp
+
+expected_behavior: stretch_goal  # partial_answer 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 각사 최종 건수·합계·max(파생)
+  - 정정 전 합 vs 정정 후 합 차이(파생)
+
+must_NOT_invent:
+  - 정정 전 수치를 최종값으로 혼동
+  - 코퍼스 밖 invent · 두 기업 숫자 혼동
+
+related_agent_gaps:
+  - correction-aware enumeration
+  - dual-corp exchange aggregate
+
+
+notes: |
+  PC23·24 + correction layer.

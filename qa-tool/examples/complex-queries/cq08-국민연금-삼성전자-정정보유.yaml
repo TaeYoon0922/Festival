@@ -1,0 +1,37 @@
+# 정정 · 지분공시 복합연산
+
+question_id: CQ08
+question: 국민연금기금의 삼성전자 보유비율 대량보유보고서 중 기재정정이 있으면 최종 보고 기준 보유주식수·보유비율과, 직전 보고 대비 순증감 주식수·증감률(%)을 계산해줘
+
+listed_name: 삼성전자
+corp_name: 삼성전자
+theme: 정정 · 지분공시 복합연산
+focus: 대량보유보고서 정정 + 순증감·증감률
+
+reasoning_types:
+  - compare
+  - compute
+  - multi_doc
+  - correction
+
+doc_group: holding
+task_type (기대): correction · holding_change · multi_event_compute
+
+expected_behavior: stretch_goal  # partial_answer 또는 answerable_false 변형 카드 병행
+
+must_include_in_answer:
+  - 최종 보유주식수·보유비율
+  - 직전 대비 순증감·증감률(파생)
+  - 정정 반영 최신 보고 기준
+
+must_NOT_invent:
+  - 정정 전 수치를 최종값으로 혼동
+  - 코퍼스 밖 invent · 두 기업 숫자 혼동
+
+related_agent_gaps:
+  - holding correction chain
+  - reporter-scoped retrieval
+
+
+notes: |
+  국민연금 → 삼성전자 보유비율 시계열 + 정정.
