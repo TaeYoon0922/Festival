@@ -9,6 +9,12 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from app.agent.task_router import TaskDecision, TaskRouter
+from app.reasoning.contract_lifecycle import (
+    compose_lifecycle_text,
+    lifecycle_items,
+    lifecycle_outcome,
+    requested_lifecycle_outcome,
+)
 from app.reasoning.answer_composer import (
     AnswerComposer,
     AnswerDraft,
@@ -354,12 +360,29 @@ class AgentOrchestrator:
         else:
             resolution = None
             resolution_before = None
-            trace.append("answer_composer")
-            draft = _compose_general_evidence(
-                evidence,
-                task_type=decision.task_type,
-                multi_document=multi_document,
+            # A contract followed forward is answered by naming which served
+            # filing began it and which ended it. Both are already in the
+            # evidence set; only the roles were missing.
+            lifecycle = (
+                lifecycle_outcome(evidence.served_items)
+                if requested_lifecycle_outcome(query_plan)
+                else None
             )
+            trace.append("answer_composer")
+            if lifecycle is not None and lifecycle.resolved:
+                trace.insert(len(trace) - 1, "contract_lifecycle_resolver")
+                draft = _compose_lifecycle(
+                    evidence,
+                    lifecycle,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+            else:
+                draft = _compose_general_evidence(
+                    evidence,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
 
         # STEP 11-C.  Ask the domain producers what the authoritative source
         # says about the canonical fields this question requested.  Both read
@@ -592,6 +615,37 @@ def orchestrate(
         retrieval_execution,
         candidate_chunks=candidate_chunks,
     )
+
+
+def _compose_lifecycle(
+    evidence: EvidenceSet,
+    outcome: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft:
+    """State the contract's outcome, citing both ends of its lifecycle.
+
+    Built on the ordinary general-evidence draft so nothing about rows,
+    citation shape or limits changes; the two differences are that the
+    lifecycle statement leads the answer, and that the origin and terminal
+    filings are cited whatever rank retrieval gave them.
+    """
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    statement = compose_lifecycle_text(outcome)
+    if not statement:
+        return base
+    cited = lifecycle_items(
+        outcome,
+        evidence.served_items,
+        limit=_general_evidence_limit(evidence, task_type=task_type),
+    )
+    citations = tuple(_general_citation(item) for item in cited)
+    text = statement if not base.answer_text else f"{statement}\n\n{base.answer_text}"
+    return replace(base, answer_text=text, citations=citations)
 
 
 def _compose_general_evidence(

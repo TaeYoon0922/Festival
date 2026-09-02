@@ -9,6 +9,10 @@ from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
 from app.reasoning import holding_report_relative
+from app.reasoning.contract_lifecycle import (
+    LIFECYCLE_OUTCOME_KEY,
+    lifecycle_outcome_requested,
+)
 from app.reasoning.holding_reporter import canonical_reporter_key
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
@@ -460,6 +464,9 @@ class QueryUnderstanding:
                     report_relative.to_dict() if report_relative else None
                 ),
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
+                # Whether the question follows a contract forward, decided
+                # once here so composition never re-reads the question.
+                LIFECYCLE_OUTCOME_KEY: lifecycle_outcome_requested(raw_query),
             },
         )
 
