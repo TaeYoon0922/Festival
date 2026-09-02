@@ -25,6 +25,7 @@ from app.reasoning.holding_company_role_resolution import (
     HoldingCompanyRoleResolver,
     role_provenance,
 )
+from app.reasoning.correction_pair_roles import PAIR_INTENT, correction_intent
 from app.reasoning.holding_evidence_coverage import (
     CURRENT_HOLDING_STATE_FIELDS,
     requested_holding_fields,
@@ -258,9 +259,24 @@ def _query_grounded_reporter_allowed(plan: QueryPlan) -> bool:
 
     A reporter the question's own wording produced keeps its pre-existing
     behaviour and is never reconsidered here.
+
+    A question asking for a correction *pair* is also left alone.  Scoping to
+    one holder is right when the question wants that holder's position, but a
+    history question wants both versions of one filing, and the pair resolver
+    that binds them is already authoritative over which documents those are.
+    Narrowing its evidence to a reporter the question happens to name can drop
+    the superseded half, which answers a different question than the one asked.
+    Only the pair intent is excluded: ``latest`` and ``original`` each want a
+    single version, so reporter scope is as safe for them as for any other
+    holding question.
     """
 
     if plan.reporter:
+        return False
+    if (
+        correction_intent(plan) == PAIR_INTENT
+        and plan.evidence.get("operation") == "correction_lookup"
+    ):
         return False
     if len(plan.companies) != 1 or len(plan.corp_codes) != 1:
         return False
