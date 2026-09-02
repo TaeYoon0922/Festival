@@ -85,6 +85,23 @@ _CORRECTED_MARKER = re.compile(r"정정\s*후" + _MARKER_BOUNDARY)
 #: as a whole bracketed token so a caption that merely mentions 내용 is not one.
 _REGION_REFERENCE = re.compile(r"<[^<>]*내용[^<>]*>")
 
+#: A reference a 정정신고 writes in front of a reprint's own label: ``(주3)``,
+#: ``주3)``, ``<주3>``, ``[주3]``, ``<내용 1-5>``.  It is stripped before the
+#: markers are read and never decides anything by itself -- what follows it has
+#: to be the marker, and nothing else.
+_LABEL_REFERENCE = re.compile(
+    r"^\s*(?:[<(\[]\s*[^<>()\[\]]{0,24}[>)\]]|주\s*\d+\s*\))\s*"
+)
+#: What is left of a label once its marker is taken out.  A standalone label has
+#: nothing but punctuation left; anything else is a caption or a sentence.
+_MARKER_TEXT = re.compile(r"정정\s*[전후]")
+
+#: Recorded on an association so a state can be audited back to the label that
+#: produced it.
+ASSOCIATION_RULE = "explicit_label_headed_table"
+#: A table two labels disagree about states nothing.
+ASSOCIATION_CONFLICT = "conflicting_labels"
+
 #: The two nested headings that identify the report's own holding-summary
 #: region.  Correction notices can quote the second heading in a table caption,
 #: so this proof deliberately reads ``section_path`` only: the canonical body
@@ -211,6 +228,12 @@ def current_state_is_authoritative(plan: Mapping[str, Any] | None) -> bool:
 # where they are looked for, never what they mean.
 
 
+def _text(value: Any) -> str:
+    """A label as text, with ``None`` reading as empty rather than ``"None"``."""
+
+    return "" if value is None else str(value)
+
+
 def _squeezed(value: Any) -> str:
     """Label text with whitespace removed.
 
@@ -276,6 +299,222 @@ def _referenced_states(chunks: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     return {name: states.pop() for name, states in seen.items() if len(states) == 1}
 
 
+# -- explicit label -> headed table -----------------------------------------
+# A correction notice reprints a region under a label the filer wrote as its own
+# source block: ``(주3) 정정 전``, then the region's heading, then the table.
+# Neither the reprinted table nor the projection built from it carries that
+# label, so a projection read on its own looks unmarked while the filing has in
+# fact stated which side of the correction it is.
+#
+# The association is bounded to the one table the label heads.  It is read from
+# the parser's own ``content_order`` -- the source block sequence of a section --
+# and never from proximity, ranking or numbering: a label heads the table that
+# comes next, optionally across the region's own reprinted heading, and stops
+# there.  Nothing walks backwards from a projection, and no state ever carries
+# past the table it was written for.
+
+
+def _standalone_label_state(text: Any) -> str | None:
+    """The state a source block declares when the block *is* the label.
+
+    An optional region reference is removed first, and what remains must be the
+    marker and punctuation.  ``주3) 정정 전 3. 보유주식등의 수 및 보유비율`` is a
+    caption rather than a standalone label and is refused here -- the frozen
+    label reader already decides captions, on the projection itself.
+    """
+
+    raw = _text(text).strip()
+    if not raw or "\n" in raw:
+        return None
+    residual = _LABEL_REFERENCE.sub("", raw).strip()
+    state = _state(*_markers(residual))
+    if state is None:
+        return None
+    leftover = _MARKER_TEXT.sub("", residual)
+    if re.sub(r"[\s\W]+", "", leftover):
+        return None
+    return state
+
+
+def _is_reprinted_heading(text: Any, table_title: Any) -> bool:
+    """Whether a block between a label and its table is that region's heading.
+
+    Two ways to be one, both structural: the block repeats the heading the
+    chunker gave the very next table, or it is the holding summary heading this
+    corpus names its own region with.  A block carrying a correction marker is
+    another label and never a heading, and anything else is substantive content
+    that breaks the association.
+    """
+
+    raw = _text(text).strip()
+    if not raw or any(_markers(raw)):
+        return False
+    flat = _squeezed(raw)
+    if not flat:
+        return False
+    if table_title and flat == _squeezed(table_title):
+        return True
+    return bool(_HOLDING_SUMMARY.search(raw))
+
+
+def document_table_correction_states(
+    sections: Sequence[Mapping[str, Any]],
+    *,
+    table_titles: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Table id -> the state a label heads it with, and how that was proved.
+
+    Fails closed everywhere it cannot see the whole structure: a label with no
+    table after it, more than one block between the two, an intervening block
+    that is not the region's own heading, and a table two labels disagree about
+    all yield no state.  ``sections`` are the frozen section payloads; each
+    needs ``text`` and ``content_order``.
+    """
+
+    titles = dict(table_titles or {})
+    found: dict[str, dict[str, Any]] = {}
+    conflicts: set[str] = set()
+
+    for section in sections or ():
+        if not isinstance(section, Mapping):
+            continue
+        blocks = _text(section.get("text")).split("\n\n")
+        order = list(section.get("content_order") or ())
+
+        def block_text(entry: Any) -> str | None:
+            if not isinstance(entry, Mapping) or entry.get("kind") != "text":
+                return None
+            index = entry.get("block_index")
+            if not isinstance(index, int) or isinstance(index, bool):
+                return None
+            if not 0 <= index < len(blocks):
+                return None
+            return blocks[index]
+
+        for position, entry in enumerate(order):
+            text = block_text(entry)
+            if text is None:
+                continue
+            state = _standalone_label_state(text)
+            if state is None:
+                continue
+            following = order[position + 1 : position + 3]
+            if not following:
+                continue
+            heading: str | None = None
+            target = following[0]
+            if isinstance(target, Mapping) and target.get("kind") == "text":
+                # At most one block may stand between, and only the region's
+                # own reprinted heading.
+                if len(following) < 2:
+                    continue
+                candidate, target = block_text(target), following[1]
+                if candidate is None or not (
+                    isinstance(target, Mapping) and target.get("kind") == "table"
+                ):
+                    continue
+                if not _is_reprinted_heading(
+                    candidate, titles.get(str(target.get("table_id") or ""))
+                ):
+                    continue
+                heading = candidate
+            if not isinstance(target, Mapping) or target.get("kind") != "table":
+                continue
+            table_id = str(target.get("table_id") or "")
+            if not table_id:
+                continue
+            existing = found.get(table_id)
+            if existing is not None and existing["correction_state"] != state:
+                conflicts.add(table_id)
+                continue
+            found[table_id] = {
+                "correction_state": state,
+                "provenance": {
+                    "rule": ASSOCIATION_RULE,
+                    "label_block_index": entry.get("block_index"),
+                    "label_text": _text(text).strip(),
+                    "table_id": table_id,
+                    "intervening_heading": heading,
+                    "section_id": section.get("section_id"),
+                },
+            }
+
+    for table_id in conflicts:
+        found[table_id] = {
+            "correction_state": None,
+            "provenance": {"rule": ASSOCIATION_CONFLICT, "table_id": table_id},
+        }
+    return found
+
+
+def _table_titles(chunks: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    titles: dict[str, str] = {}
+    for chunk in chunks or ():
+        if not isinstance(chunk, Mapping):
+            continue
+        table_id = str(chunk.get("table_id") or "")
+        title = _text(chunk.get("table_title")).strip()
+        if table_id and title:
+            titles.setdefault(table_id, title)
+    return titles
+
+
+def document_correction_state_details(
+    chunks: Sequence[Mapping[str, Any]],
+    sections: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Every state this filing proves for its own report projections, and how.
+
+    Three authorities, in this order and never the other way round: the labels
+    on the projection itself, the filing's 정정사항 grid, and -- only when
+    ``sections`` are available -- the label that heads the table the projection
+    was built from.  The first two are the frozen readers and decide alone
+    wherever they can; the third only fills what they left unproven.
+
+    A table authority that disagrees with an already-proven state does not
+    replace it.  The proven state stands and the disagreement is recorded, so a
+    contradiction is visible instead of silently resolved one way.
+    """
+
+    details: dict[str, dict[str, Any]] = {}
+    declared = document_correction_states(chunks)
+    tables = (
+        document_table_correction_states(
+            sections, table_titles=_table_titles(chunks)
+        )
+        if sections is not None
+        else {}
+    )
+    for chunk in chunks or ():
+        if not isinstance(chunk, Mapping):
+            continue
+        chunk_id = str(chunk.get("chunk_id") or "")
+        if not chunk_id:
+            continue
+        proven = declared.get(chunk_id)
+        # Authority travels the one edge the projection itself records: the
+        # table it was built from.  Its other source refs are provenance for a
+        # citation, not a claim about which state this projection states.
+        association = tables.get(str(chunk.get("source_table_id") or ""))
+        inherited = (association or {}).get("correction_state")
+        if proven:
+            entry = {"state": proven, "source": "declared"}
+            if inherited and inherited != proven:
+                entry["conflict"] = {
+                    "table_authority": inherited,
+                    "provenance": dict((association or {}).get("provenance") or {}),
+                }
+            details[chunk_id] = entry
+            continue
+        if inherited:
+            details[chunk_id] = {
+                "state": inherited,
+                "source": ASSOCIATION_RULE,
+                "provenance": dict((association or {}).get("provenance") or {}),
+            }
+    return details
+
+
 def document_correction_states(
     chunks: Sequence[Mapping[str, Any]]
 ) -> dict[str, str]:
@@ -338,12 +577,16 @@ def is_canonical_holding_body(chunk: Mapping[str, Any] | None) -> bool:
 
 
 __all__ = [
+    "ASSOCIATION_CONFLICT",
+    "ASSOCIATION_RULE",
     "CORRECTED_STATE",
     "PRIOR_STATE",
     "PRIOR_STATE_SUPERSEDED",
     "current_state_is_authoritative",
     "declared_correction_state",
+    "document_correction_state_details",
     "document_correction_states",
+    "document_table_correction_states",
     "is_canonical_holding_body",
     "item_correction_state",
 ]

@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.reasoning.holding_report_index import ARTIFACT_SCHEMA_VERSION, _clean
 from app.reasoning.holding_correction_state import (
-    document_correction_states,
+    document_correction_state_details,
     is_canonical_holding_body,
 )
 from app.reasoning.holding_reporter import canonical_reporter_key
@@ -72,14 +72,26 @@ def _direction(change_shares: str | None) -> str | None:
     return None
 
 
-def _projection_authority(chunks) -> dict[str, dict]:
-    """Build-time structural authority metadata for each report projection."""
+def _projection_authority(chunks, sections=()) -> dict[str, dict]:
+    """Build-time structural authority metadata for each report projection.
+
+    ``sections`` are the filing's own source blocks.  They are what lets a
+    reprint labelled in a standalone block -- ``(주3) 정정 전``, the region's
+    heading, then the table -- be read at all: neither the table nor the
+    projection built from it carries that label.  Without them the two frozen
+    readers decide alone, exactly as before.
+    """
 
     projections = [
         chunk for chunk in chunks
         if chunk.get("projection_type") == PROJECTION
     ]
-    states = document_correction_states(chunks)
+    details = document_correction_state_details(chunks, sections)
+    states = {
+        chunk_id: detail["state"]
+        for chunk_id, detail in details.items()
+        if detail.get("state")
+    }
     event_counts = collections.Counter(
         (
             str(chunk.get("corp_code") or ""),
@@ -90,6 +102,12 @@ def _projection_authority(chunks) -> dict[str, dict]:
     return {
         str(chunk.get("chunk_id") or ""): {
             "correction_state": states.get(str(chunk.get("chunk_id") or "")),
+            "correction_state_source": (
+                details.get(str(chunk.get("chunk_id") or ""), {}).get("source")
+            ),
+            "correction_state_conflict": (
+                details.get(str(chunk.get("chunk_id") or ""), {}).get("conflict")
+            ),
             "is_canonical_body": is_canonical_holding_body(chunk),
             "document_event_projection_count": event_counts[
                 (
@@ -168,7 +186,9 @@ def build() -> tuple[list[dict], dict]:
         # Read the filing-wide correction grid once.  Some projection captions
         # carry only a region reference (for example ``<내용 1-6>``), so their
         # state cannot be computed from the projection in isolation.
-        projection_authority = _projection_authority(doc.get("chunks") or [])
+        projection_authority = _projection_authority(
+            doc.get("chunks") or [], doc.get("sections") or []
+        )
 
         for chunk in projections:
             report["projections_total"] += 1
@@ -221,6 +241,11 @@ def build() -> tuple[list[dict], dict]:
                 report[f"projection_state_{correction_state}"] += 1
             if canonical_body:
                 report["canonical_body_projections"] += 1
+            source = authority.get("correction_state_source")
+            if source:
+                report[f"projection_state_via_{source}"] += 1
+            if authority.get("correction_state_conflict"):
+                report["projection_state_authority_conflicts"] += 1
 
     records.sort(key=lambda r: (r["issuer_corp_code"], r["reporter_key"],
                                 r["reference_date"], r["doc_id"],
