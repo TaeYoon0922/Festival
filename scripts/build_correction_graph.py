@@ -15,7 +15,7 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -23,10 +23,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.parsing.sampling import load_manifest  # noqa: E402
 from app.reasoning.correction_graph import (  # noqa: E402
+    RESOLVED,
     CorrectionNotice,
     DisclosureRecord,
+    _earlier,
     build_correction_graph,
     extract_correction_notice,
+    extract_correction_notice_from_text,
 )
 
 
@@ -39,11 +42,14 @@ def _index_records(processed_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _tables(processed_dir: Path, output_path: str) -> Iterator[dict[str, Any]]:
+def _payload(processed_dir: Path, output_path: str) -> dict[str, Any]:
     path = processed_dir / str(output_path).replace("\\", "/")
     with gzip.open(path, "rt", encoding="utf-8") as source:
-        payload = json.load(source)
-    for table in payload.get("tables") or []:
+        return json.load(source)
+
+
+def _tables(processed_dir: Path, output_path: str) -> Iterator[dict[str, Any]]:
+    for table in _payload(processed_dir, output_path).get("tables") or []:
         yield table
 
 
@@ -63,6 +69,114 @@ def collect_notices(
         if notice is not None:
             notices[doc_id] = notice
     return notices
+
+
+def collect_prose_notices(
+    processed_dir: Path, doc_ids: set[str]
+) -> dict[str, CorrectionNotice]:
+    """Read the notice out of the prose of documents that state it there."""
+
+    notices: dict[str, CorrectionNotice] = {}
+    for record in _index_records(processed_dir):
+        doc_id = str(record.get("doc_id") or "")
+        if doc_id not in doc_ids or doc_id in notices:
+            continue
+        notice = extract_correction_notice_from_text(
+            doc_id, _payload(processed_dir, record["output_path"]).get("sections") or []
+        )
+        if notice is not None:
+            notices[doc_id] = notice
+    return notices
+
+
+def _documents_with_a_proven_final(
+    records: Sequence[DisclosureRecord], notices: Mapping[str, CorrectionNotice]
+) -> set[str]:
+    """Documents this pass already places in a chain with a proven final member.
+
+    The three conditions are the ones the finality artifact applies when it
+    decides whether to write a ``final_doc_id``: more than one member, every
+    member resolved, and exactly one of them last.  A group that fails any of
+    them is a gap, whatever its members individually say.
+    """
+
+    graph = build_correction_graph(records, notices)
+    by_group: dict[str, list[Any]] = {}
+    for member in graph.members:
+        by_group.setdefault(member.correction_group_id, []).append(member)
+
+    proven: set[str] = set()
+    for members in by_group.values():
+        ordered = sorted(members, key=lambda member: member.correction_order)
+        terminals = [member for member in ordered if member.is_latest]
+        if (
+            len(ordered) > 1
+            and all(member.resolution_status == RESOLVED for member in ordered)
+            and len(terminals) == 1
+        ):
+            proven.update(member.doc_id for member in ordered)
+    return proven
+
+
+def recover_prose_notices(
+    records: Sequence[DisclosureRecord],
+    table_notices: Mapping[str, CorrectionNotice],
+    prose_notices: Mapping[str, CorrectionNotice],
+) -> dict[str, CorrectionNotice]:
+    """Table notices, plus the prose ones that only close a gap.
+
+    A notice a filing wrote as prose is the same statement as one it wrote in a
+    table, but it becomes readable later than the rules that ran without it, so
+    it is admitted under a narrower standing:
+
+    * a document that states its notice in a table is decided by that notice,
+      and its prose is never consulted;
+    * a prose notice is admitted only for a document the table-only pass left
+      without a proven final member, so a chain those rules already settled is
+      never reopened by evidence that arrives afterwards;
+    * and only when it names a target this corpus actually holds -- an earlier
+      filing of the same issuer received on the stated day.  Naming a target
+      the corpus does not have proves nothing here, and admitting it would
+      withdraw the weaker rules' answer instead of adding to it.
+
+    What happens after admission is untouched: the frozen resolution rules read
+    the notice exactly as they read a table one, and a target they cannot tell
+    apart from its same-day twins still fails closed.
+    """
+
+    by_corp: dict[str, list[DisclosureRecord]] = {}
+    for record in records:
+        by_corp.setdefault(record.corp_code, []).append(record)
+    by_doc = {record.doc_id: record for record in records}
+    proven = _documents_with_a_proven_final(records, table_notices)
+
+    recovered = dict(table_notices)
+    for doc_id, notice in prose_notices.items():
+        if doc_id in table_notices or doc_id in proven:
+            continue
+        source = by_doc.get(doc_id)
+        if source is None or not notice.target_submitted_on:
+            continue
+        if not any(
+            candidate.rcept_dt == notice.target_submitted_on
+            for candidate in _earlier(by_corp.get(source.corp_code, ()), source)
+        ):
+            continue
+        recovered[doc_id] = notice
+    return recovered
+
+
+def collect_notices_with_prose_recovery(
+    processed_dir: Path, records: Sequence[DisclosureRecord]
+) -> dict[str, CorrectionNotice]:
+    """Every notice this corpus states, in tables first and prose second."""
+
+    correction_ids = {record.doc_id for record in records if record.is_correction}
+    table_notices = collect_notices(processed_dir, correction_ids)
+    prose_notices = collect_prose_notices(
+        processed_dir, correction_ids - set(table_notices)
+    )
+    return recover_prose_notices(records, table_notices, prose_notices)
 
 
 def edge_report(graph: Any, records: list[Any]) -> list[dict[str, Any]]:
@@ -177,8 +291,7 @@ def main() -> None:
         records = [
             DisclosureRecord.from_mapping(row) for row in load_manifest(args.manifest)
         ]
-        correction_ids = {record.doc_id for record in records if record.is_correction}
-        notices = collect_notices(args.processed_dir, correction_ids)
+        notices = collect_notices_with_prose_recovery(args.processed_dir, records)
 
     graph = build_correction_graph(records, notices)
     diagnostics = {

@@ -22,8 +22,11 @@ from app.reasoning.correction_graph import (
     CorrectionRelation,
     DisclosureRecord,
     assemble_correction_groups,
+    NOTICE_SOURCE_TABLE,
+    NOTICE_SOURCE_TEXT,
     build_correction_graph,
     extract_correction_notice,
+    extract_correction_notice_from_text,
     normalize_report_title,
     relation_id,
 )
@@ -107,6 +110,28 @@ def _notice_tables(correction_date: str, target_name: str, submitted_on: str) ->
     ]
 
 
+def _notice_sections(correction_date: str, target_name: str, submitted_on: str) -> list[dict]:
+    """The same notice as ``_notice_tables``, written as prose instead.
+
+    Some filers' HTML emits the header lines as paragraphs, so the frozen
+    section text carries exactly what the one-row tables carry elsewhere.
+    """
+
+    return [
+        {
+            "section_id": "s0001",
+            "text": "\n\n".join(
+                (
+                    "정정일자 : " + correction_date,
+                    "1. 정정관련 공시서류 : " + target_name,
+                    "2. 정정관련 공시서류제출일 : " + submitted_on,
+                    "3. 정정사유 : 계약금액 변경",
+                )
+            ),
+        }
+    ]
+
+
 def _chain_fixture() -> tuple[list[DisclosureRecord], dict[str, CorrectionNotice]]:
     """Original -> correction -> re-correction of the previous correction."""
 
@@ -158,6 +183,68 @@ class CorrectionNoticeExtractionTests(unittest.TestCase):
         notice = extract_correction_notice("major_1", tables)
         self.assertEqual(notice.target_submitted_on, "2025-02-04")
         self.assertEqual(notice.target_report_nm, "주요사항보고서(유상증자결정)")
+
+    def test_prose_notice_reads_the_same_fields_as_the_table_form(self) -> None:
+        """A filing that wrote the notice as prose states the same thing."""
+
+        table = extract_correction_notice(
+            "exchange_2",
+            _notice_tables("2023-02-01", "단일판매ㆍ공급계약 체결", "2020-12-22"),
+        )
+        prose = extract_correction_notice_from_text(
+            "exchange_2",
+            _notice_sections("2023-02-01", "단일판매ㆍ공급계약 체결", "2020-12-22"),
+        )
+        self.assertIsNotNone(prose)
+        self.assertEqual(prose.target_submitted_on, table.target_submitted_on)
+        self.assertEqual(prose.target_report_nm, table.target_report_nm)
+        self.assertEqual(prose.corrected_on, table.corrected_on)
+        self.assertEqual(table.source_kind, NOTICE_SOURCE_TABLE)
+        self.assertEqual(prose.source_kind, NOTICE_SOURCE_TEXT)
+
+    def test_prose_notice_reads_the_korean_spelled_date(self) -> None:
+        """``2024년 9월 2일`` is the frozen date reader's, not a new rule."""
+
+        prose = extract_correction_notice_from_text(
+            "holding_x",
+            [
+                {
+                    "section_id": "s0001",
+                    "text": (
+                        "1. 정정대상 공시서류 : 주식등의 대량보유상황보고서\n\n"
+                        "2. 정정대상 공시서류의 최초제출일 : 2024년 9월 2일"
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(prose.target_submitted_on, "2024-09-02")
+        self.assertEqual(prose.target_report_nm, "주식등의 대량보유상황보고서")
+
+    def test_prose_without_a_labelled_line_is_not_a_notice(self) -> None:
+        """Free text that merely mentions a correction proves nothing."""
+
+        self.assertIsNone(
+            extract_correction_notice_from_text(
+                "exchange_9",
+                [
+                    {
+                        "section_id": "s0001",
+                        "text": (
+                            "이 보고서는 기재사항을 정정하기 위하여 제출되었으며 "
+                            "정정대상 공시서류를 참고하시기 바랍니다."
+                        ),
+                    }
+                ],
+            )
+        )
+
+    def test_prose_reader_ignores_a_line_whose_date_is_unreadable(self) -> None:
+        self.assertIsNone(
+            extract_correction_notice_from_text(
+                "exchange_9",
+                [{"section_id": "s0001", "text": "2. 정정관련 공시서류제출일 : 해당사항 없음"}],
+            )
+        )
 
     def test_document_without_a_notice_returns_none(self) -> None:
         tables = [{"table_id": "t0001", "rows": [[{"text": "계약금액"}, {"text": "100"}]]}]
@@ -1348,6 +1435,9 @@ class BuildScriptSafetyTests(unittest.TestCase):
             mock.patch.object(sys, "argv", ["build_correction_graph.py", *argv]),
             mock.patch.object(script, "load_manifest", return_value=manifest),
             mock.patch.object(script, "collect_notices", return_value={}),
+            # The prose pass reads the same corpus the table pass does; this
+            # harness has no corpus, so both readers are stubbed together.
+            mock.patch.object(script, "collect_prose_notices", return_value={}),
             mock.patch.object(
                 script.DisclosureRecord,
                 "from_mapping",

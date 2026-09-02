@@ -89,6 +89,14 @@ _TARGET_NAME_LABELS = ("정정관련공시서류", "정정대상공시서류")
 #: Labels carrying the date the correction itself was filed.
 _CORRECTED_ON_LABELS = ("정정일자", "정정신고일자")
 
+#: Where a notice was read from.  The DART template renders the notice as a
+#: one-row table per line, which is what ``table`` means.  Some filers' HTML
+#: emits the same labelled lines as prose instead, and a notice read from those
+#: says ``text`` -- the same statement, in the form the filing happened to use.
+#: Recorded so a caller can tell the two apart; nothing here ranks them.
+NOTICE_SOURCE_TABLE = "table"
+NOTICE_SOURCE_TEXT = "text"
+
 _DATE = re.compile(r"(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})")
 _LEADING_ORDINAL = re.compile(r"^[0-9]+\s*[.)-]\s*")
 _BRACKETED = re.compile(r"[\[(（【][^\])）】]*[\])）】]")
@@ -211,6 +219,9 @@ class CorrectionNotice:
     corrected_on: str | None = None
     source_table_id: str | None = None
     source_label: str | None = None
+    #: ``NOTICE_SOURCE_TABLE`` or ``NOTICE_SOURCE_TEXT``.  Diagnostic here; the
+    #: builder is where a prose notice's narrower standing is enforced.
+    source_kind: str = NOTICE_SOURCE_TABLE
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -219,6 +230,7 @@ class CorrectionNotice:
             "corrected_on": self.corrected_on,
             "source_table_id": self.source_table_id,
             "source_label": self.source_label,
+            "source_kind": self.source_kind,
         }
 
 
@@ -352,6 +364,67 @@ def _label_key(value: str) -> str:
     return _LEADING_ORDINAL.sub("", _compact(value)).rstrip(":：").strip()
 
 
+#: ``<label> : <value>`` on one line.  All this pattern knows is the separator
+#: the filing puts between the two; which labels count is still decided by
+#: ``_label_key`` and the frozen vocabularies above, exactly as for a table row.
+_TEXT_NOTICE_LINE = re.compile(r"^\s*(?P<label>[^:：]{2,60})[:：]\s*(?P<value>\S.*?)\s*$")
+
+
+def _read_notice_label(
+    state: dict[str, Any], label: str, value: str, *, origin: str | None
+) -> None:
+    """Assign one labelled ``label``/``value`` pair to the field it names.
+
+    The vocabulary, the precedence between the three fields, and the rule that
+    the first statement of a field wins are written once here, so a notice read
+    out of table cells and a notice read out of prose cannot come to mean
+    different things.  ``origin`` is the table or section the pair was read
+    from, kept only for provenance.
+    """
+
+    if state["submitted_on"] is None and any(
+        label.endswith(candidate) for candidate in _SUBMITTED_LABELS
+    ):
+        parsed = _iso_date(value)
+        if parsed:
+            state["submitted_on"] = parsed
+            state["origin"] = state["origin"] or origin
+            state["label_used"] = label
+    elif state["target_name"] is None and label in _TARGET_NAME_LABELS:
+        state["target_name"] = value
+        state["origin"] = state["origin"] or origin
+    elif state["corrected_on"] is None and label in _CORRECTED_ON_LABELS:
+        state["corrected_on"] = _iso_date(value)
+
+
+def _notice_state() -> dict[str, Any]:
+    return {
+        "submitted_on": None,
+        "target_name": None,
+        "corrected_on": None,
+        "origin": None,
+        "label_used": None,
+    }
+
+
+def _notice_from_state(
+    doc_id: str, state: Mapping[str, Any], kind: str
+) -> CorrectionNotice | None:
+    if not any(
+        (state["submitted_on"], state["target_name"], state["corrected_on"])
+    ):
+        return None
+    return CorrectionNotice(
+        doc_id=str(doc_id),
+        target_submitted_on=state["submitted_on"],
+        target_report_nm=state["target_name"],
+        corrected_on=state["corrected_on"],
+        source_table_id=state["origin"],
+        source_label=state["label_used"],
+        source_kind=kind,
+    )
+
+
 def extract_correction_notice(
     doc_id: str, tables: Iterable[Mapping[str, Any]]
 ) -> CorrectionNotice | None:
@@ -362,16 +435,12 @@ def extract_correction_notice(
     read, so no free text is interpreted.
     """
 
-    submitted_on: str | None = None
-    target_name: str | None = None
-    corrected_on: str | None = None
-    table_id: str | None = None
-    label_used: str | None = None
-
+    state = _notice_state()
     for table in tables or ():
         rows = table.get("rows")
         if rows is None:
             rows = table.get("table_rows")
+        origin = _text(table.get("table_id")) or None
         for row in rows or ():
             cells = _cells(row)
             if len(cells) < 2:
@@ -382,33 +451,53 @@ def extract_correction_notice(
             remainder = [value.strip() for value in cells[1:] if value.strip()]
             if not remainder:
                 continue
-            value = " ".join(remainder)
-            if submitted_on is None and any(
-                label.endswith(candidate) for candidate in _SUBMITTED_LABELS
-            ):
-                parsed = _iso_date(value)
-                if parsed:
-                    submitted_on = parsed
-                    table_id = table_id or _text(table.get("table_id")) or None
-                    label_used = label
-            elif target_name is None and label in _TARGET_NAME_LABELS:
-                target_name = value
-                table_id = table_id or _text(table.get("table_id")) or None
-            elif corrected_on is None and label in _CORRECTED_ON_LABELS:
-                corrected_on = _iso_date(value)
-        if submitted_on and target_name and corrected_on:
+            _read_notice_label(state, label, " ".join(remainder), origin=origin)
+        if state["submitted_on"] and state["target_name"] and state["corrected_on"]:
             break
 
-    if not any((submitted_on, target_name, corrected_on)):
-        return None
-    return CorrectionNotice(
-        doc_id=str(doc_id),
-        target_submitted_on=submitted_on,
-        target_report_nm=target_name,
-        corrected_on=corrected_on,
-        source_table_id=table_id,
-        source_label=label_used,
-    )
+    return _notice_from_state(doc_id, state, NOTICE_SOURCE_TABLE)
+
+
+def extract_correction_notice_from_text(
+    doc_id: str, sections: Iterable[Mapping[str, Any]]
+) -> CorrectionNotice | None:
+    """The same notice, read from a filing that wrote it as prose.
+
+    Some filers' HTML renders the notice header as paragraphs rather than as
+    the one-row tables the DART template produces, and
+    :func:`extract_correction_notice` -- which reads table cells and nothing
+    else -- then sees no notice at all.  The statement is still there, in the
+    same ``<label> : <value>`` form and the same frozen vocabulary, so it is
+    read here rather than left unread.
+
+    Nothing about what a notice *means* changes: the labels, the date
+    normalisation and the field precedence are the ones the table reader uses,
+    through the same helper.  What changes is only where the pair was found,
+    which the result records as :data:`NOTICE_SOURCE_TEXT`.  A line is read only
+    when the text itself separates a label from a value; free prose that merely
+    mentions a correction is not a notice and produces nothing.
+
+    ``sections`` accepts the frozen section payloads unchanged: each mapping
+    needs a ``text``, and its ``section_id`` is kept for provenance.
+    """
+
+    state = _notice_state()
+    for section in sections or ():
+        origin = _text(section.get("section_id")) or None
+        for line in _text(section.get("text")).splitlines():
+            match = _TEXT_NOTICE_LINE.match(line)
+            if match is None:
+                continue
+            label = _label_key(match.group("label"))
+            if not label:
+                continue
+            _read_notice_label(
+                state, label, match.group("value").strip(), origin=origin
+            )
+        if state["submitted_on"] and state["target_name"] and state["corrected_on"]:
+            break
+
+    return _notice_from_state(doc_id, state, NOTICE_SOURCE_TEXT)
 
 
 def _titles_match(left: Any, right: Any) -> bool:
