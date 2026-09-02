@@ -485,13 +485,67 @@ def _find_financial_metric(query: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+#: A contract named plainly, then asked what became of it.  The filing families
+#: above are recognized by their own names -- ``공급계약``, ``계약해지`` -- but a
+#: question about a contract's outcome need not repeat any of them: it names the
+#: contract once and then asks about it.  ``<계약> ... 해지됐나`` and
+#: ``<계약>의 최종 상태`` are contract-lifecycle questions written the way people
+#: write them, and without this they reach retrieval as unrouted prose, where
+#: the lifecycle expansion that would answer them declines for want of an event
+#: type.
+#:
+#: Bounded on both sides.  The contract noun and the outcome have to be close
+#: enough to be about each other -- a metric question that happens to mention a
+#: termination elsewhere in the sentence is not this -- and the outcome
+#: vocabulary is the lifecycle's own, never a field name.  ``계약금액`` and other
+#: bare field nouns stay deliberately unmatched here, exactly as they are in
+#: ``_EVENTS``: they appear in periodic and correction questions that must keep
+#: their present routing.
+_CONTRACT_NOUN = r"계약"
+#: What a lifecycle question asks about the contract it just named.  Only
+#: ``해지``: it is the one lifecycle word this corpus never also uses as a field
+#: name.  ``종료`` and ``취소`` read the same way in a sentence but ``계약기간
+#: 종료일`` is a date *stated inside* a contract filing, so accepting them turns
+#: a single-document field question into a lifecycle question and sends it
+#: looking for a termination that was never asked about.
+_CONTRACT_OUTCOME = r"해지"
+#: The two shapes, each anchored on the contract noun so the outcome cannot be
+#: picked up from an unrelated clause.  At most a few characters of particle or
+#: adverb may stand between them.
+_CONTRACT_LIFECYCLE = re.compile(
+    _CONTRACT_NOUN + r"[^\s]{0,6}?" + _CONTRACT_OUTCOME
+)
+#: ``계약의 최종 상태``: the outcome asked for by name rather than by predicate.
+_CONTRACT_FINAL_STATE = re.compile(_CONTRACT_NOUN + r".{0,4}?최종상태")
+
+
 def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
     compact = re.sub(r"\s+", "", query).casefold()
     for event_type, aliases, route in _EVENTS:
         match = next((alias for alias in aliases if alias.casefold() in compact), None)
         if match:
             return event_type, match, route
+    lifecycle = _contract_lifecycle_event(compact)
+    if lifecycle:
+        # The lifecycle family, not the termination filing: the question starts
+        # from a contract and asks where it ended up, so the conclusion filing
+        # is as much a part of the answer as the termination is.
+        return "supply_contract", lifecycle, "exchange"
     return None, None, None
+
+
+def _contract_lifecycle_event(compact: str) -> str | None:
+    """A contract whose outcome this question asks about, or nothing.
+
+    Read only after every named filing family has declined, so a question that
+    names its own family keeps the routing that family already gives it.
+    """
+
+    for pattern in (_CONTRACT_LIFECYCLE, _CONTRACT_FINAL_STATE):
+        match = pattern.search(compact)
+        if match:
+            return match.group(0)
+    return None
 
 
 def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
