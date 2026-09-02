@@ -47,7 +47,7 @@ from app.reasoning.holding_correction_finality import (
 # The identity of a corpus is whatever the report index already says it is.
 # Importing both rather than restating either is what keeps the two artifacts
 # from agreeing on a corpus while disagreeing on how it is identified.
-from scripts.build_correction_graph import collect_notices
+from scripts.build_correction_graph import collect_notices_with_prose_recovery
 from scripts.build_holding_report_index import (
     PROCESSED,
     git_commit,
@@ -125,7 +125,11 @@ def build() -> tuple[list[dict], dict]:
     correction_docs = {r.doc_id for r in records if r.is_correction}
     holding_corrections = holding_docs & correction_docs
 
-    notices = collect_notices(PROCESSED, correction_docs)
+    # Both correction authorities read the notices the same way: tables first,
+    # and a filing's own prose only where the table pass left a gap.  Reading
+    # them differently here would let the artifact and the graph disagree about
+    # which filings a chain contains.
+    notices = collect_notices_with_prose_recovery(PROCESSED, records)
     graph = build_correction_graph(records, notices)
 
     by_group: dict[str, list] = {}

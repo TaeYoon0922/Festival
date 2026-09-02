@@ -1920,6 +1920,50 @@ class NaturalHoldingReporterTests(unittest.TestCase):
 
         self.assertEqual(self.reporter(query), self.HOLDER)
 
+    def test_a_reporter_first_holding_clause_is_read(self) -> None:
+        """An explicit reporting verb binds the leading subject to the issuer."""
+
+        for query in (
+            f"{self.HOLDER}가 2024년 7월 29일 기준으로 보고한 "
+            f"{self.ISSUER} 보유주식수는?",
+            f"주식회사 {self.HOLDER}가 최근 신고하는 "
+            f"{self.ISSUER}의 지분율은?",
+        ):
+            with self.subTest(query=query):
+                expected = (
+                    f"주식회사 {self.HOLDER}"
+                    if query.startswith("주식회사")
+                    else self.HOLDER
+                )
+                self.assertEqual(self.reporter(query), expected)
+
+    def test_c003_binds_reporter_issuer_date_and_projection(self) -> None:
+        understanding = QueryUnderstanding({"하이브": {"하이브"}})
+
+        plan = understanding.understand(
+            "방시혁이 2025년 4월 4일 기준으로 보고한 "
+            "하이브 보유주식수는 정정된 값으로 얼마인가?"
+        )
+
+        self.assertEqual(plan.companies, ("하이브",))
+        self.assertEqual(plan.reporter, "방시혁")
+        self.assertEqual(plan.metric, "holding_shares")
+        self.assertEqual(plan.period.period_type, "holding_reference_date")
+        self.assertEqual(plan.period.from_date, "2025-04-04")
+        self.assertEqual(plan.period.to_date, "2025-04-04")
+        self.assertEqual(plan.correction_policy, "latest_preferred")
+        self.assertEqual(plan.evidence["operation"], "lookup_holding")
+        self.assertEqual(
+            plan.evidence["holding_report_relative"],
+            {
+                "selector": "exact_reference_date",
+                "projection_role": "current",
+                "dynamic": False,
+                "executable": True,
+                "evidence": None,
+            },
+        )
+
     # ----------------------------------------------------------- fails closed
     def test_an_issuer_without_a_named_holder_stays_unresolved(self) -> None:
         for query in (
@@ -1969,6 +2013,18 @@ class NaturalHoldingReporterTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertIsNone(self.reporter(query))
 
+    def test_reporter_first_requires_unambiguous_reporting_role_proof(self) -> None:
+        for query in (
+            f"{self.HOLDER}가 추천한 {self.ISSUER} 보유주식수는?",
+            f"{self.HOLDER}가 보고한 {self.ISSUER} 2024년 매출액은?",
+            f"{self.HOLDER}과 {self.SECOND}가 보고한 "
+            f"{self.ISSUER} 보유주식수는?",
+            f"{self.HOLDER}이 아니라 {self.SECOND}가 보고한 "
+            f"{self.ISSUER} 보유주식수는?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(self.reporter(query))
+
     # ------------------------------------------------------------- T8 firewall
     def test_a_second_corpus_company_is_never_read_as_the_holder(self) -> None:
         """Issuer/reporter direction over two corpus companies is not this lane.
@@ -1982,6 +2038,8 @@ class NaturalHoldingReporterTests(unittest.TestCase):
             f"{self.ISSUER}에 대한 {self.OTHER}의 최신 보고 보유비율은?",
             f"{self.OTHER}의 {self.ISSUER} 지분율은 얼마야?",
             f"{self.ISSUER} 대량보유보고에서 {self.OTHER}가 신고한 보유주식수는?",
+            f"{self.OTHER}가 2024년 7월 29일 기준으로 보고한 "
+            f"{self.ISSUER} 보유주식수는?",
         ):
             with self.subTest(query=query):
                 plan = self.understanding.understand(query)
