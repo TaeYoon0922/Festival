@@ -77,6 +77,21 @@ class ContractLifecycleIntentTest(unittest.TestCase):
     def test_a_bare_contract_amount_question_is_not_rerouted(self):
         self.assert_not_a_contract_event(f"{ISSUER} 2024년 계약금액은 얼마야?")
 
+    def test_a_contract_amount_change_is_a_contract_question(self):
+        """Two filings of one contract compared; left unrouted it drifts."""
+
+        self.assert_contract_event(
+            f"{ISSUER}이 2024년 7월 3일 공시한 계약의 계약금액은 "
+            "2025년 1월 정정으로 얼마나 늘었어?"
+        )
+
+    def test_an_amount_change_without_a_contract_is_not_rerouted(self):
+        """The same three ingredients describe other lanes' questions."""
+
+        self.assert_not_a_contract_event(
+            f"{ISSUER}의 2023년 3월 매출액은 2024년 3월 대비 얼마나 늘었어?"
+        )
+
     def test_an_unrelated_metric_question_is_not_rerouted(self):
         self.assert_not_a_contract_event(f"{ISSUER}의 2024년 매출액은 얼마야?")
 

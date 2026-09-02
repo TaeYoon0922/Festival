@@ -543,6 +543,13 @@ def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
         match = next((alias for alias in aliases if alias.casefold() in compact), None)
         if match:
             return event_type, match, route
+    change = _contract_amount_change_event(query, compact)
+    if change:
+        # A question comparing one contract's amount across two of its filings
+        # is a contract question, whatever else it does or does not name. Left
+        # unrouted it reaches retrieval as prose and drifts to the periodic
+        # reports that also state amounts.
+        return "supply_contract", change, "exchange"
     lifecycle = _contract_lifecycle_event(compact)
     if lifecycle:
         # The lifecycle family, not the termination filing: the question starts
@@ -550,6 +557,21 @@ def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
         # is as much a part of the answer as the termination is.
         return "supply_contract", lifecycle, "exchange"
     return None, None, None
+
+
+def _contract_amount_change_event(query: str, compact: str) -> str | None:
+    """A contract whose amount this question compares across two of its filings.
+
+    The change request is the whole signal: it already required an amount, a
+    question about how far it moved, and two distinct dates, so nothing further
+    is read from the text here.  The contract noun is still required, because
+    the same three ingredients describe a holding or financial comparison that
+    belongs to another lane entirely.
+    """
+
+    if _CONTRACT_NOUN not in compact:
+        return None
+    return "계약금액변동" if amount_change_requested(query) else None
 
 
 def _contract_lifecycle_event(compact: str) -> str | None:
