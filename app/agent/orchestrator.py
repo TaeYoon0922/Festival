@@ -9,6 +9,11 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from app.agent.task_router import TaskDecision, TaskRouter
+from app.reasoning.amount_change import (
+    compose_amount_change_text,
+    requested_amount_change,
+    resolve_amount_change,
+)
 from app.reasoning.contract_lifecycle import (
     compose_lifecycle_text,
     lifecycle_items,
@@ -368,8 +373,29 @@ class AgentOrchestrator:
                 if requested_lifecycle_outcome(query_plan)
                 else None
             )
+            # How far an amount moved between two filings. Both values are read
+            # from the served chunks' own tables, each staying bound to the
+            # filing it came from, so the two can never be crossed.
+            change_request = requested_amount_change(query_plan)
+            delta = (
+                resolve_amount_change(
+                    change_request,
+                    _served_chunks(retrieval_execution, evidence),
+                    corp_code=getattr(query_plan, "corp_code", None),
+                )
+                if change_request is not None
+                else None
+            )
             trace.append("answer_composer")
-            if lifecycle is not None and lifecycle.resolved:
+            if delta is not None:
+                trace.insert(len(trace) - 1, "contract_amount_change")
+                draft = _compose_amount_change(
+                    evidence,
+                    delta,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+            elif lifecycle is not None and lifecycle.resolved:
                 trace.insert(len(trace) - 1, "contract_lifecycle_resolver")
                 draft = _compose_lifecycle(
                     evidence,
@@ -614,6 +640,57 @@ def orchestrate(
         query_plan,
         retrieval_execution,
         candidate_chunks=candidate_chunks,
+    )
+
+
+def _served_chunks(execution: Any, evidence: EvidenceSet) -> tuple[Any, ...]:
+    """The structured chunks behind the served evidence, in served order.
+
+    Amount cells live on the chunk the chunker persisted, not on the evidence
+    item, so a value read for an operand is read from the same row the citation
+    points at.
+    """
+
+    by_id: dict[str, Any] = {}
+    for chunk in getattr(execution, "chunks", ()) or ():
+        chunk_id = str(chunk.get("chunk_id") or "") if hasattr(chunk, "get") else ""
+        if chunk_id:
+            by_id[chunk_id] = chunk
+    ordered = [by_id[item.chunk_id] for item in evidence.served_items
+               if item.chunk_id in by_id]
+    return tuple(ordered)
+
+
+def _compose_amount_change(
+    evidence: EvidenceSet,
+    delta: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft:
+    """State the change, citing the filing each of the two amounts came from."""
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    wanted = {
+        str(operand.source.chunk_id)
+        for operand in (delta.initial, delta.final)
+        if operand.source is not None
+    }
+    cited = [item for item in evidence.served_items if item.chunk_id in wanted]
+    cited.extend(
+        item
+        for item in evidence.served_items
+        if item.chunk_id not in wanted
+        and len(cited) < _general_evidence_limit(evidence, task_type=task_type)
+    )
+    statement = compose_amount_change_text(delta)
+    text = statement if not base.answer_text else f"{statement}\n\n{base.answer_text}"
+    return replace(
+        base,
+        answer_text=text,
+        citations=tuple(_general_citation(item) for item in cited),
     )
 
 

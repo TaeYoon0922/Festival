@@ -9,6 +9,10 @@ from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
 from app.reasoning import holding_report_relative
+from app.reasoning.amount_change import (
+    AMOUNT_CHANGE_KEY,
+    amount_change_requested,
+)
 from app.reasoning.contract_lifecycle import (
     LIFECYCLE_OUTCOME_KEY,
     lifecycle_outcome_requested,
@@ -467,6 +471,13 @@ class QueryUnderstanding:
                 # Whether the question follows a contract forward, decided
                 # once here so composition never re-reads the question.
                 LIFECYCLE_OUTCOME_KEY: lifecycle_outcome_requested(raw_query),
+                # Which two filings a contract-amount change compares, when
+                # the question compares two at all.
+                AMOUNT_CHANGE_KEY: (
+                    change.to_dict()
+                    if (change := amount_change_requested(raw_query))
+                    else None
+                ),
             },
         )
 
