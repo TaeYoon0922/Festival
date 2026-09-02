@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from app.reasoning.holding_report_index import HoldingReportIndex
-from app.reasoning.holding_reporter import canonical_reporter_key, reporter_matches
+from app.reasoning.holding_reporter import (
+    canonical_reporter_key,
+    reporter_matches,
+    reporter_surface_spans,
+)
 
 
 #: ``plan.evidence`` key recording that this plan's reporter was produced by
@@ -38,6 +42,10 @@ AMBIGUOUS_FILER = "ambiguous_filer"
 #: ``filer_identity`` matched a named holder against this issuer's own filers.
 ROLE_PATH_RELATION = "two_company_relation"
 ROLE_PATH_FILER = "filer_identity"
+#: ``query_grounded`` searched this issuer's own holders for one the question
+#: writes out.  The corpus still supplies the identity; the question only
+#: says which of the holders it already has is the one being asked about.
+ROLE_PATH_QUERY_GROUNDED = "query_grounded"
 
 
 @dataclass(frozen=True)
@@ -262,6 +270,83 @@ class HoldingCompanyRoleResolver:
             reporter_key=canonical_reporter_key(filer),
             direction_1_report_count=next(iter(reports.values())),
         )
+
+    def resolve_query_grounded(
+        self, issuer: str, issuer_corp_code: str, question: str
+    ) -> HoldingCompanyRoleResolution:
+        """The one holder of this issuer that this question writes out.
+
+        The question names somebody, and the deterministic parsers could not
+        tell which of its words that was -- the holder is two words long, or
+        carries no particle, or sits behind wording those parsers decline.  So
+        the question is turned around: instead of searching the sentence for a
+        name, this asks which of the holders the corpus *already records for
+        this issuer* is written in it.  Nothing outside that set can ever be
+        produced, which is what makes the search safe without a grammar for it.
+
+        The issuer is excluded by identity before counting, because a company
+        is frequently both, and its own name appearing in its own question
+        proves nothing.  Exactly one surviving holder binds; none and more than
+        one both leave the reporter alone, and the ambiguous case is not
+        resolved by preferring longer, earlier or more frequent holders.
+        """
+
+        name = str(issuer or "").strip()
+        code = str(issuer_corp_code or "").strip()
+        text = str(question or "")
+        if not name or not code or not text:
+            return HoldingCompanyRoleResolution(
+                INVALID_PAIR, reason="an issuer and a question are both required"
+            )
+        if self.index is None:
+            return HoldingCompanyRoleResolution(
+                NO_INDEX, reason="holding report index is unavailable"
+            )
+        if not self.index.complete:
+            return HoldingCompanyRoleResolution(
+                INCOMPLETE_INDEX, reason="holding report index is incomplete"
+            )
+        if (
+            self.active_corpus_identity is not None
+            and not self.index.matches_corpus(self.active_corpus_identity)
+        ):
+            return HoldingCompanyRoleResolution(
+                STALE_INDEX,
+                reason="holding report index does not match the active corpus",
+            )
+
+        issuer_key = canonical_reporter_key(name)
+        try:
+            written: dict[str, str] = {}
+            for filer in self.index.enumerate_reporters(code):
+                key = canonical_reporter_key(filer)
+                if not key or key == issuer_key:
+                    continue
+                spans = reporter_surface_spans(text, filer)
+                if len(spans) != 1:
+                    # Absent, or written more than once with nothing to say
+                    # which mention is the holder being asked about.
+                    continue
+                start, end = spans[0]
+                written.setdefault(key, text[start:end])
+        except Exception:  # noqa: BLE001 - corpus lookup must fail closed
+            return HoldingCompanyRoleResolution(
+                INDEX_ERROR, reason="holding filer lookup failed"
+            )
+
+        if not written:
+            return HoldingCompanyRoleResolution(
+                UNKNOWN_FILER,
+                reason="the question names no holder this issuer is known to have",
+            )
+        if len(written) > 1:
+            return HoldingCompanyRoleResolution(
+                AMBIGUOUS_FILER,
+                reason="the question names more than one holder of this issuer",
+            )
+        # The surface came out of the question; the identity behind it is still
+        # decided by the same filer lookup every other holding path uses.
+        return self.resolve_filer(name, code, next(iter(written.values())))
 
     def document_ids(
         self, issuer_corp_code: str, reporter: str
