@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from app.reasoning.holding_company_role_resolution import (
     ROLE_PATH_FILER,
+    ROLE_PATH_QUERY_GROUNDED,
     ROLE_PROVENANCE_KEY,
     HoldingCompanyRoleResolver,
     role_provenance,
@@ -244,6 +245,35 @@ def _holding_filer_resolution_allowed(plan: QueryPlan) -> bool:
     if _comparison_firewall_engaged(plan):
         return False
     return bool(_directed_actor_surface(plan))
+
+
+def _query_grounded_reporter_allowed(plan: QueryPlan) -> bool:
+    """Whether a holding plan may be asked which of its issuer's holders it names.
+
+    The same holding-only gates the named-filer path uses, minus its
+    requirement that a directed acquisition already isolated a surface: the
+    shapes this recovers are the ones no deterministic parser bound, so there
+    is no surface to start from.  What replaces it is the corpus: only holders
+    this issuer already has can be produced at all.
+
+    A reporter the question's own wording produced keeps its pre-existing
+    behaviour and is never reconsidered here.
+    """
+
+    if plan.reporter:
+        return False
+    if len(plan.companies) != 1 or len(plan.corp_codes) != 1:
+        return False
+    if tuple(plan.disclosure_route) != ("holding",):
+        return False
+    if plan.event_type:
+        return False
+    if (
+        isinstance(plan.comparison, Mapping)
+        and plan.comparison.get("type") == "company_comparison"
+    ):
+        return False
+    return not _comparison_firewall_engaged(plan)
 
 
 def _directed_actor_surface(plan: QueryPlan) -> str:
@@ -867,6 +897,7 @@ class QueryValidator:
                     plan = replace(plan, companies=(canonical,))
                     company = canonical
             plan = self._bind_named_filer(plan)
+            plan = self._bind_query_grounded_reporter(plan)
             return _deterministic_slot("company", company), None, plan
         if self.corpus_scope is not None:
             resolved = self.corpus_scope.resolve_company(company)
@@ -879,6 +910,7 @@ class QueryValidator:
                         corp_codes=(corp_code,),
                     )
                 )
+                normalized = self._bind_query_grounded_reporter(normalized)
                 return _deterministic_slot("company", canonical), None, normalized
 
         attempted = bool(plan.evidence.get("company_resolution_attempted"))
@@ -889,6 +921,35 @@ class QueryValidator:
                 )
             return _deterministic_slot("company", company), "company_out_of_corpus", plan
         return _deterministic_slot("company", company), None, plan
+
+    def _bind_query_grounded_reporter(self, plan: QueryPlan) -> QueryPlan:
+        """Bind the holder this question writes out, when the corpus knows it.
+
+        Runs only after every earlier reporter rule has declined, so it can
+        never overwrite one. The corpus decides who exists; the question only
+        decides which of this issuer's existing holders is meant, and it has to
+        say so in the holder's own name for that to count.
+        """
+
+        if self.holding_company_role_resolver is None:
+            return plan
+        if not _query_grounded_reporter_allowed(plan):
+            return plan
+        role = self.holding_company_role_resolver.resolve_query_grounded(
+            plan.companies[0], plan.corp_codes[0], str(plan.raw_query or "")
+        )
+        if not role.resolved:
+            return plan
+        return replace(
+            plan,
+            reporter=str(role.reporter),
+            evidence={
+                **plan.evidence,
+                ROLE_PROVENANCE_KEY: role_provenance(
+                    role, path=ROLE_PATH_QUERY_GROUNDED
+                ),
+            },
+        )
 
     def _bind_named_filer(self, plan: QueryPlan) -> QueryPlan:
         """Turn a named actor into this issuer's proven filer, or leave it be.

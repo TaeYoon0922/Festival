@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import unittest
+from types import SimpleNamespace
 from dataclasses import replace
 from pathlib import Path
 
@@ -716,10 +717,18 @@ class HoldingCompanyRoleValidationTests(unittest.TestCase):
         class RecordingResolver:
             def __init__(self) -> None:
                 self.calls = 0
+                self.query_grounded_calls = 0
 
             def resolve(self, *args):
                 self.calls += 1
                 raise AssertionError(f"role resolver must not run: {args!r}")
+
+            def resolve_query_grounded(self, *args):
+                # A single-company holding question may ask the corpus which of
+                # this issuer's holders it names; declining is the answer here,
+                # and no reporter may be produced from it.
+                self.query_grounded_calls += 1
+                return SimpleNamespace(resolved=False)
 
         cases = (
             f"{self.A}와 {self.B} 보유비율 비교",
@@ -738,6 +747,7 @@ class HoldingCompanyRoleValidationTests(unittest.TestCase):
                     holding_company_role_resolver=recording,
                 ).validate(self.understanding.understand(query))
                 self.assertEqual(recording.calls, 0)
+                self.assertIsNone(result.plan.reporter)
                 self.assertIsNotNone(result.state)
 
 
