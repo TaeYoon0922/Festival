@@ -9,7 +9,20 @@ from typing import Any
 
 from app.parsing.metadata_filtered_retrieval import extract_metadata_filters
 from app.reasoning import holding_report_relative
+from app.reasoning.amount_change import (
+    AMOUNT_CHANGE_KEY,
+    amount_change_requested,
+)
+from app.reasoning.contract_lifecycle import (
+    LIFECYCLE_OUTCOME_KEY,
+    lifecycle_outcome_requested,
+)
 from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.metric_disambiguation import (
+    AFFILIATE_COUNT,
+    affiliate_count_intent,
+    contract_sales_ratio_intent,
+)
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -74,7 +87,7 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "supply_contract",
         (
-            "단일판매", "공급계약", "수주계약",
+            "단일판매", "공급계약", "수주계약", "위탁생산계약",
             # Ways a question names a supply contract or its life. Bare field
             # names such as "계약금액" are deliberately absent: they also appear
             # in periodic and correction questions, which must not route here.
@@ -192,6 +205,10 @@ _PERIODIC_SECTION_BOOSTS: dict[str, dict[str, float]] = {
     },
     "listing_history": {
         "회사의 개요": 1.0,
+    },
+    AFFILIATE_COUNT: {
+        "계열회사": 1.0,
+        "기업집단": 0.95,
     },
     "merger_history": {
         "회사의 연혁": 1.0,
@@ -460,6 +477,16 @@ class QueryUnderstanding:
                     report_relative.to_dict() if report_relative else None
                 ),
                 "structured_spans": [list(span) for span in sorted(set(structured_spans))],
+                # Whether the question follows a contract forward, decided
+                # once here so composition never re-reads the question.
+                LIFECYCLE_OUTCOME_KEY: lifecycle_outcome_requested(raw_query),
+                # Which two filings a contract-amount change compares, when
+                # the question compares two at all.
+                AMOUNT_CHANGE_KEY: (
+                    change.to_dict()
+                    if (change := amount_change_requested(raw_query))
+                    else None
+                ),
             },
         )
 
@@ -477,6 +504,12 @@ def understand_query(
 
 
 def _find_financial_metric(query: str) -> tuple[str | None, str | None]:
+    if contract_sales_ratio_intent(query) is not None:
+        # "매출액 대비" in a question that names a contract is that contract's
+        # own ratio field, not the periodic revenue line the token also names.
+        # The longer phrase wins, so the question never becomes a periodic
+        # metric question on the strength of the word inside it.
+        return None, None
     compact = re.sub(r"\s+", "", query).casefold()
     for canonical, aliases in _FINANCIAL_METRICS:
         match = next((alias for alias in aliases if alias.casefold() in compact), None)
@@ -485,13 +518,95 @@ def _find_financial_metric(query: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+#: A contract named plainly, then asked what became of it.  The filing families
+#: above are recognized by their own names -- ``공급계약``, ``계약해지`` -- but a
+#: question about a contract's outcome need not repeat any of them: it names the
+#: contract once and then asks about it.  ``<계약> ... 해지됐나`` and
+#: ``<계약>의 최종 상태`` are contract-lifecycle questions written the way people
+#: write them, and without this they reach retrieval as unrouted prose, where
+#: the lifecycle expansion that would answer them declines for want of an event
+#: type.
+#:
+#: Bounded on both sides.  The contract noun and the outcome have to be close
+#: enough to be about each other -- a metric question that happens to mention a
+#: termination elsewhere in the sentence is not this -- and the outcome
+#: vocabulary is the lifecycle's own, never a field name.  ``계약금액`` and other
+#: bare field nouns stay deliberately unmatched here, exactly as they are in
+#: ``_EVENTS``: they appear in periodic and correction questions that must keep
+#: their present routing.
+_CONTRACT_NOUN = r"계약"
+#: What a lifecycle question asks about the contract it just named.  Only
+#: ``해지``: it is the one lifecycle word this corpus never also uses as a field
+#: name.  ``종료`` and ``취소`` read the same way in a sentence but ``계약기간
+#: 종료일`` is a date *stated inside* a contract filing, so accepting them turns
+#: a single-document field question into a lifecycle question and sends it
+#: looking for a termination that was never asked about.
+_CONTRACT_OUTCOME = r"해지"
+#: The two shapes, each anchored on the contract noun so the outcome cannot be
+#: picked up from an unrelated clause.  At most a few characters of particle or
+#: adverb may stand between them.
+_CONTRACT_LIFECYCLE = re.compile(
+    _CONTRACT_NOUN + r"[^\s]{0,6}?" + _CONTRACT_OUTCOME
+)
+#: ``계약의 최종 상태``: the outcome asked for by name rather than by predicate.
+_CONTRACT_FINAL_STATE = re.compile(_CONTRACT_NOUN + r".{0,4}?최종상태")
+
+
 def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
     compact = re.sub(r"\s+", "", query).casefold()
     for event_type, aliases, route in _EVENTS:
         match = next((alias for alias in aliases if alias.casefold() in compact), None)
         if match:
             return event_type, match, route
+    ratio = contract_sales_ratio_intent(query)
+    if ratio:
+        # A contract asked for its 매출액대비(%) cell is a contract question.
+        # Unrouted it reaches the periodic reports that also state 매출액, which
+        # is the one place the answer is certain not to be.
+        return "supply_contract", ratio.phrase, "exchange"
+    change = _contract_amount_change_event(query, compact)
+    if change:
+        # A question comparing one contract's amount across two of its filings
+        # is a contract question, whatever else it does or does not name. Left
+        # unrouted it reaches retrieval as prose and drifts to the periodic
+        # reports that also state amounts.
+        return "supply_contract", change, "exchange"
+    lifecycle = _contract_lifecycle_event(compact)
+    if lifecycle:
+        # The lifecycle family, not the termination filing: the question starts
+        # from a contract and asks where it ended up, so the conclusion filing
+        # is as much a part of the answer as the termination is.
+        return "supply_contract", lifecycle, "exchange"
     return None, None, None
+
+
+def _contract_amount_change_event(query: str, compact: str) -> str | None:
+    """A contract whose amount this question compares across two of its filings.
+
+    The change request is the whole signal: it already required an amount, a
+    question about how far it moved, and two distinct dates, so nothing further
+    is read from the text here.  The contract noun is still required, because
+    the same three ingredients describe a holding or financial comparison that
+    belongs to another lane entirely.
+    """
+
+    if _CONTRACT_NOUN not in compact:
+        return None
+    return "계약금액변동" if amount_change_requested(query) else None
+
+
+def _contract_lifecycle_event(compact: str) -> str | None:
+    """A contract whose outcome this question asks about, or nothing.
+
+    Read only after every named filing family has declined, so a question that
+    names its own family keeps the routing that family already gives it.
+    """
+
+    for pattern in (_CONTRACT_LIFECYCLE, _CONTRACT_FINAL_STATE):
+        match = pattern.search(compact)
+        if match:
+            return match.group(0)
+    return None
 
 
 def _find_holding_metric(query: str) -> tuple[str | None, str | None]:
@@ -559,6 +674,26 @@ _REPORTER_LEGAL_FORM = r"(?:(?:주식회사|유한회사|유한책임회사|재�
 #: accepted is a legal form followed by one token, which is why the legal form
 #: above is a separate group rather than part of this character class.
 _REPORTER_TOKEN = r"[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{0,31}"
+#: The tracked multi-word Latin holder carries an initial designator.  Keep
+#: that exact, structurally bounded shape here; ordinary multi-word names stay
+#: with the corpus-backed query-grounded resolver, which proves their issuer
+#: relationship and records its provenance.
+_LATIN_REPORTER_TOKEN = r"[0-9A-Za-z][0-9A-Za-z&.\-]{0,31}"
+_LATIN_REPORTER_NAME = (
+    r"[A-Za-z]\.\s+"
+    + _LATIN_REPORTER_TOKEN
+    + r"(?:\s+(?:&\s+)?"
+    + _LATIN_REPORTER_TOKEN
+    + r"){0,6}"
+)
+_REPORTER_NAME = (
+    _REPORTER_LEGAL_FORM
+    + r"(?:"
+    + _LATIN_REPORTER_NAME
+    + r"|"
+    + _REPORTER_TOKEN
+    + r")"
+)
 #: The holder must stand in a possessive or subject relation to the report.
 #: Object and topic particles are deliberately absent: with 을/를/은/는 accepted,
 #: ``보유주식수는`` and ``보유비율을`` would themselves read as holders.  The
@@ -574,8 +709,7 @@ _NATURAL_REPORTER = re.compile(
     _REPORTER_BRIDGE
     + _REPORTER_ROLE
     + r"(?P<holder>"
-    + _REPORTER_LEGAL_FORM
-    + _REPORTER_TOKEN
+    + _REPORTER_NAME
     + r")"
     + _REPORTER_PARTICLE
 )
@@ -586,8 +720,7 @@ _NATURAL_REPORTER = re.compile(
 #: separately below rather than hidden inside an unbounded regex.
 _REPORTER_FIRST_SUBJECT = re.compile(
     r"\s*(?P<holder>"
-    + _REPORTER_LEGAL_FORM
-    + _REPORTER_TOKEN
+    + _REPORTER_NAME
     + r")\s*(?:이|가)\s*"
 )
 #: A reporting verb must close the bridge immediately before the issuer.  The
@@ -861,6 +994,12 @@ def _acquisition_unit_price_phrase(tail: str) -> str | None:
 
 
 def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
+    affiliate = affiliate_count_intent(query)
+    if affiliate is not None:
+        # "상장과 비상장" beside 계열회사 names two columns of one count table.
+        # Read as listing history it answers with a listing date, which is a
+        # different field of a different section.
+        return AFFILIATE_COUNT, affiliate.phrase
     for intent, patterns in _PERIODIC_INTENTS:
         for pattern in patterns:
             match = re.search(pattern, query, flags=re.IGNORECASE)

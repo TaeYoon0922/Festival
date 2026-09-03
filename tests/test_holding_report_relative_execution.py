@@ -20,6 +20,7 @@ from app.reasoning.holding_report_index import (
     AMBIGUOUS,
     CORRECTION_AMBIGUOUS,
     NO_INDEX,
+    NO_MATCH,
     PREVIOUS_UNAVAILABLE,
     RESOLVED,
     STALE_INDEX,
@@ -623,6 +624,20 @@ class FailureAuthorityTests(unittest.TestCase):
                 self.assertEqual(result.report_relative_execution.status, AMBIGUOUS)
                 self.assertEqual(result.evidence_results, ())
                 self.assertEqual(retrieved_context(final_evidence(source, result), 10), [])
+
+    def test_no_match_has_no_authoritative_report_evidence(self) -> None:
+        question = (
+            f"{REPORTER} {COMPANY} 2026년 5월 9일 보고서의 보유주식수"
+        )
+        source, result = self._run_failure(index_of(OLD, NEW), question)
+
+        self.assertEqual(result.report_relative_execution.status, NO_MATCH)
+        self.assertFalse(
+            result.report_relative_execution.report_execution.selection.resolved
+        )
+        self.assertEqual(result.evidence_chunks, ())
+        self.assertEqual(result.evidence_results, ())
+        self.assertEqual(retrieved_context(final_evidence(source, result), 10), [])
 
     def test_stale_index_is_authoritative(self) -> None:
         question = f"{REPORTER} {COMPANY} 최신 보고 보유주식수"

@@ -25,6 +25,11 @@ from app.reasoning.holding_company_role_resolution import (
     HoldingCompanyRoleResolver,
     role_provenance,
 )
+from app.reasoning.company_comparison import (
+    COMPANY_COMPARISON_KEY,
+    comparison_requested,
+    executable_comparison,
+)
 from app.reasoning.correction_pair_roles import PAIR_INTENT, correction_intent
 from app.reasoning.holding_evidence_coverage import (
     CURRENT_HOLDING_STATE_FIELDS,
@@ -863,6 +868,21 @@ class QueryValidator:
                         None,
                         resolved_plan,
                     )
+            # A comparison names its companies as separate operands rather
+            # than as one relation, and each is answered from its own scope.
+            # Checked only after the corpus relation above declined, so a role
+            # pair keeps the reading that belongs to it.
+            plan = self._company_comparison(plan) or plan
+            # A complete comparison names each company's own operand, so the
+            # companies are no longer one unresolved subject: they are several
+            # resolved ones. Nothing else about the multi-company firewall
+            # moves -- an incomplete request leaves the ambiguity below intact.
+            if executable_comparison(plan) is not None:
+                return (
+                    _deterministic_slot("company", list(plan.companies)),
+                    None,
+                    plan,
+                )
             # The corpus relation above either could not be consulted or did
             # not prove exactly one direction.  Preserve the old ambiguity and
             # record whether comparison semantics were the authoritative gate.
@@ -965,6 +985,43 @@ class QueryValidator:
                     role, path=ROLE_PATH_QUERY_GROUNDED
                 ),
             },
+        )
+
+    def _company_comparison(self, plan: QueryPlan) -> QueryPlan | None:
+        """Attach the comparison operands this question names, if it names any.
+
+        The company slot stays ambiguous either way: this records that the
+        question *could* be executed as N independent company scopes, and
+        serving decides whether it actually can.  Nothing here relaxes the
+        firewall, so a question whose comparison cannot be executed refuses
+        exactly as it does today.
+
+        Every named company has to resolve to its own code, because a company
+        that cannot be retrieved on its own cannot own an operand, and a
+        comparison with one unretrievable side is the guess this refuses to
+        make.
+        """
+
+        if self.corpus_scope is None:
+            return None
+        resolved: list[tuple[str, str]] = []
+        for company in plan.companies:
+            found = self.corpus_scope.resolve_company(company)
+            if found is None:
+                return None
+            resolved.append((str(found[0]), str(found[1])))
+        request = comparison_requested(
+            str(plan.raw_query or ""),
+            [name for name, _code in resolved],
+            [code for _name, code in resolved],
+        )
+        if request is None:
+            return None
+        return replace(
+            plan,
+            companies=tuple(name for name, _code in resolved),
+            corp_codes=tuple(code for _name, code in resolved),
+            evidence={**plan.evidence, COMPANY_COMPARISON_KEY: request.to_dict()},
         )
 
     def _bind_named_filer(self, plan: QueryPlan) -> QueryPlan:

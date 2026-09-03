@@ -14,9 +14,16 @@ wrong -- it deletes the brackets and leaves a bare ``주`` that is
 indistinguishable from the first syllable of ``주성엔지니어링``, and stripping
 that would rename real companies.
 
-Matching is exact on the canonical key plus the pre-existing suffix family; it
-is never containment.  ``영풍`` and ``영풍정밀`` are different holders, and any
-rule that merges them has failed regardless of what it recovers.
+Matching is exact on the canonical key plus the pre-existing suffix family and
+foreign legal suffixes.  It is never general prefix containment.  ``영풍`` and
+``영풍정밀`` are different holders, just as ``BlackRock`` and ``BlackRock Fund
+Advisors`` are; any rule that merges either pair has failed.
+
+One explicit alias closes the corpus's otherwise unresolvable Fidelity label:
+the question uses that established short name while the filing writes
+``Fidelity Management & Research Company LLC``.  ``T. Rowe Price Associates``
+needs no alias: punctuation and spacing already canonicalize, and ``Inc`` is a
+legal suffix rather than part of the entity's distinguishing name.
 """
 
 from __future__ import annotations
@@ -36,6 +43,30 @@ _SUFFIX = re.compile(rf"\s*(?:{_BRACKETED}|{_SPELLED})\s*$")
 #: Retained from the original matcher: a holder may be named with or without the
 #: word describing what kind of body it is, as in 국민연금 / 국민연금공단.
 _FAMILY_SUFFIXES = ("공단", "기금", "조합", "법인", "회사")
+
+#: A label whose comparison characters are all Latin.  Foreign legal suffix
+#: handling is confined to these keys, so a Korean word merely ending in the
+#: same letters can never be shortened.
+_LATIN_KEY = re.compile(r"[0-9a-z]+")
+
+#: Corporate designators that may be omitted from an otherwise complete Latin
+#: holder name.  Longest first because some are suffixes of others.
+_LATIN_ENTITY_SUFFIXES = (
+    "corporation",
+    "company",
+    "limited",
+    "corp",
+    "ltd",
+    "inc",
+    "llc",
+)
+
+#: Proven question label -> filing label identities that cannot be expressed as
+#: mere legal-suffix normalization.  This is intentionally data, not a prefix
+#: rule: another one-word asset-manager name remains a different holder.
+_REPORTER_ALIAS_GROUPS = (
+    frozenset({"fidelity", "fidelitymanagementresearchcompanyllc"}),
+)
 
 
 def canonical_reporter_key(value: object) -> str:
@@ -67,9 +98,24 @@ def reporter_matches(value: object, constraint: object) -> bool:
         return False
     if left == right:
         return True
-    return any(
+    if any(
         left == right + suffix or right == left + suffix
         for suffix in _FAMILY_SUFFIXES
+    ):
+        return True
+    return _names_the_same_latin_holder(left, right)
+
+
+def _names_the_same_latin_holder(left: str, right: str) -> bool:
+    """Whether aliases or a legal suffix prove two Latin labels identical."""
+
+    if not (_LATIN_KEY.fullmatch(left) and _LATIN_KEY.fullmatch(right)):
+        return False
+    if any({left, right}.issubset(group) for group in _REPORTER_ALIAS_GROUPS):
+        return True
+    return any(
+        left == right + suffix or right == left + suffix
+        for suffix in _LATIN_ENTITY_SUFFIXES
     )
 
 

@@ -32,10 +32,12 @@ class FieldStatus(str, Enum):
 
     #: The source states a value for this field.
     AVAILABLE = "available"
-    #: The field exists in the source and carries no value.
+    #: The exact authoritative source is identified, but it states no value for
+    #: the field (whether the field is blank, omitted, or absent from that
+    #: source's bounded schema).
     UNAVAILABLE = "unavailable"
-    #: The authoritative source does not carry this field at all, or was never
-    #: served.  There is nothing to cite either way.
+    #: The authoritative source itself was not proven or was never served.
+    #: There is nothing to cite either way.
     MISSING = "missing"
     #: More than one authoritative statement, and nothing chooses between them.
     CONFLICT = "conflict"

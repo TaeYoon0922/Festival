@@ -68,6 +68,34 @@ def exact_reference_date(plan: Any) -> str | None:
     return str(start)
 
 
+def question_reference_date(question: str) -> str | None:
+    """The one holding reference date a question names, as eight digits.
+
+    Reads the question with the routed holding semantics, exactly as
+    :func:`derive_exact_period` does, and returns nothing for a range, a year, a
+    receipt date or no date at all.  Offered separately because a component that
+    only needs to know *which day was asked about* has no plan to gate on -- and
+    re-parsing the date with a second ontology is precisely what this module
+    exists to prevent.
+    """
+
+    try:
+        period, _spans, _years, semantics = _period_from_query(
+            str(question or ""), task_type="holding_change", routes=("holding",)
+        )
+    except (TypeError, ValueError):  # a question the frozen parser cannot read
+        return None
+    if isinstance(semantics, Mapping) and str(semantics.get("role") or "") == RECEIPT_ROLE:
+        return None
+    if getattr(period, "period_type", None) != EXACT_PERIOD_TYPE:
+        return None
+    start = getattr(period, "from_date", None)
+    if not start or start != getattr(period, "to_date", None):
+        return None
+    digits = "".join(character for character in str(start) if character.isdigit())
+    return digits[:8] if len(digits) >= 8 else None
+
+
 def _already_exact(plan: Any) -> bool:
     """Whether the frozen plan already pins a single day.
 
@@ -90,6 +118,40 @@ def _reads_a_receipt_date(plan: Any) -> bool:
     return str(semantics.get("role") or "") == RECEIPT_ROLE
 
 
+def routed_date_reading(
+    question: str, plan: Any
+) -> tuple[QueryPeriod | None, Mapping[str, Any]]:
+    """The frozen parser's answer for this question under the routed semantics.
+
+    Both the recovered period and the date role the parser assigned it, because
+    a caller that reads one without the other is deciding on half a parse: the
+    day a question names and the calendar axis that day sits on are one answer,
+    and this module exists so that answer is given once.
+    """
+
+    if _already_exact(plan) or _reads_a_receipt_date(plan):
+        return None, {}
+
+    routes = tuple(getattr(plan, "disclosure_route", ()) or ())
+    if isinstance(routes, str):
+        routes = (routes,)
+    try:
+        period, _spans, _years, semantics = _period_from_query(
+            str(question or ""), task_type="holding_change", routes=routes
+        )
+    except (TypeError, ValueError):  # a question the frozen parser cannot read
+        return None, {}
+
+    if getattr(period, "period_type", None) != EXACT_PERIOD_TYPE:
+        # A range yields holding_reference_range, a bare year yields
+        # holding_reference_year, and receipt wording yields receipt_date.
+        # None of those name one event.
+        return None, {}
+    if not period.from_date or period.from_date != period.to_date:
+        return None, {}
+    return period, (dict(semantics) if isinstance(semantics, Mapping) else {})
+
+
 def derive_exact_period(question: str, plan: Any) -> QueryPeriod | None:
     """Re-read the question's date with the semantics the router settled on.
 
@@ -97,27 +159,7 @@ def derive_exact_period(question: str, plan: Any) -> QueryPeriod | None:
     single holding reference date that the frozen plan did not already carry.
     """
 
-    if _already_exact(plan) or _reads_a_receipt_date(plan):
-        return None
-
-    routes = tuple(getattr(plan, "disclosure_route", ()) or ())
-    if isinstance(routes, str):
-        routes = (routes,)
-    try:
-        period, _spans, _years, _semantics = _period_from_query(
-            str(question or ""), task_type="holding_change", routes=routes
-        )
-    except (TypeError, ValueError):  # a question the frozen parser cannot read
-        return None
-
-    if getattr(period, "period_type", None) != EXACT_PERIOD_TYPE:
-        # A range yields holding_reference_range, a bare year yields
-        # holding_reference_year, and receipt wording yields receipt_date.
-        # None of those name one event.
-        return None
-    if not period.from_date or period.from_date != period.to_date:
-        return None
-    return period
+    return routed_date_reading(question, plan)[0]
 
 
 def execution_plan(question: str, plan: Any, *, routed_task_type: str | None) -> Any:

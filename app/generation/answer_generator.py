@@ -724,10 +724,25 @@ def _holding_lead_clause(
     return template.format(value=value, verb=verb)
 
 
+#: The role words a movement sentence binds each of its two figures with.  The
+#: record form already labels the same fields ("변동 전 주식수", "변동 후 비율"),
+#: so prose and record name a role identically and only the shared half is kept
+#: here -- shares and ratio differ in the noun, never in the role.
+_BEFORE_ROLE = "변동 전"
+_AFTER_ROLE = "변동 후"
+
+
 def _holding_movement_sentence(
     event: Mapping[str, Any], kind: int, stated: set[str]
 ) -> str | None:
-    """Say a before/after movement once, keeping all three of its values."""
+    """Say a before/after movement once, keeping all three of its values.
+
+    Each figure is stated under the role word that names it.  Word order alone
+    used to carry that -- "613,758주에서 720,039주로" -- which reads correctly
+    only for someone already tracking the direction, leaves a reader scanning
+    for 변동 후 with nothing to find, and gives no way to check a misread in
+    the one sentence whose entire subject is which figure came first.
+    """
 
     if kind == _SHARES:
         # The topic particle is carried with the label: Korean picks 은 or 는
@@ -753,7 +768,10 @@ def _holding_movement_sentence(
         # same number is not repeated in consecutive sentences.
         middle = f"{change} " if change and change not in stated else ""
         stated.update(values)
-        return f"{label}{particle} {before}에서 {after}로 {middle}{predicate}."
+        return (
+            f"{label}{particle} {_BEFORE_ROLE} {before}에서 "
+            f"{_AFTER_ROLE} {after}로 {middle}{predicate}."
+        )
 
     remaining = [value for value in values if value not in stated]
     stated.update(values)

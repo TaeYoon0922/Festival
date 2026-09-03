@@ -9,6 +9,23 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from app.agent.task_router import TaskDecision, TaskRouter
+from app.reasoning.company_comparison import (
+    COMPARISON_OUTCOME_KEY,
+    compose_comparison_text,
+    executable_comparison,
+    ranking_from_outcome,
+)
+from app.reasoning.amount_change import (
+    compose_amount_change_text,
+    requested_amount_change,
+    resolve_amount_change,
+)
+from app.reasoning.contract_lifecycle import (
+    compose_lifecycle_text,
+    lifecycle_items,
+    lifecycle_outcome,
+    requested_lifecycle_outcome,
+)
 from app.reasoning.answer_composer import (
     AnswerComposer,
     AnswerDraft,
@@ -18,7 +35,11 @@ from app.reasoning.answer_composer import (
 from app.reasoning.corporate_event_field_evidence import corporate_event_field_evidence
 from app.reasoning.evidence_builder import EvidenceBuilder, EvidenceItem, EvidenceSet
 from app.reasoning.field_evidence import FieldEvidence, FieldStatus
-from app.reasoning.holding_field_evidence import holding_field_evidence
+from app.reasoning.holding_field_evidence import (
+    ACQUISITION_UNIT_PRICE,
+    holding_field_evidence,
+    requested_holding_fields as requested_holding_field_evidence,
+)
 from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
     HoldingResolution,
@@ -54,6 +75,7 @@ from app.reasoning.holding_report_relative_execution import (
     ReportRelativeEvidenceExecution,
 )
 from app.reasoning.holding_report_index import HoldingReportIndex
+from app.reasoning.holding_report_relative import SELECTOR_EXACT_REFERENCE_DATE
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 from app.retrieval.interfaces import RetrievalResult
 
@@ -354,12 +376,73 @@ class AgentOrchestrator:
         else:
             resolution = None
             resolution_before = None
-            trace.append("answer_composer")
-            draft = _compose_general_evidence(
-                evidence,
-                task_type=decision.task_type,
-                multi_document=multi_document,
+            # A contract followed forward is answered by naming which served
+            # filing began it and which ended it. Both are already in the
+            # evidence set; only the roles were missing.
+            lifecycle = (
+                lifecycle_outcome(evidence.served_items)
+                if requested_lifecycle_outcome(query_plan)
+                else None
             )
+            # How far an amount moved between two filings. Both values are read
+            # from the served chunks' own tables, each staying bound to the
+            # filing it came from, so the two can never be crossed.
+            change_request = requested_amount_change(query_plan)
+            delta = (
+                resolve_amount_change(
+                    change_request,
+                    _served_chunks(retrieval_execution, evidence),
+                    corp_code=getattr(query_plan, "corp_code", None),
+                )
+                if change_request is not None
+                else None
+            )
+            # Several companies, one field, each answered from its own scope.
+            comparison = executable_comparison(query_plan)
+            # Read the operands execution already chose, rather than looking
+            # for them again in evidence that no longer carries each company's
+            # own scoping.
+            order = (
+                ranking_from_outcome(
+                    (getattr(retrieval_execution, "routing", None) or {}).get(
+                        COMPARISON_OUTCOME_KEY
+                    )
+                )
+                if comparison is not None
+                else None
+            )
+            trace.append("answer_composer")
+            if comparison is not None:
+                trace.insert(len(trace) - 1, "company_comparison")
+                draft = _compose_company_comparison(
+                    evidence,
+                    comparison,
+                    order,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+            elif delta is not None:
+                trace.insert(len(trace) - 1, "contract_amount_change")
+                draft = _compose_amount_change(
+                    evidence,
+                    delta,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+            elif lifecycle is not None and lifecycle.resolved:
+                trace.insert(len(trace) - 1, "contract_lifecycle_resolver")
+                draft = _compose_lifecycle(
+                    evidence,
+                    lifecycle,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+            else:
+                draft = _compose_general_evidence(
+                    evidence,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
 
         # STEP 11-C.  Ask the domain producers what the authoritative source
         # says about the canonical fields this question requested.  Both read
@@ -376,7 +459,34 @@ class AgentOrchestrator:
             evidence=evidence,
             resolution=resolution,
             multi_document=multi_document,
+            authoritative_holding_report=_authoritative_holding_report(
+                question,
+                query_plan,
+                self.holding_report_index,
+                active_corpus_identity=self.active_corpus_identity,
+            ),
         )
+
+        # A resolved scoped amount-change operation has already bound two
+        # different contract amounts to two explicitly named filing roles.
+        # The ordinary corporate-event field lane intentionally asks for one
+        # flat authoritative contract_amount, so those two legitimate values
+        # appear there as a conflict.  That flat conflict must not veto the
+        # more-specific scoped operation that already resolved and cited both.
+        #
+        # This applies only after contract_amount_change actually resolved;
+        # ordinary single-field corporate-event questions retain their exact
+        # previous conflict behavior.
+        if "contract_amount_change" in trace and field_evidence:
+            field_evidence = tuple(
+                finding
+                for finding in field_evidence
+                if not (
+                    finding.domain == "corporate_event"
+                    and finding.field == "contract_amount"
+                )
+            )
+
         if field_evidence:
             trace.append("field_evidence")
             # A refusal has to point at the evidence that proves it.  Ordinary
@@ -488,6 +598,7 @@ def _field_evidence(
     evidence: EvidenceSet,
     resolution: Any,
     multi_document: Any = None,
+    authoritative_holding_report: Any = None,
 ) -> tuple[FieldEvidence, ...]:
     """Collect both producers' findings for this question.
 
@@ -509,10 +620,45 @@ def _field_evidence(
         ),
         *holding_field_evidence(
             question=question,
+            plan=plan,
             resolution=resolution,
             evidence_items=items,
+            authoritative_report=authoritative_holding_report,
         ),
     )
+
+
+def _authoritative_holding_report(
+    question: str,
+    plan: Any,
+    index: HoldingReportIndex | None,
+    *,
+    active_corpus_identity: Mapping[str, Any] | None,
+) -> Any | None:
+    """Select an exact report only for the unit-price negative-evidence lane."""
+
+    if index is None or requested_holding_field_evidence(question) != (
+        ACQUISITION_UNIT_PRICE,
+    ):
+        return None
+    corp_code = str(getattr(plan, "corp_code", "") or "").strip()
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    period = getattr(plan, "period", None)
+    if hasattr(period, "to_dict"):
+        period = period.to_dict()
+    values = dict(period) if isinstance(period, Mapping) else {}
+    start = values.get("from") or values.get("from_date")
+    end = values.get("to") or values.get("to_date")
+    if not corp_code or not reporter or not start or start != end:
+        return None
+    selection = index.select_report(
+        corp_code,
+        reporter,
+        SELECTOR_EXACT_REFERENCE_DATE,
+        reference_date=str(start),
+        active_corpus_identity=active_corpus_identity,
+    )
+    return selection.selected if selection.resolved else None
 
 
 def _holding_reporter_scope(
@@ -591,6 +737,253 @@ def orchestrate(
         query_plan,
         retrieval_execution,
         candidate_chunks=candidate_chunks,
+    )
+
+
+def _served_chunks(
+    execution: Any, evidence: EvidenceSet
+) -> tuple[Mapping[str, Any], ...]:
+    """Return raw retrieval chunks for the evidence that was actually served.
+
+    ``HybridQueryExecution.chunks`` contains ``CandidateChunk`` objects rather
+    than mappings.  Arithmetic readers need the candidate's raw ``chunk``
+    mapping, while identity/date metadata is taken from the already-built
+    ``EvidenceItem`` so the scalar stays bound to exactly the evidence the
+    answer serves.
+    """
+
+    by_id: dict[str, Mapping[str, Any]] = {}
+
+    for candidate in getattr(execution, "chunks", ()) or ():
+        if isinstance(candidate, Mapping):
+            chunk_id = str(candidate.get("chunk_id") or "")
+            payload = dict(candidate)
+        else:
+            chunk_id = str(getattr(candidate, "chunk_id", "") or "")
+            raw = getattr(candidate, "chunk", None)
+            if not isinstance(raw, Mapping):
+                continue
+            payload = dict(raw)
+            if chunk_id:
+                payload.setdefault("chunk_id", chunk_id)
+            doc_id = getattr(candidate, "doc_id", None)
+            if doc_id:
+                payload.setdefault("doc_id", str(doc_id))
+
+        if chunk_id:
+            by_id[chunk_id] = payload
+
+    ordered: list[Mapping[str, Any]] = []
+
+    for item in evidence.served_items:
+        payload = by_id.get(item.chunk_id)
+        if payload is None:
+            continue
+
+        # Candidate.chunk carries the table structure consumed by _amount_cells.
+        # EvidenceItem carries the canonical identity/date metadata already used
+        # by the answer and citation lanes.  Preserve both.
+        hydrated = dict(payload)
+        hydrated["chunk_id"] = item.chunk_id
+        hydrated["doc_id"] = item.doc_id
+        hydrated["corp_code"] = item.corp_code
+        hydrated["rcept_dt"] = item.rcept_dt
+        hydrated["report_nm"] = item.report_nm
+
+        ordered.append(hydrated)
+
+    return tuple(ordered)
+
+
+def _compose_company_comparison(
+    evidence: EvidenceSet,
+    comparison: Any,
+    order: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft:
+    """State the comparison, citing every company that took part in it.
+
+    All of them or none.  A ranking missing one company states a different
+    order than the true one, and a larger-of-two missing one side is not a
+    comparison at all, so an unresolved operand makes the whole answer
+    unanswerable rather than a partial one presented as complete.
+    """
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    if order is None:
+        return replace(
+            base,
+            answerable=False,
+            warnings=tuple(
+                dict.fromkeys((*base.warnings, "company_comparison_incomplete"))
+            ),
+        )
+    wanted = [
+        str(operand.source.chunk_id)
+        for operand in order.operands
+        if operand.source is not None
+    ]
+    by_id = {item.chunk_id: item for item in evidence.served_items}
+    cited = [by_id[chunk_id] for chunk_id in wanted if chunk_id in by_id]
+    if len(cited) != len(order.operands):
+        # An operand whose document did not survive into served evidence cannot
+        # be cited, and an uncitable comparison is not answerable.
+        return replace(
+            base,
+            answerable=False,
+            warnings=tuple(
+                dict.fromkeys((*base.warnings, "company_comparison_uncited"))
+            ),
+        )
+    statement = compose_comparison_text(comparison, order)
+    section = AnswerSection(
+        title="회사별 계약금액 비교",
+        content={
+            "summary": statement,
+            "operands": [operand.to_dict() for operand in order.operands],
+            "ordered": bool(comparison.ordered),
+        },
+        supporting_evidence_ids=tuple(item.chunk_id for item in cited),
+    )
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*(item.chunk_id for item in cited), *base.evidence_references))
+        ),
+        citations=tuple(_general_citation(item) for item in cited),
+        answerable=True,
+    )
+
+
+def _compose_amount_change(
+    evidence: EvidenceSet,
+    delta: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft:
+    """State the change, citing the filing each of the two amounts came from."""
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    wanted = {
+        str(operand.source.chunk_id)
+        for operand in (delta.initial, delta.final)
+        if operand.source is not None
+    }
+    cited = [item for item in evidence.served_items if item.chunk_id in wanted]
+    cited.extend(
+        item
+        for item in evidence.served_items
+        if item.chunk_id not in wanted
+        and len(cited) < _general_evidence_limit(evidence, task_type=task_type)
+    )
+    statement = compose_amount_change_text(delta)
+    supporting_ids = tuple(
+        dict.fromkeys(
+            str(operand.source.chunk_id)
+            for operand in (delta.initial, delta.final)
+            if operand.source is not None and operand.source.chunk_id
+        )
+    )
+    section = AnswerSection(
+        title="계약금액 변경",
+        content={"summary": statement},
+        supporting_evidence_ids=supporting_ids,
+    )
+
+    # General evidence has a bounded display/citation set, but a scoped
+    # arithmetic result may use operands that sit beyond that display limit.
+    # The deterministic summary is only supported when both operand filings
+    # remain in the citation registry.  Preserve all existing citations and
+    # add only missing operand citations by exact chunk identity.
+    item_by_id = {
+        item.chunk_id: item
+        for item in evidence.served_items
+    }
+    existing_citation_ids = {
+        citation.chunk_id
+        for citation in base.citations
+    }
+    operand_citations = tuple(
+        _general_citation(item_by_id[chunk_id])
+        for chunk_id in supporting_ids
+        if chunk_id in item_by_id
+        and chunk_id not in existing_citation_ids
+    )
+    citations = (*base.citations, *operand_citations)
+
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*supporting_ids, *base.evidence_references))
+        ),
+        citations=citations,
+    )
+
+
+def _compose_lifecycle(
+    evidence: EvidenceSet,
+    outcome: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft:
+    """State the contract's outcome, citing both ends of its lifecycle.
+
+    Built on the ordinary general-evidence draft so nothing about rows,
+    citation shape or limits changes; the two differences are that the
+    lifecycle statement leads the answer, and that the origin and terminal
+    filings are cited whatever rank retrieval gave them.
+    """
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    statement = compose_lifecycle_text(outcome)
+    if not statement:
+        return base
+    supporting_ids = tuple(
+        dict.fromkeys(
+            str(item.chunk_id)
+            for item in outcome.documents
+            if getattr(item, "chunk_id", None)
+        )
+    )
+
+    # Keep every citation required by the existing General evidence section.
+    # A lifecycle document that sat beyond the general display limit is added,
+    # never substituted for one of those existing citations.
+    existing_refs = set(base.evidence_references)
+    lifecycle_extra_citations = tuple(
+        _general_citation(item)
+        for item in outcome.documents
+        if getattr(item, "chunk_id", None)
+        and str(item.chunk_id) not in existing_refs
+    )
+    citations = (*base.citations, *lifecycle_extra_citations)
+    section = AnswerSection(
+        title="계약 최종 상태",
+        content={
+            "summary": statement,
+            **outcome.to_dict(),
+        },
+        supporting_evidence_ids=supporting_ids,
+    )
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*supporting_ids, *base.evidence_references))
+        ),
+        citations=citations,
     )
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -42,6 +43,7 @@ from app.reasoning.clarification_candidates import (
     validation_clarification_request,
 )
 from app.reasoning.clarification_request import (
+    EVENT_INSTANCE,
     ClarificationDecision,
     ClarificationState,
     clarification_text,
@@ -70,6 +72,12 @@ from app.reasoning.query_validation import (
     QueryValidator,
 )
 from app.reasoning.router import QueryRouter
+from app.reasoning.company_comparison import (
+    COMPARISON_OUTCOME_KEY,
+    comparison_outcome,
+    executable_comparison,
+    executions_for,
+)
 from app.reasoning.semantic_query_fallback import HcxSemanticQueryFallback
 from app.retrieval.correction_expansion import (
     apply_expansion,
@@ -91,6 +99,7 @@ from app.retrieval.embeddings import (
     create_embedding_provider,
 )
 from app.retrieval.hybrid import HybridQueryExecutor
+from app.retrieval.interfaces import RetrievalResult
 from app.retrieval.postgres_backend import PostgresBackend
 
 
@@ -326,7 +335,12 @@ class AnswerPipeline:
                 if not validation.retrieval_allowed:
                     return self._blocked_response(question_id, question, validation)
             try:
-                execution = self.executor.execute(plan)
+                comparison = executable_comparison(plan)
+                execution = (
+                    self._comparison_execution(comparison, plan)
+                    if comparison is not None
+                    else self.executor.execute(plan)
+                )
             except Exception as error:  # noqa: BLE001 - sanitized at API boundary
                 raise AnswerPipelineError(_classify(error)) from error
         # P0-C runs after retrieval so it can only add completeness evidence on
@@ -441,6 +455,142 @@ class AnswerPipeline:
         """A copy of the bounded, query-level P0-D counters."""
 
         return dict(self._query_metrics)
+
+    def _comparison_execution(self, comparison: Any, plan: Any) -> Any:
+        """One execution per company, merged into the execution shape downstream
+        already understands.
+
+        Merging rather than answering here is deliberate: evidence building,
+        citation alignment, answerability and the think trace are all written
+        against a single execution, and a comparison that produced its own
+        response object would have to reimplement every one of them. Each
+        company is still retrieved on its own narrowed plan, so what is merged
+        is four separate answers to four separate questions, not one search over
+        four companies.
+        """
+
+        from itertools import zip_longest
+
+        from app.reasoning.query_plan import QueryExecution
+        from app.retrieval.interfaces import RetrievalResult
+
+        documents: list[Any] = []
+        seen_documents: set[str] = set()
+        per_company_results: list[list[Any]] = []
+        candidates: dict[str, Any] = {}
+        executions = executions_for(comparison, plan, self.executor.execute)
+        # Each operand is decided inside its own company's execution, where
+        # relevance still means that company's clause and date. Once the
+        # executions are merged for evidence and citation, that scoping is gone,
+        # and a company with several amount-bearing documents would no longer
+        # resolve to one.
+        outcome = comparison_outcome(comparison, executions)
+        for execution in executions.values():
+            if execution is None:
+                continue
+            for document in getattr(execution, "documents", ()) or ():
+                if str(document.doc_id) not in seen_documents:
+                    seen_documents.add(str(document.doc_id))
+                    documents.append(document)
+            for chunk in getattr(execution, "chunks", ()) or ():
+                chunk_id, _doc_id = _chunk_identity(chunk)
+                if chunk_id:
+                    # The candidate itself, not a mapping made from it: every
+                    # stage after this one reads ``CandidateChunk`` attributes,
+                    # and flattening here would hand them a shape they do not
+                    # expect. Only identity is read out; the object is kept.
+                    candidates.setdefault(chunk_id, chunk)
+            per_company_results.append(
+                list(getattr(execution, "results", ()) or ())
+            )
+
+        # Interleave by rank instead of concatenating one company after
+        # another. Concatenation starves every company but the first: each
+        # retrieval returns ten results for its own company, so the second
+        # company's best document sits at merged position eleven and never
+        # survives the evidence limit -- which is how a two-company comparison
+        # came back citing one company twice. Taking each company's best first
+        # puts every operand's own top hit inside the first N positions, for any
+        # number of companies. Each company's internal order is untouched.
+        ordered: list[Any] = []
+        seen_results: set[str] = set()
+        for row in zip_longest(*per_company_results):
+            for result in row:
+                if result is None:
+                    continue
+                chunk_id = str(getattr(result, "chunk_id", "") or "")
+                if chunk_id and chunk_id not in seen_results:
+                    seen_results.add(chunk_id)
+                    ordered.append(result)
+
+        # Ranks came from separate retrievals and would otherwise collide;
+        # renumbering states the merged order the evidence builder will read.
+        ranked = tuple(
+            RetrievalResult(
+                chunk_id=result.chunk_id,
+                doc_id=result.doc_id,
+                bm25_score=result.bm25_score,
+                rank=index + 1,
+                metadata_match=result.metadata_match,
+            )
+            for index, result in enumerate(ordered)
+        )
+        # Chunks follow the merged result order, so evidence is built in the
+        # same sequence the ranks describe.
+        chunks = [
+            candidates[result.chunk_id]
+            for result in ranked
+            if result.chunk_id in candidates
+        ]
+        chunks.extend(
+            candidate
+            for chunk_id, candidate in candidates.items()
+            if chunk_id not in seen_results
+        )
+        # The subexecutions were a search for the operands, not the answer's
+        # evidence. Once every operand is chosen, the rest of what retrieval
+        # returned is noise for this question: it cannot be cited, because the
+        # comparison rests on exactly one document per company, and carrying it
+        # forward leaves an answer whose evidence and citations disagree about
+        # how complete it is. So the served evidence becomes the operands
+        # themselves, in the order the question put its companies in.
+        if outcome.get("resolved"):
+            selected = [
+                str(entry.get("chunk_id") or "")
+                for entry in outcome.get("operands") or ()
+            ]
+            by_result = {result.chunk_id: result for result in ranked}
+            ranked = tuple(
+                RetrievalResult(
+                    chunk_id=chunk_id,
+                    doc_id=(
+                        by_result[chunk_id].doc_id
+                        if chunk_id in by_result
+                        else _chunk_identity(candidates[chunk_id])[1]
+                    ),
+                    bm25_score=(
+                        by_result[chunk_id].bm25_score
+                        if chunk_id in by_result
+                        else 0.0
+                    ),
+                    rank=index + 1,
+                    metadata_match=(
+                        by_result[chunk_id].metadata_match
+                        if chunk_id in by_result
+                        else getattr(candidates[chunk_id], "metadata_match", {})
+                    ),
+                )
+                for index, chunk_id in enumerate(selected)
+                if chunk_id in candidates
+            )
+            chunks = [candidates[result.chunk_id] for result in ranked]
+        return QueryExecution(
+            plan=plan,
+            documents=tuple(documents),
+            chunks=tuple(chunks),
+            results=ranked,
+            routing={COMPARISON_OUTCOME_KEY: outcome},
+        )
 
     def _validated_understanding(
         self, question: str
@@ -588,9 +738,25 @@ class AnswerPipeline:
         answerability: AnswerabilityResult | None,
         decision: ClarificationDecision,
     ) -> dict[str, Any]:
+        context: list[dict[str, Any]] = []
+        unmapped = False
         if decision.state is ClarificationState.CLARIFY:
             answer = clarification_text(decision)
             route = "clarification"
+            proven = _clarification_candidate_evidence(execution, decision)
+            if proven is not None:
+                rows, citations, markers = proven
+                cited, alignment = align_public_citations(
+                    clarification_text(decision, citation_markers=markers),
+                    citations,
+                    rows,
+                )
+                # A marker that cannot be joined to a served row would be a
+                # claim about evidence nobody can check.  Drop the whole
+                # attempt rather than serve half of it.
+                unmapped = bool(alignment["unmapped"])
+                if not unmapped:
+                    answer, context = cited, rows
         elif decision.state is ClarificationState.UNSUPPORTED:
             answer = "현재 시스템이 지원하는 공시 의미로 요청을 해석할 수 없습니다."
             route = "unsupported"
@@ -614,12 +780,18 @@ class AnswerPipeline:
         )
         trace["route"] = route
         trace["answerable"] = False
+        if unmapped:
+            trace["warnings"] = list(
+                dict.fromkeys([*trace["warnings"], "citation_alignment_unmapped"])
+            )
         return {
             "question_id": question_id,
             "question": question,
             # The semantic choice is unresolved, so no candidate's evidence is
-            # exposed as though it were the answer.
-            "retrieved_context": [],
+            # exposed as though it were the answer.  What may be exposed is the
+            # opposite claim: the filings that prove the choice exists, bounded
+            # to exactly those, and only when each one is cited.
+            "retrieved_context": context,
             "think_trace": trace,
             "answer": answer,
         }
@@ -725,6 +897,25 @@ def _expanded_count(execution: Any) -> int:
             total += max(int(trace.get(key) or 0), 0)
         except (TypeError, ValueError):
             continue
+    # Amount-change operand recovery is also additive: it can append an
+    # explicitly scoped filing after the frozen Top-K.  Count exactly the
+    # results it actually added so public ``retrieved_context`` cannot truncate
+    # away evidence the deterministic arithmetic and citation registry used.
+    routing = getattr(execution, "routing", None)
+    if isinstance(routing, Mapping):
+        hybrid = routing.get("hybrid")
+        if isinstance(hybrid, Mapping):
+            recovery = hybrid.get("amount_change_operand_recovery")
+            if isinstance(recovery, Mapping):
+                added = recovery.get("added_chunk_ids") or ()
+                total += len(
+                    {
+                        str(chunk_id)
+                        for chunk_id in added
+                        if str(chunk_id)
+                    }
+                )
+
     return total
 
 
@@ -777,6 +968,96 @@ def final_evidence(execution: Any, result: Any) -> Any:
     ):
         return execution
     return _FinalEvidence(execution, chunks, results)
+
+
+def _clarification_candidate_evidence(
+    execution: Any,
+    decision: ClarificationDecision,
+) -> tuple[list[dict[str, Any]], tuple[GeneratedCitation, ...], dict[str, str]] | None:
+    """The filings that prove one event-instance choice, and nothing else.
+
+    Citing a candidate's filing asserts that the filing exists and describes a
+    contract distinct from the other candidate's -- never that its 계약금액 is
+    the answer.  That is why the served rows here are the candidates and only
+    the candidates: exposing the ranked Top-K instead would put the amounts of
+    unrelated filings behind an answer that deliberately states none.
+
+    Returns ``None`` -- leaving the caller on its original uncited path -- for
+    any choice that is not between filings, and for any candidate the provider
+    could not bind to a chunk this execution actually served.  A citation is a
+    claim about evidence, so an unbound candidate ends the attempt rather than
+    borrowing a neighbour's row.
+    """
+
+    candidates = decision.candidates
+    if not candidates or any(
+        candidate.semantic_type != EVENT_INSTANCE for candidate in candidates
+    ):
+        return None
+    chunks_by_id = {
+        str(candidate.chunk_id): candidate
+        for candidate in (getattr(execution, "chunks", ()) or ())
+    }
+    scores: dict[str, float] = {}
+    for result in getattr(execution, "results", ()) or ():
+        scores.setdefault(str(result.chunk_id), float(result.bm25_score))
+
+    served: list[Any] = []
+    ranks: dict[tuple[str, str], int] = {}
+    markers: dict[str, str] = {}
+    citations: list[GeneratedCitation] = []
+    for candidate in candidates:
+        identity = candidate.source
+        if identity is None:
+            return None
+        chunk_id, doc_id = identity
+        chunk = chunks_by_id.get(chunk_id)
+        if chunk is None or str(chunk.doc_id) != doc_id:
+            return None
+        rank = ranks.get(identity)
+        if rank is None:
+            # Two candidates that collapsed onto one filing share its row, so
+            # the same logical root is never served or numbered twice.
+            rank = len(served) + 1
+            ranks[identity] = rank
+            served.append(chunk)
+            citations.append(
+                GeneratedCitation(
+                    citation_id=f"[{rank}]",
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    source_refs=tuple(
+                        copy.deepcopy(list(dict(chunk.chunk).get("source_refs") or []))
+                    ),
+                    section=_chunk_section(chunk.chunk),
+                    evidence_type="clarification_candidate",
+                )
+            )
+        markers[candidate.id] = f"[{rank}]"
+
+    results = tuple(
+        RetrievalResult(
+            chunk_id=str(chunk.chunk_id),
+            doc_id=str(chunk.doc_id),
+            bm25_score=scores.get(str(chunk.chunk_id), 0.0),
+            rank=rank,
+            metadata_match={},
+        )
+        for rank, chunk in enumerate(served, start=1)
+    )
+    rows = retrieved_context(
+        SimpleNamespace(chunks=tuple(served), results=results), len(results)
+    )
+    return rows, tuple(citations), markers
+
+
+def _chunk_section(chunk: Any) -> str:
+    """The section label the citation names, in the generator's own shape."""
+
+    path = dict(chunk or {}).get("section_path") or []
+    if isinstance(path, str):
+        return path
+    return " > ".join(str(part) for part in path if part)
 
 
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:
@@ -1074,6 +1355,26 @@ def think_trace(
             stages.append("hcx_clarification_classifier")
         trace["clarification"] = clarification_decision.to_public_dict()
     return trace
+
+
+def _chunk_identity(chunk: Any) -> tuple[str, str]:
+    """``(chunk_id, doc_id)`` from a retrieval chunk in either shape.
+
+    ``HybridQueryExecutor`` yields ``CandidateChunk`` dataclasses whose payload
+    sits under ``.chunk``; unit fixtures and some backends yield the payload
+    mapping directly. The candidate's own attributes win when present, because
+    they are the identity retrieval assigned, and the payload is consulted only
+    to fill a gap.
+    """
+
+    if isinstance(chunk, Mapping):
+        return str(chunk.get("chunk_id") or ""), str(chunk.get("doc_id") or "")
+    payload = getattr(chunk, "chunk", None)
+    if not isinstance(payload, Mapping):
+        payload = {}
+    chunk_id = str(getattr(chunk, "chunk_id", "") or payload.get("chunk_id") or "")
+    doc_id = str(getattr(chunk, "doc_id", "") or payload.get("doc_id") or "")
+    return chunk_id, doc_id
 
 
 def _route(result: Any) -> str:

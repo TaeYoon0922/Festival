@@ -355,6 +355,21 @@ class HybridQueryExecutor:
             event_expansion, chunks, final_results
         )
 
+        # A contract-amount delta names two filing-date scopes.  Ordinary
+        # retrieval may rank only one side, and ordinary event expansion
+        # deliberately requires a resolved lifecycle.  A delta does not need
+        # a terminated lifecycle: it only needs the two explicitly dated
+        # operands.  Recover those operands narrowly and additively.
+        chunks, final_results, amount_change_recovery = (
+            self._recover_amount_change_operands(
+                plan,
+                documents=documents,
+                chunks=chunks,
+                results=final_results,
+                event_trace=event_expansion.to_dict(),
+            )
+        )
+
         # Last, so the document set it inspects is the one actually emitted:
         # the rescues and expansions above may already have supplied the very
         # document a crowded list was missing.
@@ -378,6 +393,7 @@ class HybridQueryExecutor:
                 "vector_error": vector_error,
                 "coverage": vector_coverage,
                 "additive_document_recovery": document_recovery,
+                "amount_change_operand_recovery": amount_change_recovery,
             },
         }
         return HybridQueryExecution(
@@ -400,6 +416,442 @@ class HybridQueryExecutor:
             diagnostic_lexical_results=diagnostic_lexical_results,
             diagnostic_vector_results=diagnostic_vector_results,
         )
+
+    def _recover_amount_change_operands(
+        self,
+        plan: Any,
+        *,
+        documents: Sequence[CandidateDocument],
+        chunks: Sequence[CandidateChunk],
+        results: Sequence[RetrievalResult],
+        event_trace: Mapping[str, Any],
+    ) -> tuple[
+        list[CandidateChunk],
+        list[RetrievalResult],
+        dict[str, Any],
+    ]:
+        """Add only the two explicitly dated operands of an amount-change query.
+
+        This is deliberately narrower than corporate-event expansion.
+
+        A delta question already names two receipt-date scopes.  First reuse
+        matching chunks from the routed candidate universe.  Only when a scope
+        is absent there may the carried event graph supply a canonical
+        correction document, and that document is accepted only when its
+        receipt date and corp_code satisfy the missing scope.
+
+        No fuzzy lookalike search and no lifecycle-status relaxation occurs.
+        """
+
+        evidence = getattr(plan, "evidence", None)
+        if not isinstance(evidence, Mapping):
+            return list(chunks), list(results), {
+                "requested": False,
+                "applied": False,
+                "reason": "not_requested",
+            }
+
+        request = evidence.get("contract_amount_change")
+        if not isinstance(request, Mapping):
+            return list(chunks), list(results), {
+                "requested": False,
+                "applied": False,
+                "reason": "not_requested",
+            }
+
+        initial_on = str(request.get("initial_on") or "").strip()
+        final_on = str(request.get("final_on") or "").strip()
+        final_field = str(
+            request.get("final_field") or "contract_amount"
+        ).strip()
+
+        if not initial_on or not final_on:
+            return list(chunks), list(results), {
+                "requested": True,
+                "applied": False,
+                "reason": "invalid_scope",
+            }
+
+        corp_code = str(getattr(plan, "corp_code", None) or "").strip()
+
+        scopes = (
+            ("initial", initial_on, "contract_amount"),
+            ("final", final_on, final_field),
+        )
+
+        merged_chunks = list(chunks)
+        merged_results = list(results)
+
+        known_chunk_ids = {
+            str(candidate.chunk_id)
+            for candidate in merged_chunks
+        }
+        ranked_chunk_ids = {
+            str(result.chunk_id)
+            for result in merged_results
+        }
+
+        metadata_by_doc = {
+            str(document.doc_id): dict(document.metadata or {})
+            for document in documents
+        }
+
+        fetched_doc_ids: list[str] = []
+        added_doc_ids: list[str] = []
+        added_chunk_ids: list[str] = []
+        role_trace: dict[str, dict[str, Any]] = {}
+
+        def scope_digits(value: Any) -> str:
+            return "".join(
+                ch for ch in str(value or "") if ch.isdigit()
+            )
+
+        def candidate_payload(
+            candidate: CandidateChunk,
+        ) -> Mapping[str, Any]:
+            raw = getattr(candidate, "chunk", None)
+            return raw if isinstance(raw, Mapping) else {}
+
+        def candidate_date(candidate: CandidateChunk) -> str:
+            raw = candidate_payload(candidate)
+            value = (
+                raw.get("rcept_dt")
+                or metadata_by_doc.get(str(candidate.doc_id), {}).get(
+                    "rcept_dt"
+                )
+            )
+            return _compact_date(value)
+
+        def candidate_corp(candidate: CandidateChunk) -> str:
+            raw = candidate_payload(candidate)
+            value = (
+                raw.get("corp_code")
+                or metadata_by_doc.get(str(candidate.doc_id), {}).get(
+                    "corp_code"
+                )
+            )
+            return str(value or "").strip()
+
+        def amount_score(
+            candidate: CandidateChunk,
+            *,
+            field: str,
+        ) -> int:
+            raw = candidate_payload(candidate)
+            text = str(
+                raw.get("retrieval_text")
+                or raw.get("content")
+                or ""
+            )
+
+            label = (
+                "해지금액"
+                if field == "termination_amount"
+                else "계약금액"
+            )
+
+            if label not in text:
+                return 0
+
+            score = 100
+
+            # Prefer the filing's formal amount row over a correction
+            # before/after comparison table.  The formal row is the value
+            # in force for that filing date and is exactly what the scoped
+            # operand represents.
+            if (
+                field == "termination_amount"
+                and "해지내역" in text
+                and "해지금액" in text
+            ):
+                score += 50
+
+            if (
+                field != "termination_amount"
+                and "계약내역" in text
+                and "계약금액" in text
+            ):
+                score += 50
+
+            if "정정전" in text and "정정후" in text:
+                score -= 25
+
+            return score
+
+        def select_candidate(
+            on_date: str,
+            field: str,
+        ) -> tuple[CandidateChunk | None, str]:
+            wanted = scope_digits(on_date)
+
+            eligible = [
+                candidate
+                for candidate in merged_chunks
+                if candidate_date(candidate).startswith(wanted)
+                and (
+                    not corp_code
+                    or not candidate_corp(candidate)
+                    or candidate_corp(candidate) == corp_code
+                )
+                and amount_score(candidate, field=field) > 0
+            ]
+
+            doc_ids = sorted(
+                {
+                    str(candidate.doc_id)
+                    for candidate in eligible
+                }
+            )
+
+            if not eligible:
+                return None, "scope_not_present"
+
+            # The explicit company + receipt-date scope must identify one
+            # filing.  Do not choose between multiple same-date filings.
+            if len(doc_ids) != 1:
+                return None, "scope_ambiguous"
+
+            selected = sorted(
+                eligible,
+                key=lambda candidate: (
+                    -amount_score(candidate, field=field),
+                    str(candidate.chunk_id),
+                ),
+            )[0]
+
+            return selected, "candidate_scope"
+
+        # -------------------------------------------------------------
+        # First pass: use the already-routed candidate universe.
+        # C068 is recovered entirely here.
+        # -------------------------------------------------------------
+
+        selected: dict[str, CandidateChunk] = {}
+        missing_roles: list[str] = []
+
+        for role, on_date, field in scopes:
+            candidate, source = select_candidate(on_date, field)
+
+            if candidate is None:
+                missing_roles.append(role)
+                role_trace[role] = {
+                    "scope": on_date,
+                    "field": field,
+                    "status": source,
+                }
+                continue
+
+            selected[role] = candidate
+            role_trace[role] = {
+                "scope": on_date,
+                "field": field,
+                "status": source,
+                "doc_id": str(candidate.doc_id),
+                "chunk_id": str(candidate.chunk_id),
+            }
+
+        # -------------------------------------------------------------
+        # Second pass: only for a still-missing explicit date scope,
+        # consult document identities already carried by the event graph.
+        #
+        # C067/C071 reach this path: the graph already records
+        # origin -> canonical correction, but ordinary lifecycle expansion
+        # correctly declined because the contract remains open.
+        # -------------------------------------------------------------
+
+        if missing_roles:
+            graph_doc_ids: list[str] = []
+
+            block = (
+                event_trace.get("corporate_event_expansion")
+                if isinstance(event_trace, Mapping)
+                else None
+            )
+
+            if isinstance(block, Mapping):
+                mapping = block.get("seed_member_doc_ids")
+                if isinstance(mapping, Mapping):
+                    for value in mapping.values():
+                        doc_id = str(value or "").strip()
+                        if doc_id and doc_id not in graph_doc_ids:
+                            graph_doc_ids.append(doc_id)
+
+            states = (
+                event_trace.get("event_member_states")
+                if isinstance(event_trace, Mapping)
+                else None
+            )
+
+            if isinstance(states, Mapping):
+                for state in states.values():
+                    if not isinstance(state, Mapping):
+                        continue
+                    doc_id = str(
+                        state.get("canonical_doc_id")
+                        or state.get("doc_id")
+                        or ""
+                    ).strip()
+                    if doc_id and doc_id not in graph_doc_ids:
+                        graph_doc_ids.append(doc_id)
+
+            present_docs = {
+                str(candidate.doc_id)
+                for candidate in merged_chunks
+            }
+
+            wanted_graph_ids = [
+                doc_id
+                for doc_id in graph_doc_ids
+                if doc_id not in present_docs
+            ]
+
+            reader = getattr(
+                self._metadata_backend,
+                "fetch_documents",
+                None,
+            )
+
+            fetched_documents: list[CandidateDocument] = []
+
+            if wanted_graph_ids and callable(reader):
+                fetched_documents = list(reader(wanted_graph_ids))
+
+            # Accept a graph document only if it matches one of the still
+            # missing explicit receipt-date scopes and the same company.
+            missing_scope_digits = {
+                role: scope_digits(on_date)
+                for role, on_date, _field in scopes
+                if role in missing_roles
+            }
+
+            bounded_documents: list[CandidateDocument] = []
+
+            for document in fetched_documents:
+                metadata = dict(document.metadata or {})
+                receipt = _compact_date(metadata.get("rcept_dt"))
+                doc_corp = str(metadata.get("corp_code") or "").strip()
+
+                matches_missing_scope = any(
+                    receipt.startswith(value)
+                    for value in missing_scope_digits.values()
+                )
+
+                same_company = (
+                    not corp_code
+                    or not doc_corp
+                    or doc_corp == corp_code
+                )
+
+                if not matches_missing_scope or not same_company:
+                    continue
+
+                bounded_documents.append(document)
+                metadata_by_doc[str(document.doc_id)] = metadata
+                fetched_doc_ids.append(str(document.doc_id))
+
+            if bounded_documents:
+                fetched_chunks = list(
+                    self._chunk_backend.get_candidate_chunks(
+                        bounded_documents
+                    )
+                )
+
+                for candidate in fetched_chunks:
+                    if str(candidate.chunk_id) in known_chunk_ids:
+                        continue
+                    known_chunk_ids.add(str(candidate.chunk_id))
+                    merged_chunks.append(candidate)
+
+            # Retry only the roles that were absent on the first pass.
+            for role, on_date, field in scopes:
+                if role not in missing_roles:
+                    continue
+
+                candidate, source = select_candidate(on_date, field)
+
+                if candidate is None:
+                    role_trace[role] = {
+                        "scope": on_date,
+                        "field": field,
+                        "status": source,
+                    }
+                    continue
+
+                selected[role] = candidate
+                role_trace[role] = {
+                    "scope": on_date,
+                    "field": field,
+                    "status": "graph_scope",
+                    "doc_id": str(candidate.doc_id),
+                    "chunk_id": str(candidate.chunk_id),
+                }
+
+        # -------------------------------------------------------------
+        # Add the exact amount-bearing chunks after ranking.
+        # No existing result is reordered or removed.
+        # -------------------------------------------------------------
+
+        for role, on_date, field in scopes:
+            candidate = selected.get(role)
+            if candidate is None:
+                continue
+
+            chunk_id = str(candidate.chunk_id)
+
+            if chunk_id in ranked_chunk_ids:
+                role_trace[role]["served"] = "already_ranked"
+                continue
+
+            match = dict(candidate.metadata_match.to_dict())
+            match["amount_change_recovery"] = {
+                "role": role,
+                "on_date": on_date,
+                "field": field,
+                "retrieval_source": "explicit_operand_scope",
+            }
+
+            merged_results.append(
+                RetrievalResult(
+                    chunk_id=candidate.chunk_id,
+                    doc_id=candidate.doc_id,
+                    bm25_score=0.0,
+                    rank=len(merged_results) + 1,
+                    metadata_match=match,
+                )
+            )
+
+            ranked_chunk_ids.add(chunk_id)
+            added_chunk_ids.append(chunk_id)
+
+            doc_id = str(candidate.doc_id)
+            if doc_id not in added_doc_ids:
+                added_doc_ids.append(doc_id)
+
+            role_trace[role]["served"] = "additive_recovery"
+
+        both_resolved = all(
+            role in selected
+            for role, _on_date, _field in scopes
+        )
+
+        return merged_chunks, merged_results, {
+            "requested": True,
+            "applied": bool(added_chunk_ids),
+            "reason": (
+                "resolved"
+                if both_resolved
+                else "operand_scope_unresolved"
+            ),
+            "initial_on": initial_on,
+            "final_on": final_on,
+            "corp_code": corp_code or None,
+            "roles": role_trace,
+            "graph_fetched_doc_ids": list(
+                dict.fromkeys(fetched_doc_ids)
+            ),
+            "added_doc_ids": list(added_doc_ids),
+            "added_chunk_ids": list(added_chunk_ids),
+        }
 
     def _vector_coverage(
         self, chunks: Sequence[CandidateChunk]

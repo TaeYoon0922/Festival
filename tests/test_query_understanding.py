@@ -81,6 +81,18 @@ class QueryPlanTests(unittest.TestCase):
             },
         )
 
+    def test_c093_manufacturing_contract_uses_supply_contract_execution(self) -> None:
+        plan = QueryUnderstanding(
+            {"삼성바이오로직스": {"삼성바이오로직스"}}
+        ).understand(
+            "삼성바이오로직스가 Pfizer Ireland Pharmaceuticals와 "
+            "체결한 위탁생산계약의 계약금액은?"
+        )
+
+        self.assertEqual(plan.task_type, "corporate_event")
+        self.assertEqual(plan.event_type, "supply_contract")
+        self.assertEqual(plan.disclosure_route, ("exchange",))
+
     def test_executor_sends_only_lexical_query_to_retriever(self) -> None:
         backend = RecordingBackend()
         plan = QueryPlan(
