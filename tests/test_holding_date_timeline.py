@@ -34,12 +34,15 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.agent.orchestrator import AgentOrchestrator
+from app.api.pipeline import final_evidence
 from app.reasoning.answer_composer import compose_holding_answer
 from app.reasoning.answerability import AnswerabilityGuard, AnswerabilityStatus
 from app.reasoning.evidence_builder import build_evidence_set
 from app.reasoning.field_evidence import FieldStatus
 from app.reasoning.holding_date_intent import (
     exact_reference_date,
+    execution_plan as holding_execution_plan,
     question_reference_date,
 )
 from app.reasoning.holding_event_resolver import resolve_holding_events
@@ -53,12 +56,15 @@ from app.reasoning.holding_report_index import (
     AMBIGUOUS,
     CHANGE_UNAVAILABLE,
     NO_MATCH,
+    PREVIOUS_UNAVAILABLE,
     RESOLVED,
     ROLE_CHANGE,
     ROLE_CURRENT,
+    ROLE_PREVIOUS,
     SELECTOR_EXACT_RECEIPT_DATE,
     SELECTOR_EXACT_REFERENCE_DATE,
     SELECTOR_LATEST,
+    SELECTOR_SELECTED_CONTEXT,
     HoldingReportIndex,
     HoldingReportRecord,
     execute_report_relative,
@@ -715,6 +721,28 @@ def _next_report(chunk_id="f2", doc_id="holding_next"):
     )
 
 
+def _first_report_record(
+    *,
+    chunk_id="f1",
+    doc_id="holding_first",
+) -> HoldingReportRecord:
+    return record(
+        doc_id=doc_id,
+        projection_chunk_id=chunk_id,
+        reference_date="20240923",
+        receipt_date="20240924",
+        previous_date=None,
+        before_shares=None,
+        before_ratio=None,
+        change_shares="6,859,254",
+        change_ratio="33.13",
+        after_shares="6,859,254",
+        after_ratio="33.13",
+        reporter_key=canonical_reporter_key(KOREAN_STEM),
+        raw_reporter=KOREAN_STEM,
+    )
+
+
 class FirstReportHasNoPredecessorTests(unittest.TestCase):
     """C042: a first filing has no previous state, and no zero either."""
 
@@ -840,42 +868,299 @@ class FirstReportHasNoPredecessorTests(unittest.TestCase):
             sorted(finding.field for finding in findings), sorted(BASELINE_FIELDS)
         )
 
-    def test_the_unavailable_role_still_serves_the_first_report_as_evidence(self) -> None:
+    def test_unavailable_roles_keep_the_resolved_report_evidence(self) -> None:
         pair = _first_report()
-        adapted = HoldingReportRelativeExecution(
-            index=index_of(
-                record(
-                    doc_id="holding_first",
-                    projection_chunk_id="f1",
-                    reference_date="20240923",
-                    receipt_date="20240924",
-                    previous_date=None,
-                    before_shares=None,
-                    before_ratio=None,
-                    change_shares="6,859,254",
-                    change_ratio="33.13",
-                    after_shares="6,859,254",
-                    after_ratio="33.13",
-                    reporter_key=canonical_reporter_key(KOREAN_STEM),
-                    raw_reporter=KOREAN_STEM,
+        for role, status in (
+            (ROLE_PREVIOUS, PREVIOUS_UNAVAILABLE),
+            (ROLE_CHANGE, CHANGE_UNAVAILABLE),
+        ):
+            with self.subTest(role=role):
+                adapted = HoldingReportRelativeExecution(
+                    index=index_of(_first_report_record())
+                ).adapt(
+                    FIRST_REPORT_QUESTION,
+                    _relative_plan(
+                        FIRST_REPORT_QUESTION,
+                        reporter=KOREAN_STEM,
+                        exact="2024-09-23",
+                        role=role,
+                    ),
+                    _execution_pool(pair),
+                    routed_task_type=ROUTED_TASK_TYPE,
+                )
+
+                self.assertIsNotNone(adapted)
+                # The report is proven; the fields it was asked for are not.
+                self.assertTrue(adapted.report_execution.selection.resolved)
+                self.assertFalse(adapted.report_execution.executable)
+                self.assertFalse(adapted.resolved)
+                self.assertEqual(adapted.status, status)
+                self.assertEqual(adapted.selected_chunk_id, "f1")
+                self.assertEqual([chunk.chunk_id for chunk in adapted.chunks], ["f1"])
+                self.assertEqual([result.chunk_id for result in adapted.results], ["f1"])
+                provenance = adapted.results[0].metadata_match[
+                    "holding_report_relative_execution"
+                ]
+                self.assertEqual(provenance["selection_status"], RESOLVED)
+                self.assertEqual(provenance["projection_status"], status)
+
+    def test_unavailable_projection_is_not_answerable_but_stays_citable(self) -> None:
+        pair = _first_report(
+            chunk_id="holding_20240924000330:ch_14ae654b87072054b201",
+            doc_id="holding_20240924000330",
+        )
+        plan = _relative_plan(
+            FIRST_REPORT_QUESTION,
+            reporter=KOREAN_STEM,
+            exact="2024-09-23",
+            role=ROLE_CHANGE,
+        )
+        source = _execution_pool(pair)
+        result = AgentOrchestrator(
+            report_relative_execution=HoldingReportRelativeExecution(
+                index=index_of(
+                    _first_report_record(
+                        chunk_id=(
+                            "holding_20240924000330:ch_14ae654b87072054b201"
+                        ),
+                        doc_id="holding_20240924000330",
+                    )
                 )
             )
-        ).adapt(
-            FIRST_REPORT_QUESTION,
-            _relative_plan(
-                FIRST_REPORT_QUESTION,
-                reporter=KOREAN_STEM,
-                exact="2024-09-23",
-                role=ROLE_CHANGE,
+        ).run(FIRST_REPORT_QUESTION, plan, source)
+        served = final_evidence(source, result)
+        guarded = AnswerabilityGuard().evaluate(
+            result.answer_draft,
+            plan=plan,
+            agent_result=result,
+            execution=served,
+        )
+
+        self.assertIs(guarded.status, AnswerabilityStatus.INSUFFICIENT_EVIDENCE)
+        self.assertFalse(guarded.answerable)
+        self.assertEqual(guarded.evidence_count, 1)
+        self.assertEqual(guarded.citation_count, 1)
+        self.assertEqual(
+            [row.chunk_id for row in served.results],
+            ["holding_20240924000330:ch_14ae654b87072054b201"],
+        )
+        self.assertEqual(
+            {citation.doc_id for citation in result.answer_draft.citations},
+            {"holding_20240924000330"},
+        )
+
+
+#: A question whose wording carries a holding metric noun, so P0-D plans it as
+#: a holding question and its own period pins the day.
+NAMED_METRIC_QUESTION = (
+    "가상영풍의 테스트항공 2024년 9월 23일 기준 보고의 직전 보유주식수는?"
+)
+#: The same deictic with no date at all: a "직전보고" with nothing to be
+#: previous to, which names no report and must stay that way.
+UNBOUND_DEICTIC_QUESTION = "가상영풍의 테스트항공 직전 보고 대비 증감은 어떻게 되나?"
+#: The same report, asked for the previous state itself rather than the change.
+PREVIOUS_ROLE_QUESTION = (
+    "가상영풍의 테스트항공 2024년 9월 23일 기준 보고에서 "
+    "직전 보고 대비 보유 상황은 어떻게 되나?"
+)
+
+
+def _promoted_plan(question, *, role=ROLE_CHANGE):
+    """The frozen plan a question like this one actually reaches the agent with.
+
+    Its wording names no holding-metric noun, so P0-D planned it as a disclosure
+    lookup: the period fell back to the year, and the report-relative parser --
+    which reads that same period -- could only record the unbound deictic.
+    ``TaskRouter`` promotes the execution to ``holding_event`` afterwards, by
+    which point the plan is frozen.
+    """
+
+    plan = _plan(question, reporter=KOREAN_STEM, task="disclosure_lookup")
+    return replace(
+        plan,
+        period=QueryPeriod(
+            year=2024,
+            from_date=None,
+            to_date=None,
+            period_type="reference_year",
+        ),
+        evidence={
+            **dict(plan.evidence),
+            "holding_report_relative": {
+                "selector": SELECTOR_SELECTED_CONTEXT,
+                "projection_role": role,
+                "dynamic": False,
+                "executable": False,
+                "evidence": "직전보고대비",
+            },
+        },
+    )
+
+
+class _IdentityBackend:
+    """The two identity lookups the serving backend offers.  No search."""
+
+    def __init__(self, *pairs):
+        self._chunks = {candidate.chunk_id: candidate for candidate, _ in pairs}
+        self.document_calls: list[tuple[str, ...]] = []
+
+    def fetch_documents(self, doc_ids):
+        self.document_calls.append(tuple(doc_ids))
+        wanted = set(doc_ids)
+        return [
+            {"doc_id": candidate.doc_id}
+            for candidate in self._chunks.values()
+            if candidate.doc_id in wanted
+        ]
+
+    def get_candidate_chunks(self, documents):
+        served = {str(document.get("doc_id") or "") for document in documents}
+        return [
+            candidate
+            for candidate in self._chunks.values()
+            if candidate.doc_id in served
+        ]
+
+
+class PromotedFirstReportTests(unittest.TestCase):
+    """C042: the question names its report; a promoted plan could not say so."""
+
+    def test_the_frozen_plan_reads_the_named_report_as_an_unbound_deictic(self) -> None:
+        plan = _promoted_plan(FIRST_REPORT_QUESTION)
+        intent = dict(plan.evidence["holding_report_relative"])
+
+        self.assertEqual(intent["selector"], SELECTOR_SELECTED_CONTEXT)
+        self.assertIsNone(exact_reference_date(plan))
+        # The day is in the question the whole time -- only the frozen parse
+        # could not see it.
+        self.assertEqual(question_reference_date(FIRST_REPORT_QUESTION), "20240923")
+
+    def test_the_named_report_is_selected_and_served_without_retrieval(self) -> None:
+        pair = _first_report()
+        backend = _IdentityBackend(pair)
+        plan = _promoted_plan(FIRST_REPORT_QUESTION)
+        # The target document was never retrieved: an empty pool is the only
+        # source of evidence this run has.
+        source = _execution_pool()
+        result = AgentOrchestrator(
+            report_relative_execution=HoldingReportRelativeExecution(
+                index=index_of(_first_report_record()), document_backend=backend
+            )
+        ).run(FIRST_REPORT_QUESTION, plan, source)
+        served = final_evidence(source, result)
+        guarded = AnswerabilityGuard().evaluate(
+            result.answer_draft,
+            plan=plan,
+            agent_result=result,
+            execution=served,
+        )
+
+        self.assertEqual(backend.document_calls, [("holding_first",)])
+        self.assertEqual(
+            result.report_relative_execution.report_execution.selection.status,
+            RESOLVED,
+        )
+        self.assertEqual(result.report_relative_execution.status, CHANGE_UNAVAILABLE)
+        self.assertEqual([row.chunk_id for row in served.results], ["f1"])
+        self.assertIs(guarded.status, AnswerabilityStatus.INSUFFICIENT_EVIDENCE)
+        self.assertFalse(guarded.answerable)
+        self.assertEqual(guarded.evidence_count, 1)
+        self.assertEqual(guarded.citation_count, 1)
+        self.assertEqual(
+            {citation.doc_id for citation in result.answer_draft.citations},
+            {"holding_first"},
+        )
+        self.assertEqual(
+            sorted(
+                finding.field
+                for finding in result.field_evidence
+                if finding.status is FieldStatus.UNAVAILABLE
             ),
-            _execution_pool(pair),
+            sorted(BASELINE_FIELDS),
+        )
+
+    def test_a_plan_that_already_named_its_report_is_read_exactly_as_planned(
+        self,
+    ) -> None:
+        """P0-D's own selector is never restated by the re-reading."""
+
+        plan = _relative_plan(
+            NAMED_METRIC_QUESTION,
+            reporter=KOREAN_STEM,
+            exact="2024-09-23",
+            role=ROLE_PREVIOUS,
+        )
+        adapted = HoldingReportRelativeExecution(
+            index=index_of(_first_report_record())
+        ).adapt(
+            NAMED_METRIC_QUESTION,
+            plan,
+            _execution_pool(_first_report()),
+            routed_task_type=ROUTED_TASK_TYPE,
+        )
+
+        self.assertIs(
+            holding_execution_plan(
+                NAMED_METRIC_QUESTION, plan, routed_task_type=ROUTED_TASK_TYPE
+            ),
+            plan,
+        )
+        self.assertEqual(adapted.status, PREVIOUS_UNAVAILABLE)
+        self.assertEqual(adapted.selected_chunk_id, "f1")
+
+    def test_a_deictic_with_no_date_still_names_no_report(self) -> None:
+        adapted = HoldingReportRelativeExecution(
+            index=index_of(_first_report_record()),
+            document_backend=_IdentityBackend(_first_report()),
+        ).adapt(
+            UNBOUND_DEICTIC_QUESTION,
+            _promoted_plan(UNBOUND_DEICTIC_QUESTION),
+            _execution_pool(_first_report()),
             routed_task_type=ROUTED_TASK_TYPE,
         )
 
         self.assertIsNotNone(adapted)
-        self.assertFalse(adapted.resolved)
-        self.assertEqual(adapted.status, CHANGE_UNAVAILABLE)
-        self.assertEqual(adapted.selected_chunk_id, "f1")
+        self.assertFalse(adapted.report_execution.selection.resolved)
+        self.assertEqual(adapted.chunks, ())
+        self.assertEqual(adapted.results, ())
+
+    def test_both_unavailable_roles_keep_the_report_the_question_named(self) -> None:
+        for question, role, status in (
+            (PREVIOUS_ROLE_QUESTION, ROLE_PREVIOUS, PREVIOUS_UNAVAILABLE),
+            (FIRST_REPORT_QUESTION, ROLE_CHANGE, CHANGE_UNAVAILABLE),
+        ):
+            with self.subTest(role=role):
+                adapted = HoldingReportRelativeExecution(
+                    index=index_of(_first_report_record()),
+                    document_backend=_IdentityBackend(_first_report()),
+                ).adapt(
+                    question,
+                    _promoted_plan(question, role=role),
+                    _execution_pool(),
+                    routed_task_type=ROUTED_TASK_TYPE,
+                )
+
+                self.assertEqual(adapted.report_execution.projection.role, role)
+                self.assertEqual(adapted.status, status)
+                self.assertEqual(adapted.selected_chunk_id, "f1")
+
+    def test_a_role_the_question_did_not_ask_for_is_never_re_read(self) -> None:
+        """A date may name a report.  It may not change which fields were asked."""
+
+        adapted = HoldingReportRelativeExecution(
+            index=index_of(_first_report_record()),
+            document_backend=_IdentityBackend(_first_report()),
+        ).adapt(
+            FIRST_REPORT_QUESTION,
+            _promoted_plan(FIRST_REPORT_QUESTION, role=ROLE_PREVIOUS),
+            _execution_pool(),
+            routed_task_type=ROUTED_TASK_TYPE,
+        )
+
+        self.assertIsNone(adapted.report_execution.projection)
+        self.assertFalse(adapted.report_execution.selection.resolved)
+        self.assertEqual(adapted.chunks, ())
+        self.assertEqual(adapted.results, ())
 
 
 class FirstReportFailsClosedTests(unittest.TestCase):

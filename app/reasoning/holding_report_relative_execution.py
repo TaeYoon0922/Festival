@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 from app.reasoning.holding_correction_finality import (
     DEFAULT_ARTIFACT_PATH as DEFAULT_FINALITY_PATH,
 )
+from app.reasoning.holding_date_intent import routed_date_reading
 from app.reasoning.holding_evidence_coverage import (
     is_citable,
     requested_holding_fields,
@@ -47,8 +48,10 @@ from app.reasoning.holding_report_relative import (
     SELECTOR_EXACT_REFERENCE_DATE,
     SELECTOR_LATEST,
     SELECTOR_SELECTED_CONTEXT,
+    parse as parse_report_relative,
 )
 from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.query_understanding import _latest_report_wording
 from app.retrieval.interfaces import CandidateChunk, RetrievalResult
 
 
@@ -76,6 +79,12 @@ _EXECUTABLE_SELECTORS = frozenset(
         SELECTOR_EXACT_REFERENCE_DATE,
         SELECTOR_EXACT_RECEIPT_DATE,
     }
+)
+#: The selectors that name a report by date.  A deictic selector may be re-read
+#: into one of these and nothing else: the date the question states is the whole
+#: reason the re-reading is allowed at all.
+_DATE_SELECTORS = frozenset(
+    {SELECTOR_EXACT_REFERENCE_DATE, SELECTOR_EXACT_RECEIPT_DATE}
 )
 _EXPLICIT_CORRECTION_FILTERS = frozenset({"original_only", "corrected_only"})
 
@@ -188,7 +197,7 @@ class HoldingReportRelativeExecution:
         fall back to ranked evidence.
         """
 
-        intent = _report_relative_intent(plan)
+        intent, period_date = _routed_intent(question, plan)
         requested = requested_holding_fields(question, plan)
         if not _eligible(
             question,
@@ -201,7 +210,6 @@ class HoldingReportRelativeExecution:
 
         corp_code = str(getattr(plan, "corp_code", "") or "").strip()
         reporter = str(getattr(plan, "reporter", "") or "").strip()
-        period_date = _exact_period_date(plan)
         selected = execute_report_relative(
             intent,
             index=self.index,
@@ -444,6 +452,54 @@ def _eligible(
     return True
 
 
+def _routed_intent(
+    question: str, plan: Any
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    """Which report this question names, and on which day, as routed.
+
+    ``QueryUnderstanding`` reads the report-relative selector from the very
+    period parse that a promoted execution had to re-ask.  An explicit date
+    outranks a relative word there -- but only if the parse saw one, and a
+    question whose wording carries no holding-metric noun is planned as a
+    disclosure lookup, whose period falls back to the year.  Its date is then
+    invisible to the selector, so a report the question names outright is
+    recorded as the unbound deictic ``selected_context``: the reading for a
+    "직전보고" with nothing to be previous to.
+
+    That difference decides whether any evidence may be served at all.  An
+    unbound deictic names no report, and this lane is required to expose none
+    for it; a report named by date is selectable, and refusing to select it
+    denies the answer the very filing the question pointed at.  So the deictic
+    reading is re-asked -- with the frozen parser, on the frozen date, through
+    the same wording rewrite ``QueryUnderstanding`` itself applies.
+
+    The re-reading may only bind a report by date.  A selector the frozen plan
+    already resolved is P0-D's answer and is returned untouched, and a role --
+    *which fields* were asked for -- is never a date's to change, so a
+    re-reading that moved it is discarded.
+    """
+
+    intent = _report_relative_intent(plan)
+    exact = _exact_period_date(plan)
+    if intent is None or exact is not None:
+        return intent, exact
+    if str(intent.get("selector") or "") != SELECTOR_SELECTED_CONTEXT:
+        return intent, exact
+    period, semantics = routed_date_reading(question, plan)
+    if period is None:
+        return intent, exact
+    reread = parse_report_relative(
+        _latest_report_wording(str(question or "")),
+        date_semantics=semantics,
+        has_exact_date=True,
+    )
+    if reread is None or reread.selector not in _DATE_SELECTORS:
+        return intent, exact
+    if reread.projection_role != str(intent.get("projection_role") or ""):
+        return intent, exact
+    return reread.to_dict(), str(period.from_date)
+
+
 def _report_relative_intent(plan: Any) -> Mapping[str, Any] | None:
     evidence = getattr(plan, "evidence", None)
     payload = (
@@ -537,10 +593,19 @@ def _evidence_result(
     candidate: CandidateChunk, execution: ReportExecution
 ) -> RetrievalResult:
     metadata = dict(candidate.metadata_match.to_dict())
+    # Two statuses, because a served row answers two different questions.  The
+    # selection says whether *this filing* is the one the question named; the
+    # projection says whether that filing states the fields the question asked
+    # for.  A first report proves the first and denies the second, and a reader
+    # that saw only one number could not tell that apart from a filing nobody
+    # proved.
     metadata[PROVENANCE_KEY] = {
         "selected_for": "report_relative_holding",
         "selector": execution.selection.selector,
-        "selection_status": execution.status,
+        "selection_status": execution.selection.status,
+        "projection_status": (
+            execution.projection.status if execution.projection is not None else None
+        ),
         "ranked_retrieval": False,
     }
     return RetrievalResult(
