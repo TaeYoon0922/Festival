@@ -246,19 +246,48 @@ def _event_seed_doc_id(
 ) -> str | None:
     """The one filing this graph root is named and cited by.
 
-    ``seed_member_doc_id`` is the lifecycle member the seed collapsed to, so a
-    correction chain has already become a single identity here and cannot be
-    offered twice.  Label and provenance both read this, which is what keeps
+    A correction chain has already become a single identity by the time it gets
+    here, so no lifecycle is ever offered twice.  Which of its filings *names*
+    that identity is the question this answers, and the answer is the root:
+    ``seed_root_doc_id`` is the filing the contract began from, which the graph
+    proves and which no later filing can move.  ``seed_member_doc_id`` is the
+    member the chain collapsed to -- the right filing to quote for what the
+    contract now says, and the wrong one to tell two contracts apart, because a
+    correction is received long after the contract it corrects and can land on
+    the day some unrelated contract was concluded.
+
+    A root that differs from that collapsed member is the whole of this
+    candidate's identity, and nothing may stand in for it: an unserved root
+    leaves the candidate unnamed, because showing the correction as the
+    contract's own filing would misdate the contract and miscite it in one
+    move.  ``seed_doc_id`` is not consulted for that judgement -- it is
+    whichever member retrieval happened to seed the lookup with, so it says
+    nothing about which filing opened the contract -- and stays what it has
+    always been here, the last fallback for a trace carrying no root at all.
+
+    Label and provenance both read whatever this returns, which is what keeps
     the marker beside a label pointing at the filing that label describes.
     """
 
-    for key in ("seed_member_doc_id", "seed_doc_id"):
-        doc_id = str(event.get(key) or "").strip()
-        if doc_id and doc_id in metadata_by_doc:
-            metadata = metadata_by_doc[doc_id]
-            if metadata.get("report_nm") or metadata.get("rcept_dt"):
-                return doc_id
+    root = str(event.get("seed_root_doc_id") or "").strip()
+    member = str(event.get("seed_member_doc_id") or "").strip()
+    if root and root != member:
+        return root if _names_a_filing(metadata_by_doc, root) else None
+    for doc_id in (root, member, str(event.get("seed_doc_id") or "").strip()):
+        if _names_a_filing(metadata_by_doc, doc_id):
+            return doc_id
     return None
+
+
+def _names_a_filing(
+    metadata_by_doc: Mapping[str, Mapping[str, Any]], doc_id: str
+) -> bool:
+    """Whether retrieval carries enough of this filing to name it publicly."""
+
+    metadata = metadata_by_doc.get(doc_id) if doc_id else None
+    if not metadata:
+        return False
+    return bool(metadata.get("report_nm") or metadata.get("rcept_dt"))
 
 
 def _seed_source(doc_id: str | None, execution: Any) -> tuple[str, str] | None:

@@ -72,12 +72,20 @@ class TimelineEntry:
     contract as it now stands; ``doc_id`` is always the filing that actually
     said it.  Keeping both is what stops a correction from erasing the filing it
     corrects.
+
+    ``root_doc_id`` is the third of that set and the one that never moves: the
+    filing this member's correction chain began from, which for an uncorrected
+    filing is the filing itself.  A canonical id answers "what does this
+    contract say now"; a root id answers "which contract is this", and only the
+    latter can tell two contracts apart when a correction lands on the same day
+    another contract was disclosed.
     """
 
     doc_id: str
     canonical_doc_id: str
     member_role: str
     member_order: int
+    root_doc_id: str | None = None
     event_date: str | None = None
     correction_group_id: str | None = None
     correction_resolution_status: str | None = None
@@ -100,6 +108,7 @@ class TimelineEntry:
             "canonical_doc_id": self.canonical_doc_id,
             "member_role": self.member_role,
             "member_order": self.member_order,
+            "root_doc_id": self.root_doc_id,
             "event_date": self.event_date,
             "correction_group_id": self.correction_group_id,
             "correction_resolution_status": self.correction_resolution_status,
@@ -173,6 +182,10 @@ def _entry(member: CorporateEventMember) -> TimelineEntry:
         canonical_doc_id=member.canonical_doc_id,
         member_role=member.member_role,
         member_order=member.member_order,
+        # The member's own field, not the canonical evidence blob: P0-B already
+        # settles it to the filing itself when nothing corrected this one, so it
+        # is always a real filing rather than sometimes None.
+        root_doc_id=member.root_doc_id or member.doc_id,
         event_date=member.event_date,
         correction_group_id=member.correction_group_id,
         correction_resolution_status=member.correction_resolution_status,
@@ -397,6 +410,7 @@ def seed_expansion_targets(
                     "resolution_status": timeline.resolution_status,
                     "resolution_source": timeline.resolution_source,
                     "seed_member_doc_id": own,
+                    "seed_root_doc_id": _event_root_doc_id(timeline),
                     "seed_corp_code": timeline.corp_code,
                     "event_family": timeline.event_family,
                     "lifecycle_status": timeline.lifecycle_status,
@@ -432,6 +446,7 @@ def seed_expansion_targets(
                     "event_id": timeline.event_id,
                     "seed_doc_id": doc_id,
                     "seed_member_doc_id": own,
+                    "seed_root_doc_id": _event_root_doc_id(timeline),
                     "seed_member_role": seed_role,
                     "seed_corp_code": timeline.corp_code,
                     "event_family": timeline.event_family,
@@ -456,6 +471,7 @@ def seed_expansion_targets(
                 "event_id": timeline.event_id,
                 "seed_doc_id": doc_id,
                 "seed_member_doc_id": own,
+                "seed_root_doc_id": _event_root_doc_id(timeline),
                 "seed_member_role": seed_role,
                 "seed_corp_code": timeline.corp_code,
                 "event_family": timeline.event_family,
@@ -486,6 +502,23 @@ def seed_expansion_targets(
         "member_states": dict(member_states),
         "events_considered": len(seen_events),
     }
+
+
+def _event_root_doc_id(timeline: EventTimeline) -> str | None:
+    """The filing one lifecycle began from, as the graph proved it.
+
+    Entries are in filing order, so the first contract-role member is the
+    conclusion that opened this lifecycle, and its ``root_doc_id`` unwinds any
+    correction chain that member collapsed.  A 해지 is skipped for the same
+    reason it never names a contract: it ended one, it did not open one.
+    """
+
+    entries = timeline.contract_entries or timeline.entries
+    for entry in entries:
+        root = str(entry.root_doc_id or entry.doc_id or "").strip()
+        if root:
+            return root
+    return None
 
 
 def _seed_identity(timeline: EventTimeline, doc_id: str) -> dict[str, str]:
