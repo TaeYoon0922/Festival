@@ -615,16 +615,21 @@ class CandidateChunkMergeTest(unittest.TestCase):
 
 
 class MergeOrderingTest(unittest.TestCase):
-    """Every company's best document must survive the evidence limit."""
+    """The merged candidate order, on the path where the merge is what is served.
 
-    #: What the evidence builder keeps for a general-evidence answer. The merge
-    #: has to put each company's own rank-1 inside this many positions.
+    A resolved comparison serves its operands and nothing else, so this order is
+    observable when no operand resolved -- the fail-closed path -- and it is
+    what keeps one company from starving another there. The fixtures therefore
+    state no contract amount.
+    """
+
+    #: What the evidence builder keeps for a general-evidence answer.
     GENERAL_EVIDENCE_LIMIT = 5
 
     def candidate(self, code, index):
         from app.retrieval.interfaces import CandidateChunk, MetadataMatch
 
-        payload = chunk(f"{code}{index}", "100", corp_code=code)
+        payload = plain_chunk(f"{code}{index}", code)
         return CandidateChunk(
             chunk_id=payload["chunk_id"],
             doc_id=payload["doc_id"],
@@ -686,7 +691,7 @@ class MergeOrderingTest(unittest.TestCase):
         )
 
     def test_every_company_rank_one_survives_the_evidence_limit(self):
-        """The starvation that made a two-company answer cite one company."""
+        """No company is starved out of the merged order by another."""
 
         for codes in ((A, B), (A, B, C, D)):
             with self.subTest(companies=len(codes)):
@@ -943,3 +948,180 @@ class PerExecutionOperandTest(unittest.TestCase):
             [result.doc_id for result in execution.results][:2],
             ["gold_a", "gold_b"],
         )
+
+
+class SelectedOperandEvidenceTest(unittest.TestCase):
+    """A resolved comparison serves its operands and nothing else."""
+
+    def candidate(self, payload):
+        from app.retrieval.interfaces import CandidateChunk, MetadataMatch
+
+        return CandidateChunk(
+            chunk_id=payload["chunk_id"], doc_id=payload["doc_id"],
+            chunk=payload, metadata_match=MetadataMatch(),
+        )
+
+    def execution(self, payloads):
+        from app.retrieval.interfaces import RetrievalResult
+
+        candidates = [self.candidate(payload) for payload in payloads]
+        return SimpleNamespace(
+            documents=(),
+            chunks=tuple(candidates),
+            results=tuple(
+                RetrievalResult(
+                    chunk_id=c.chunk_id, doc_id=c.doc_id, bm25_score=1.0,
+                    rank=index + 1, metadata_match={},
+                )
+                for index, c in enumerate(candidates)
+            ),
+        )
+
+    def merged(self, per_company, codes):
+        from app.api.pipeline import AnswerPipeline
+        from app.reasoning.query_plan import QueryPlan
+
+        pipeline = AnswerPipeline(
+            understanding=SimpleNamespace(),
+            executor=SimpleNamespace(
+                execute=lambda plan: self.execution(per_company[plan.corp_codes[0]])
+            ),
+        )
+        plan = QueryPlan(
+            query="q", raw_query="q",
+            companies=tuple(NAMES[code] for code in codes),
+            corp_codes=tuple(codes),
+            task_type="corporate_event", disclosure_route=("exchange",),
+        )
+        return pipeline._comparison_execution(request(*codes), plan)
+
+    def two_company(self):
+        """C080's shape: the gold contract first, then retrieval noise."""
+
+        return self.merged(
+            {
+                A: [
+                    chunk("gold_a", "1,195,242,120,000", corp_code=A),
+                    plain_chunk("noise_a1", A),
+                    chunk("noise_a2", "500", corp_code=A),
+                ],
+                B: [
+                    chunk("gold_b", "174,143,441,588", corp_code=B),
+                    plain_chunk("noise_b1", B),
+                ],
+            },
+            (A, B),
+        )
+
+    def test_only_the_selected_operands_are_served(self):
+        execution = self.two_company()
+
+        self.assertEqual(
+            [result.chunk_id for result in execution.results],
+            ["gold_a:c", "gold_b:c"],
+        )
+        self.assertEqual(
+            [candidate.chunk_id for candidate in execution.chunks],
+            ["gold_a:c", "gold_b:c"],
+        )
+
+    def test_retrieval_noise_does_not_reach_evidence(self):
+        execution = self.two_company()
+        served = {result.doc_id for result in execution.results}
+
+        for noise in ("noise_a1", "noise_a2", "noise_b1"):
+            self.assertNotIn(noise, served)
+
+    def test_ranks_are_renumbered_over_the_operands(self):
+        self.assertEqual(
+            [result.rank for result in self.two_company().results], [1, 2]
+        )
+
+    def test_the_candidate_objects_are_preserved(self):
+        from app.retrieval.interfaces import CandidateChunk
+
+        for candidate in self.two_company().chunks:
+            self.assertIsInstance(candidate, CandidateChunk)
+
+    def test_the_outcome_still_names_the_same_documents(self):
+        execution = self.two_company()
+        outcome = execution.routing[COMPARISON_OUTCOME_KEY]
+
+        self.assertEqual(
+            [entry["chunk_id"] for entry in outcome["operands"]],
+            [result.chunk_id for result in execution.results],
+        )
+
+    def test_four_companies_serve_exactly_four_operands(self):
+        execution = self.merged(
+            {
+                A: [chunk("a1", "136,804,509,590", corp_code=A),
+                    plain_chunk("noise_a", A)],
+                B: [chunk("b1", "237,667,488,543", corp_code=B)],
+                C: [plain_chunk("noise_c", C),
+                    chunk("c1", "240,800,000,000", corp_code=C)],
+                D: [chunk("d1", "198,437,328,900", corp_code=D)],
+            },
+            (A, B, C, D),
+        )
+        served = [result.chunk_id for result in execution.results]
+
+        self.assertEqual(len(served), 4)
+        self.assertEqual(len(set(served)), 4)
+        self.assertEqual(served, ["a1:c", "b1:c", "c1:c", "d1:c"])
+
+    def test_evidence_citation_and_operand_counts_agree(self):
+        """What the guard compares: every served item is a cited operand."""
+
+        from app.agent.orchestrator import _compose_company_comparison
+
+        for codes, per_company in (
+            (
+                (A, B),
+                {
+                    A: [chunk("gold_a", "300", corp_code=A), plain_chunk("n_a", A)],
+                    B: [chunk("gold_b", "100", corp_code=B), plain_chunk("n_b", B)],
+                },
+            ),
+            (
+                (A, B, C, D),
+                {
+                    A: [chunk("a1", "10", corp_code=A)],
+                    B: [chunk("b1", "40", corp_code=B)],
+                    C: [chunk("c1", "30", corp_code=C)],
+                    D: [chunk("d1", "20", corp_code=D)],
+                },
+            ),
+        ):
+            with self.subTest(companies=len(codes)):
+                execution = self.merged(per_company, codes)
+                order = ranking_from_outcome(
+                    execution.routing[COMPARISON_OUTCOME_KEY]
+                )
+                evidence = ComparisonDraftTest().evidence_set(
+                    [candidate.chunk for candidate in execution.chunks]
+                )
+                draft = _compose_company_comparison(
+                    evidence, request(*codes), order, task_type="general_evidence"
+                )
+
+                self.assertTrue(draft.answerable)
+                self.assertEqual(len(execution.results), len(codes))
+                self.assertEqual(len(draft.citations), len(codes))
+                self.assertEqual(len(evidence.served_items), len(draft.citations))
+
+    def test_an_unresolved_comparison_keeps_the_full_merge(self):
+        """Fail-closed is unchanged: nothing is sliced, nothing is answered."""
+
+        execution = self.merged(
+            {
+                A: [chunk("gold_a", "300", corp_code=A)],
+                B: [plain_chunk("no_amount_b", B)],
+            },
+            (A, B),
+        )
+        outcome = execution.routing[COMPARISON_OUTCOME_KEY]
+
+        self.assertFalse(outcome["resolved"])
+        self.assertIsNone(ranking_from_outcome(outcome))
+        self.assertEqual(len(execution.results), 2)

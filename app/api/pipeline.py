@@ -544,6 +544,43 @@ class AnswerPipeline:
             for chunk_id, candidate in candidates.items()
             if chunk_id not in seen_results
         )
+        # The subexecutions were a search for the operands, not the answer's
+        # evidence. Once every operand is chosen, the rest of what retrieval
+        # returned is noise for this question: it cannot be cited, because the
+        # comparison rests on exactly one document per company, and carrying it
+        # forward leaves an answer whose evidence and citations disagree about
+        # how complete it is. So the served evidence becomes the operands
+        # themselves, in the order the question put its companies in.
+        if outcome.get("resolved"):
+            selected = [
+                str(entry.get("chunk_id") or "")
+                for entry in outcome.get("operands") or ()
+            ]
+            by_result = {result.chunk_id: result for result in ranked}
+            ranked = tuple(
+                RetrievalResult(
+                    chunk_id=chunk_id,
+                    doc_id=(
+                        by_result[chunk_id].doc_id
+                        if chunk_id in by_result
+                        else _chunk_identity(candidates[chunk_id])[1]
+                    ),
+                    bm25_score=(
+                        by_result[chunk_id].bm25_score
+                        if chunk_id in by_result
+                        else 0.0
+                    ),
+                    rank=index + 1,
+                    metadata_match=(
+                        by_result[chunk_id].metadata_match
+                        if chunk_id in by_result
+                        else getattr(candidates[chunk_id], "metadata_match", {})
+                    ),
+                )
+                for index, chunk_id in enumerate(selected)
+                if chunk_id in candidates
+            )
+            chunks = [candidates[result.chunk_id] for result in ranked]
         return QueryExecution(
             plan=plan,
             documents=tuple(documents),
