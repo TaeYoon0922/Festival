@@ -5,6 +5,10 @@ from types import SimpleNamespace
 
 from app.reasoning.company_comparison import (
     CompanyComparisonRequest,
+    CompanyOperand,
+    company_operands,
+    executable_comparison,
+    operand_subplan,
     comparison_requested,
     compose_comparison_text,
     execute_company_scopes,
@@ -16,9 +20,20 @@ A, B, C, D = "00000001", "00000002", "00000003", "00000004"
 NAMES = {A: "가상항공", B: "가상로템", C: "가상중공업", D: "가상디펜스"}
 
 
-def request(*codes, ordered=False):
+def request(*codes, ordered=False, clauses=None, dates=None):
+    clauses = clauses or {}
+    dates = dates or {}
     return CompanyComparisonRequest(
-        companies=tuple((NAMES[code], code) for code in codes), ordered=ordered
+        companies=tuple(
+            CompanyOperand(
+                name=NAMES[code],
+                corp_code=code,
+                clause=clauses.get(code),
+                on_date=dates.get(code),
+            )
+            for code in codes
+        ),
+        ordered=ordered,
     )
 
 
@@ -107,46 +122,87 @@ class RecognitionTest(unittest.TestCase):
 
 
 class ScopedExecutionTest(unittest.TestCase):
-    def test_each_company_is_retrieved_against_its_own_plan(self):
+    """Each company retrieved on a plan narrowed to that company alone."""
+
+    def plan(self, **kwargs):
+        from app.reasoning.query_plan import QueryPeriod, QueryPlan
+
+        defaults = dict(
+            query="원본 질의",
+            raw_query="원본 질의",
+            companies=("가상항공", "가상로템"),
+            corp_codes=(A, B),
+            task_type="corporate_event",
+            event_type="supply_contract",
+            disclosure_route=("exchange",),
+            period=QueryPeriod(
+                year=2023, from_date="2023-02-28", to_date="2023-02-28",
+                period_type="receipt_date",
+            ),
+        )
+        defaults.update(kwargs)
+        return QueryPlan(**defaults)
+
+    def test_each_company_is_retrieved_on_its_own_narrowed_plan(self):
         seen = []
 
         def execute(plan):
-            seen.append((plan.companies, plan.corp_codes))
-            return SimpleNamespace(chunks=(chunk(plan.corp_codes[0], "100",
-                                                 corp_code=plan.corp_codes[0]),))
+            seen.append(plan)
+            return SimpleNamespace(
+                chunks=(chunk(plan.corp_codes[0], "100", corp_code=plan.corp_codes[0]),)
+            )
 
-        plan = SimpleNamespace(companies=("가", "나"), corp_codes=(A, B))
-        # ``replace`` needs a real dataclass; a namespace stands in via a stub.
-        from dataclasses import dataclass, replace as _r
-
-        @dataclass(frozen=True)
-        class Plan:
-            companies: tuple
-            corp_codes: tuple
-
-        per_company = execute_company_scopes(
-            request(A, B), Plan(companies=("가", "나"), corp_codes=(A, B)), execute
+        req = request(
+            A, B,
+            clauses={A: "보잉 착륙장치", B: "30mm차륜형대공포"},
+            dates={A: "2023-02-28", B: "2023-01-20"},
         )
+        execute_company_scopes(req, self.plan(), execute)
 
-        self.assertEqual([codes for _names, codes in seen], [(A,), (B,)])
-        self.assertEqual(sorted(per_company), [A, B])
+        self.assertEqual([p.corp_codes for p in seen], [(A,), (B,)])
+        self.assertEqual([p.companies for p in seen], [("가상항공",), ("가상로템",)])
+
+    def test_each_operand_carries_only_its_own_clause(self):
+        seen = []
+
+        def execute(plan):
+            seen.append(plan.query)
+            return SimpleNamespace(chunks=())
+
+        req = request(A, B, clauses={A: "보잉 착륙장치", B: "30mm차륜형대공포"})
+        execute_company_scopes(req, self.plan(), execute)
+
+        self.assertEqual(seen, ["보잉 착륙장치 계약금액", "30mm차륜형대공포 계약금액"])
+
+    def test_the_parent_global_date_is_not_inherited(self):
+        """A plan dated 2023-02-28 must not ask every company for that day."""
+
+        parent = self.plan()
+        self.assertEqual(parent.period.from_date, "2023-02-28")
+
+        req = request(A, B, dates={A: "2023-02-28", B: "2023-01-20"})
+        first = operand_subplan(parent, req.companies[0])
+        second = operand_subplan(parent, req.companies[1])
+
+        self.assertEqual(first.period.from_date, "2023-02-28")
+        self.assertEqual(second.period.from_date, "2023-01-20")
+        self.assertEqual(second.period.to_date, "2023-01-20")
+
+    def test_an_undated_operand_gets_an_empty_period(self):
+        parent = self.plan()
+        undated = operand_subplan(parent, request(A).companies[0])
+
+        self.assertIsNone(undated.period.from_date)
+        self.assertIsNone(undated.period.to_date)
+        self.assertEqual(undated.years, ())
 
     def test_one_companys_failure_does_not_borrow_another(self):
-        from dataclasses import dataclass
-
-        @dataclass(frozen=True)
-        class Plan:
-            companies: tuple
-            corp_codes: tuple
-
         def execute(plan):
             if plan.corp_codes[0] == B:
                 raise RuntimeError("retrieval failed")
             return SimpleNamespace(chunks=(chunk("a", "100", corp_code=A),))
 
-        per_company = execute_company_scopes(
-            request(A, B), Plan(companies=("가", "나"), corp_codes=(A, B)), execute
-        )
+        per_company = execute_company_scopes(request(A, B), self.plan(), execute)
 
         self.assertEqual(per_company[B], ())
         self.assertIsNone(resolve_comparison(request(A, B), per_company))
@@ -237,3 +293,211 @@ class CompositionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OperandBindingTest(unittest.TestCase):
+    """Order and clauses come from the question, never from the resolver."""
+
+    def test_mention_order_is_restored_from_the_question(self):
+        """The resolver hands them over sorted; the question decides."""
+
+        operands = company_operands(
+            "가상중공업의 LNGC 3척 계약과 가상일렉트릭의 변압기 계약 계약금액은 차이가 얼마나 돼?",
+            [("가상일렉트릭", B), ("가상중공업", A)],
+        )
+
+        self.assertEqual([o.name for o in operands], ["가상중공업", "가상일렉트릭"])
+
+    def test_each_company_keeps_its_own_clause(self):
+        operands = company_operands(
+            "가상항공의 말레이시아 수출계약과 가상로템의 알타이전차 부품 계약 중 계약금액이 더 큰 쪽은?",
+            [("가상항공", A), ("가상로템", B)],
+        )
+
+        self.assertEqual(
+            [o.lexical_query() for o in operands],
+            ["말레이시아 수출계약 계약금액", "알타이전차 부품 계약 계약금액"],
+        )
+
+    def test_a_spelled_out_list_binds_dates_per_company(self):
+        operands = company_operands(
+            "가상항공, 가상중공업, 가상로템이 각각 공시한 계약 중 계약금액이 큰 순서대로 나열해줘 "
+            "(가상항공 2023-02-28 보잉 착륙장치, 가상중공업 2023-01-20 VLGC 2척, "
+            "가상로템 2023-02-28 대공포 2차 양산)",
+            [("가상중공업", A), ("가상로템", B), ("가상항공", C)],
+        )
+
+        self.assertEqual(
+            [(o.name, o.on_date, o.lexical_query()) for o in operands],
+            [
+                ("가상항공", "2023-02-28", "보잉 착륙장치 계약금액"),
+                ("가상중공업", "2023-01-20", "VLGC 2척 계약금액"),
+                ("가상로템", "2023-02-28", "대공포 2차 양산 계약금액"),
+            ],
+        )
+
+    def test_an_abbreviated_list_entry_still_binds(self):
+        operands = company_operands(
+            "가상항공과 가상디펜스앤에어로가 공시한 계약금액을 순서대로 나열해줘 "
+            "(가상항공 2023-02-28 착륙장치, 가상디펜스 2023-04-14 경찰 헬기)",
+            [("가상항공", A), ("가상디펜스앤에어로", D)],
+        )
+
+        self.assertEqual(
+            [(o.name, o.on_date) for o in operands],
+            [("가상항공", "2023-02-28"), ("가상디펜스앤에어로", "2023-04-14")],
+        )
+
+    def test_a_company_the_question_never_writes_declines(self):
+        self.assertIsNone(
+            company_operands(
+                "가상항공의 계약금액이 더 큰가?", [("가상항공", A), ("이름없음", B)]
+            )
+        )
+
+
+class ValidatorActivationTest(unittest.TestCase):
+    """Only a complete request is executable; everything else stays ambiguous."""
+
+    def setUp(self):
+        from app.reasoning.query_understanding import QueryUnderstanding
+        from app.reasoning.query_validation import CorpusScope, QueryValidator
+
+        self.scope = CorpusScope(
+            companies={
+                "가상항공": ("가상항공", A),
+                "가상로템": ("가상로템", B),
+            },
+            receipt_from="2020-01-01",
+            receipt_to="2030-12-31",
+        )
+        self.understanding = QueryUnderstanding(self.scope.company_aliases())
+        self.validator = QueryValidator(corpus_scope=self.scope)
+
+    def result(self, question):
+        return self.validator.validate(self.understanding.understand(question))
+
+    def test_a_complete_comparison_is_permitted(self):
+        result = self.result(
+            "가상항공의 수출계약과 가상로템의 부품 계약 중 계약금액이 더 큰 쪽은?"
+        )
+
+        self.assertTrue(result.retrieval_allowed)
+        self.assertIsNotNone(executable_comparison(result.plan))
+
+    def test_multiple_companies_without_comparison_stay_ambiguous(self):
+        result = self.result("가상항공과 가상로템의 계약금액을 알려줘")
+
+        self.assertFalse(result.retrieval_allowed)
+        self.assertIsNone(executable_comparison(result.plan))
+
+    def test_a_comparison_of_another_field_stays_ambiguous(self):
+        result = self.result("가상항공과 가상로템 중 보유주식수가 더 큰 쪽은?")
+
+        self.assertFalse(result.retrieval_allowed)
+        self.assertIsNone(executable_comparison(result.plan))
+
+    def test_a_holding_role_pair_is_unaffected(self):
+        """Two companies in a holding question stay an issuer and a filer."""
+
+        result = self.result("가상로템이 보유한 가상항공 주식은 몇 주인가?")
+
+        self.assertIsNone(executable_comparison(result.plan))
+
+    def test_a_request_whose_companies_left_the_plan_is_not_executable(self):
+        from dataclasses import replace
+
+        result = self.result(
+            "가상항공의 수출계약과 가상로템의 부품 계약 중 계약금액이 더 큰 쪽은?"
+        )
+        drifted = replace(result.plan, companies=("가상항공",), corp_codes=(A,))
+
+        self.assertIsNone(executable_comparison(drifted))
+
+
+class ComparisonDraftTest(unittest.TestCase):
+    """The comparison enters the ordinary answer draft, or nothing is answered."""
+
+    def evidence_set(self, chunks):
+        from app.reasoning.evidence_builder import (
+            EvidenceGroup,
+            EvidenceItem,
+            EvidenceSet,
+        )
+
+        items = [
+            EvidenceItem(
+                chunk_id=c["chunk_id"], doc_id=c["doc_id"], company_id=None,
+                corp_code=c["corp_code"], corp_name=None, doc_group="exchange",
+                chunk_type="table", section_path=(), evidence_text="",
+                retrieval_rank=index + 1, retrieval_score=1.0,
+                rcept_dt=c["rcept_dt"], report_nm=c["report_nm"], period={},
+                source_refs=(), provenance={}, holding={},
+            )
+            for index, c in enumerate(chunks)
+        ]
+        groups = tuple(
+            EvidenceGroup(
+                group_id=f"g{index}", group_type="document",
+                member_chunk_ids=(item.chunk_id,), primary_evidence=item,
+                supporting_evidence=(), doc_ids=(item.doc_id,), reason="test",
+            )
+            for index, item in enumerate(items)
+        )
+        return EvidenceSet(
+            question="q", query_plan={}, task_type="general_evidence",
+            evidence_groups=groups,
+            retrieval_order=tuple(item.chunk_id for item in items),
+            raw_candidate_count=len(items), selected_evidence_count=len(items),
+            warnings=(), ambiguity={},
+        )
+
+    def draft(self, per_company, req=None):
+        from app.agent.orchestrator import _compose_company_comparison
+
+        req = req or request(A, B)
+        order = resolve_comparison(req, per_company)
+        chunks = [c for slice_ in per_company.values() for c in slice_]
+        return _compose_company_comparison(
+            self.evidence_set(chunks), req, order, task_type="general_evidence"
+        )
+
+    def slice_for(self, *pairs):
+        return {code: (chunk(code, amount, corp_code=code),) for code, amount in pairs}
+
+    def test_every_operand_is_cited(self):
+        draft = self.draft(self.slice_for((A, "300"), (B, "100")))
+
+        self.assertTrue(draft.answerable)
+        self.assertEqual(len(draft.citations), 2)
+        self.assertEqual({citation.doc_id for citation in draft.citations}, {A, B})
+
+    def test_the_comparison_leads_the_answer_with_its_evidence_ids(self):
+        draft = self.draft(self.slice_for((A, "300"), (B, "100")))
+        section = draft.answer_sections[0]
+
+        self.assertEqual(len(section.supporting_evidence_ids), 2)
+        self.assertIn(NAMES[A], section.content["summary"])
+        self.assertEqual(len(draft.evidence_references) >= 2, True)
+
+    def test_four_companies_are_all_cited_in_order(self):
+        req = request(A, B, C, D, ordered=True)
+        draft = self.draft(
+            self.slice_for((A, "10"), (B, "40"), (C, "30"), (D, "20")), req=req
+        )
+        summary = draft.answer_sections[0].content["summary"]
+
+        self.assertTrue(draft.answerable)
+        self.assertEqual(len(draft.citations), 4)
+        self.assertLess(summary.index(NAMES[B]), summary.index(NAMES[C]))
+        self.assertLess(summary.index(NAMES[C]), summary.index(NAMES[D]))
+        self.assertLess(summary.index(NAMES[D]), summary.index(NAMES[A]))
+
+    def test_a_missing_operand_is_not_answerable(self):
+        per_company = self.slice_for((A, "300"))
+        per_company[B] = ()
+
+        draft = self.draft(per_company)
+
+        self.assertFalse(draft.answerable)
+        self.assertIn("company_comparison_incomplete", draft.warnings)

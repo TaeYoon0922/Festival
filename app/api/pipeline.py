@@ -70,6 +70,10 @@ from app.reasoning.query_validation import (
     QueryValidator,
 )
 from app.reasoning.router import QueryRouter
+from app.reasoning.company_comparison import (
+    executable_comparison,
+    executions_for,
+)
 from app.reasoning.semantic_query_fallback import HcxSemanticQueryFallback
 from app.retrieval.correction_expansion import (
     apply_expansion,
@@ -326,7 +330,12 @@ class AnswerPipeline:
                 if not validation.retrieval_allowed:
                     return self._blocked_response(question_id, question, validation)
             try:
-                execution = self.executor.execute(plan)
+                comparison = executable_comparison(plan)
+                execution = (
+                    self._comparison_execution(comparison, plan)
+                    if comparison is not None
+                    else self.executor.execute(plan)
+                )
             except Exception as error:  # noqa: BLE001 - sanitized at API boundary
                 raise AnswerPipelineError(_classify(error)) from error
         # P0-C runs after retrieval so it can only add completeness evidence on
@@ -441,6 +450,66 @@ class AnswerPipeline:
         """A copy of the bounded, query-level P0-D counters."""
 
         return dict(self._query_metrics)
+
+    def _comparison_execution(self, comparison: Any, plan: Any) -> Any:
+        """One execution per company, merged into the execution shape downstream
+        already understands.
+
+        Merging rather than answering here is deliberate: evidence building,
+        citation alignment, answerability and the think trace are all written
+        against a single execution, and a comparison that produced its own
+        response object would have to reimplement every one of them. Each
+        company is still retrieved on its own narrowed plan, so what is merged
+        is four separate answers to four separate questions, not one search over
+        four companies.
+        """
+
+        from app.reasoning.query_plan import QueryExecution
+        from app.retrieval.interfaces import RetrievalResult
+
+        documents: list[Any] = []
+        chunks: list[Any] = []
+        results: list[RetrievalResult] = []
+        seen_documents: set[str] = set()
+        seen_chunks: set[str] = set()
+        for execution in executions_for(
+            comparison, plan, self.executor.execute
+        ).values():
+            if execution is None:
+                continue
+            for document in getattr(execution, "documents", ()) or ():
+                if str(document.doc_id) not in seen_documents:
+                    seen_documents.add(str(document.doc_id))
+                    documents.append(document)
+            for chunk in getattr(execution, "chunks", ()) or ():
+                chunk_id = str(chunk.get("chunk_id") or "")
+                if chunk_id and chunk_id not in seen_chunks:
+                    seen_chunks.add(chunk_id)
+                    chunks.append(chunk)
+            for result in getattr(execution, "results", ()) or ():
+                results.append(result)
+        # Ranks came from separate retrievals and would otherwise collide;
+        # renumbering keeps one coherent served order without reordering any
+        # company's own results relative to each other.
+        ranked = tuple(
+            RetrievalResult(
+                chunk_id=result.chunk_id,
+                doc_id=result.doc_id,
+                bm25_score=result.bm25_score,
+                rank=index + 1,
+                metadata_match=result.metadata_match,
+            )
+            for index, result in enumerate(results)
+        )
+        return QueryExecution(
+            plan=plan,
+            documents=tuple(documents),
+            chunks=tuple(chunks),
+            results=ranked,
+            routing={"company_comparison": [
+                operand.corp_code for operand in comparison.companies
+            ]},
+        )
 
     def _validated_understanding(
         self, question: str

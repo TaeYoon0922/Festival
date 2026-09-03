@@ -9,6 +9,12 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from app.agent.task_router import TaskDecision, TaskRouter
+from app.reasoning.company_comparison import (
+    chunks_by_company,
+    compose_comparison_text,
+    executable_comparison,
+    resolve_comparison,
+)
 from app.reasoning.amount_change import (
     compose_amount_change_text,
     requested_amount_change,
@@ -386,8 +392,29 @@ class AgentOrchestrator:
                 if change_request is not None
                 else None
             )
+            # Several companies, one field, each answered from its own scope.
+            comparison = executable_comparison(query_plan)
+            order = (
+                resolve_comparison(
+                    comparison,
+                    chunks_by_company(
+                        comparison, _served_chunks(retrieval_execution, evidence)
+                    ),
+                )
+                if comparison is not None
+                else None
+            )
             trace.append("answer_composer")
-            if delta is not None:
+            if comparison is not None:
+                trace.insert(len(trace) - 1, "company_comparison")
+                draft = _compose_company_comparison(
+                    evidence,
+                    comparison,
+                    order,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+            elif delta is not None:
                 trace.insert(len(trace) - 1, "contract_amount_change")
                 draft = _compose_amount_change(
                     evidence,
@@ -659,6 +686,71 @@ def _served_chunks(execution: Any, evidence: EvidenceSet) -> tuple[Any, ...]:
     ordered = [by_id[item.chunk_id] for item in evidence.served_items
                if item.chunk_id in by_id]
     return tuple(ordered)
+
+
+def _compose_company_comparison(
+    evidence: EvidenceSet,
+    comparison: Any,
+    order: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft:
+    """State the comparison, citing every company that took part in it.
+
+    All of them or none.  A ranking missing one company states a different
+    order than the true one, and a larger-of-two missing one side is not a
+    comparison at all, so an unresolved operand makes the whole answer
+    unanswerable rather than a partial one presented as complete.
+    """
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    if order is None:
+        return replace(
+            base,
+            answerable=False,
+            warnings=tuple(
+                dict.fromkeys((*base.warnings, "company_comparison_incomplete"))
+            ),
+        )
+    wanted = [
+        str(operand.source.chunk_id)
+        for operand in order.operands
+        if operand.source is not None
+    ]
+    by_id = {item.chunk_id: item for item in evidence.served_items}
+    cited = [by_id[chunk_id] for chunk_id in wanted if chunk_id in by_id]
+    if len(cited) != len(order.operands):
+        # An operand whose document did not survive into served evidence cannot
+        # be cited, and an uncitable comparison is not answerable.
+        return replace(
+            base,
+            answerable=False,
+            warnings=tuple(
+                dict.fromkeys((*base.warnings, "company_comparison_uncited"))
+            ),
+        )
+    statement = compose_comparison_text(comparison, order)
+    section = AnswerSection(
+        title="회사별 계약금액 비교",
+        content={
+            "summary": statement,
+            "operands": [operand.to_dict() for operand in order.operands],
+            "ordered": bool(comparison.ordered),
+        },
+        supporting_evidence_ids=tuple(item.chunk_id for item in cited),
+    )
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*(item.chunk_id for item in cited), *base.evidence_references))
+        ),
+        citations=tuple(_general_citation(item) for item in cited),
+        answerable=True,
+    )
 
 
 def _compose_amount_change(
