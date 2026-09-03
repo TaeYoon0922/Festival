@@ -101,7 +101,7 @@ class CaseCBothRequestedValuesLeadTests(unittest.TestCase):
         self.text = _prose(INCREASE_EVENT, ["after_shares", "after_ratio"])
 
     def test_both_asked_values_appear_before_the_movement(self) -> None:
-        lead = self.text.split("보유 주식수는 613,758주")[0]
+        lead = self.text.split("보유 주식수는 변동 전 613,758주")[0]
 
         self.assertIn("720,039주", lead)
         self.assertIn("7.12%", lead)
@@ -149,7 +149,7 @@ class CaseEDecreaseEventTests(unittest.TestCase):
         self.assertIn("-283,151주", self.text)
 
     def test_the_movement_direction_matches_the_values(self) -> None:
-        self.assertIn("2,485,201주에서 2,202,050주로", self.text)
+        self.assertIn("변동 전 2,485,201주에서 변동 후 2,202,050주로", self.text)
 
     def test_the_ratio_falls(self) -> None:
         self.assertIn("하락했습니다", self.text)
@@ -393,6 +393,125 @@ class CaseIEndToEndSingleEventTests(unittest.TestCase):
         self.assertIn("인용", text)
         self.assertIn("chunk_id:", text)
         self.assertEqual(len(self.generated.citations), 1)
+
+
+class TheMovementSentenceNamesTheRoleOfEachValue(unittest.TestCase):
+    """IEV2-C097: "변동 전과 변동 후 주식수는?" -- both numbers, each labelled.
+
+    The movement sentence used to read "보유 주식수는 613,758주에서 720,039주로
+    106,281주 증가했습니다".  Word order is the only thing that said which
+    figure was the before and which the after: no reader-visible label bound
+    either number to its role, and the lead sentence states the after value
+    with no role word at all.  A reader who scans for "변동 후" finds nothing,
+    and a reader who mis-scans the "에서 ... 로" ordering has nothing to check
+    themselves against -- in a sentence whose whole subject is a change, the
+    two figures are exactly what must not be confusable.
+
+    The record form has always labelled them ("변동 전 주식수: ...").  Prose,
+    which is what a single event actually renders, said the same facts without
+    the same labels.  These tests pin the labels into the prose.
+    """
+
+    def test_the_before_value_is_named_as_the_before_value(self) -> None:
+        text = _prose(INCREASE_EVENT, [])
+
+        self.assertIn("변동 전 613,758주", text)
+
+    def test_the_after_value_is_named_as_the_after_value(self) -> None:
+        text = _prose(INCREASE_EVENT, [])
+
+        self.assertIn("변동 후 720,039주", text)
+
+    def test_the_sentence_still_reads_as_one_movement(self) -> None:
+        text = _prose(INCREASE_EVENT, [])
+
+        self.assertIn(
+            "보유 주식수는 변동 전 613,758주에서 변동 후 720,039주로 "
+            "106,281주 증가했습니다.",
+            text,
+        )
+
+    def test_a_decrease_is_labelled_the_same_way(self) -> None:
+        text = _prose(DECREASE_EVENT, [])
+
+        self.assertIn("변동 전 2,485,201주", text)
+        self.assertIn("변동 후 2,202,050주", text)
+
+    def test_the_ratio_movement_is_labelled_too(self) -> None:
+        text = _prose(INCREASE_EVENT, [])
+
+        self.assertIn("변동 전 6.07%", text)
+        self.assertIn("변동 후 7.12%", text)
+
+    def test_no_verified_value_was_lost_to_the_labels(self) -> None:
+        for requested in ([], ["after_shares"], ["before_shares", "after_shares"]):
+            text = _prose(INCREASE_EVENT, requested)
+            for value in _record_values(INCREASE_EVENT):
+                with self.subTest(requested=tuple(requested), value=value):
+                    self.assertIn(value, text)
+
+
+def _role_window(text: str, markers, width: int = 60) -> str:
+    """The independent evaluator's own reading, restated here rather than imported.
+
+    ``evaluation/`` is not an importable package from the app test suite, and
+    copying the predicate keeps this suite honest about what it is asserting:
+    a value counts as bound to a role only when it follows that role's own
+    word closely enough to be read as belonging to it.
+    """
+
+    spans = []
+    for marker in markers:
+        for match in re.finditer(re.escape(marker), text):
+            spans.append(text[match.start() : match.end() + width])
+    return " ".join(spans)
+
+
+_BEFORE_MARKERS = ("변동 전", "변동전", "직전")
+_AFTER_MARKERS = ("변동 후", "변동후", "이후")
+
+
+class EachFigureIsReadableUnderItsOwnRole(unittest.TestCase):
+    """The failure IEV2-C097 reported, restated as the property it tests.
+
+    ``role_unbound`` fires when neither figure is stated near a word naming its
+    role.  What made it reachable is that the question's own wording -- 변동
+    전과 변동 후 -- need not appear anywhere in an answer that reports exactly
+    those two numbers.
+    """
+
+    def _windows(self, text: str) -> tuple[str, str]:
+        return (
+            _role_window(text, _BEFORE_MARKERS),
+            _role_window(text, _AFTER_MARKERS),
+        )
+
+    def test_both_roles_are_bound_when_the_question_named_neither_field(self) -> None:
+        before_window, after_window = self._windows(_prose(INCREASE_EVENT, []))
+
+        self.assertIn("613,758", before_window)
+        self.assertIn("720,039", after_window)
+
+    def test_both_roles_are_bound_when_the_question_named_both_fields(self) -> None:
+        before_window, after_window = self._windows(
+            _prose(INCREASE_EVENT, ["before_shares", "after_shares"])
+        )
+
+        self.assertIn("613,758", before_window)
+        self.assertIn("720,039", after_window)
+
+    def test_the_after_role_window_is_no_longer_empty(self) -> None:
+        """The precise shape of the live failure: nothing named the after role."""
+
+        _before_window, after_window = self._windows(_prose(INCREASE_EVENT, []))
+
+        self.assertNotEqual(after_window, "")
+
+    def test_a_decrease_binds_its_roles_the_same_way(self) -> None:
+        before_window, after_window = self._windows(_prose(DECREASE_EVENT, []))
+
+        self.assertIn("2,485,201", before_window)
+        self.assertIn("2,202,050", after_window)
 
 
 if __name__ == "__main__":
