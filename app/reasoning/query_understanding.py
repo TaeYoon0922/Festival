@@ -674,14 +674,17 @@ _REPORTER_LEGAL_FORM = r"(?:(?:주식회사|유한회사|유한책임회사|재�
 #: accepted is a legal form followed by one token, which is why the legal form
 #: above is a separate group rather than part of this character class.
 _REPORTER_TOKEN = r"[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{0,31}"
-#: Latin holder names commonly span several words.  They remain bounded by the
-#: grammatical particle below; Korean names keep the single-token contract.
+#: The tracked multi-word Latin holder carries an initial designator.  Keep
+#: that exact, structurally bounded shape here; ordinary multi-word names stay
+#: with the corpus-backed query-grounded resolver, which proves their issuer
+#: relationship and records its provenance.
 _LATIN_REPORTER_TOKEN = r"[0-9A-Za-z][0-9A-Za-z&.\-]{0,31}"
 _LATIN_REPORTER_NAME = (
-    _LATIN_REPORTER_TOKEN
+    r"[A-Za-z]\.\s+"
+    + _LATIN_REPORTER_TOKEN
     + r"(?:\s+(?:&\s+)?"
     + _LATIN_REPORTER_TOKEN
-    + r"){1,7}"
+    + r"){0,6}"
 )
 _REPORTER_NAME = (
     _REPORTER_LEGAL_FORM
