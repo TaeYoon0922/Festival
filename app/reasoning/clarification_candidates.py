@@ -7,12 +7,14 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from app.reasoning.clarification_request import (
+    EVENT_INSTANCE,
     MAX_CANDIDATES,
     ClarificationCandidate,
     ClarificationDecision,
     ClarificationRequest,
     ClarificationState,
 )
+from app.reasoning.corporate_event import LIFECYCLE_OPEN, RESOLVED
 from app.reasoning.holding_company_role_resolution import has_role_provenance
 from app.reasoning.holding_evidence_coverage import has_holding_acquisition_semantics
 from app.reasoning.query_validation import QuerySlotStatus, QueryState
@@ -184,7 +186,7 @@ def _event_instance_request(
     raw_events = [
         event for event in block.get("events") or () if isinstance(event, Mapping)
     ]
-    raw_events.extend(_resolved_singleton_events(block))
+    raw_events.extend(_settled_singleton_events(block))
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in raw_events:
@@ -213,7 +215,7 @@ def _event_instance_request(
         ClarificationCandidate(
             id=f"E{index}",
             label=label,
-            semantic_type="event_instance",
+            semantic_type=EVENT_INSTANCE,
             provenance="corporate_event_graph",
             value=str(event["event_id"]),
         )
@@ -271,18 +273,45 @@ def _event_label_key(label: str) -> str:
     return re.sub(r"\s+", " ", label).strip().casefold()
 
 
-def _resolved_singleton_events(block: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """Graph-proven open contracts that expansion correctly had nothing to add."""
+def _settled_singleton_events(block: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Graph-proven single-filing contracts expansion correctly had nothing to add.
+
+    Expansion records a one-member lifecycle as ``lifecycle_not_resolved``
+    because it found no counterpart filing to pull in.  For a contract that was
+    concluded and never followed up there is no counterpart to find, and
+    :attr:`app.reasoning.corporate_event.CorporateEventState.has_dangling_reference`
+    already states the rule this reads by: such a filing is stored as
+    ``unresolved`` "because there was nothing to link it to -- that is complete
+    evidence, not a gap", and only ``resolution_source`` marks the real gap,
+    where a lifecycle names a filing the corpus does not hold.
+
+    So a still-open singleton is as settled as a resolved one, and two of them
+    that name the same counterparty are two contracts, not one unresolved
+    lifecycle.  A terminated or ambiguous singleton is neither, and a dangling
+    reference is the gap itself; none of those is offered as something to
+    choose between.
+    """
 
     return [
         item
         for item in (block.get("skipped") or ())
         if isinstance(item, Mapping)
         and item.get("reason") == "lifecycle_not_resolved"
-        and _event_text(item.get("resolution_status")) == "resolved"
         and _event_count(item.get("member_count")) == 1
         and str(item.get("event_id") or "").strip()
+        and _is_settled_lifecycle(item)
     ]
+
+
+def _is_settled_lifecycle(item: Mapping[str, Any]) -> bool:
+    """Whether one skipped singleton states its lifecycle completely."""
+
+    source = _event_text(item.get("resolution_source"))
+    if source.endswith("_not_in_corpus"):
+        return False
+    if _event_text(item.get("resolution_status")) == RESOLVED:
+        return True
+    return _event_text(item.get("lifecycle_status")) == LIFECYCLE_OPEN
 
 
 def _explicit_event_selector(plan: Any) -> bool:

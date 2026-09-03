@@ -15,6 +15,13 @@ from typing import Any
 MAX_CANDIDATES = 12
 MAX_LISTED_CANDIDATES = 3
 
+#: A candidate that is one filed event rather than one reading of a word.  The
+#: two are asked about differently: which of several metrics was meant is a
+#: question about the question, while which of several filings was meant is a
+#: question about the corpus, and only the second can name the 공시일 that tells
+#: them apart.
+EVENT_INSTANCE = "event_instance"
+
 
 class ClarificationState(str, Enum):
     RESOLVED = "resolved"
@@ -141,6 +148,14 @@ def clarification_text(decision: ClarificationDecision) -> str:
             "보고서 기준을 구체적으로 알려주세요."
         )
     labels = [candidate.label for candidate in candidates]
+    if all(candidate.semantic_type == EVENT_INSTANCE for candidate in candidates):
+        # Each label is one filing, so naming the dimension is what makes the
+        # question answerable: the asker is told what to say back, not just
+        # shown two strings that happen to differ.
+        return (
+            "같은 계약 설명에 해당하는 공시가 여러 건 있습니다. "
+            f"어느 공시일의 계약을 말씀하시는지 알려주세요: {', '.join(labels)}"
+        )
     if len(labels) == 2:
         return (
             f"{_with_object_particle(labels[0])} 말씀하시는 건가요, 아니면 "
@@ -159,6 +174,7 @@ def _with_object_particle(label: str) -> str:
 
 
 __all__ = [
+    "EVENT_INSTANCE",
     "MAX_CANDIDATES",
     "MAX_LISTED_CANDIDATES",
     "ClarificationCandidate",
