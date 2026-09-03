@@ -32,6 +32,7 @@ from app.reasoning.holding_acquisition import (
     _cell_text,
     classify_transaction_method,
 )
+from app.reasoning.holding_previous_report import previous_report_baseline_evidence
 
 
 #: The one canonical holding field STEP 11-C answers.
@@ -84,6 +85,31 @@ def requested_holding_fields(question: Any) -> tuple[str, ...]:
 
 
 def holding_field_evidence(
+    *,
+    question: Any,
+    resolution: Any,
+    evidence_items: Sequence[Any],
+) -> tuple[FieldEvidence, ...]:
+    """Every holding field finding for this question.
+
+    Two producers live behind this one entry point, and they answer about
+    different fields of different rows: the acquisition unit price of the row an
+    acquisition was proved from, and the previous state of the report a
+    ``직전 보고`` question is relative to.  Neither can claim the other's field,
+    so their outputs are concatenated rather than ranked.
+    """
+
+    return (
+        *_acquisition_unit_price_evidence(
+            question=question, resolution=resolution, evidence_items=evidence_items
+        ),
+        *previous_report_baseline_evidence(
+            question=question, resolution=resolution, evidence_items=evidence_items
+        ),
+    )
+
+
+def _acquisition_unit_price_evidence(
     *,
     question: Any,
     resolution: Any,

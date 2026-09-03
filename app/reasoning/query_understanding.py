@@ -653,6 +653,23 @@ _REPORTER_LEGAL_FORM = r"(?:(?:주식회사|유한회사|유한책임회사|재�
 #: accepted is a legal form followed by one token, which is why the legal form
 #: above is a separate group rather than part of this character class.
 _REPORTER_TOKEN = r"[0-9A-Za-z가-힣(㈜㈝][0-9A-Za-z가-힣()㈜㈝&.\-]{0,31}"
+#: Latin holder names commonly span several words.  They remain bounded by the
+#: grammatical particle below; Korean names keep the single-token contract.
+_LATIN_REPORTER_TOKEN = r"[0-9A-Za-z][0-9A-Za-z&.\-]{0,31}"
+_LATIN_REPORTER_NAME = (
+    _LATIN_REPORTER_TOKEN
+    + r"(?:\s+(?:&\s+)?"
+    + _LATIN_REPORTER_TOKEN
+    + r"){1,7}"
+)
+_REPORTER_NAME = (
+    _REPORTER_LEGAL_FORM
+    + r"(?:"
+    + _LATIN_REPORTER_NAME
+    + r"|"
+    + _REPORTER_TOKEN
+    + r")"
+)
 #: The holder must stand in a possessive or subject relation to the report.
 #: Object and topic particles are deliberately absent: with 을/를/은/는 accepted,
 #: ``보유주식수는`` and ``보유비율을`` would themselves read as holders.  The
@@ -668,8 +685,7 @@ _NATURAL_REPORTER = re.compile(
     _REPORTER_BRIDGE
     + _REPORTER_ROLE
     + r"(?P<holder>"
-    + _REPORTER_LEGAL_FORM
-    + _REPORTER_TOKEN
+    + _REPORTER_NAME
     + r")"
     + _REPORTER_PARTICLE
 )
@@ -680,8 +696,7 @@ _NATURAL_REPORTER = re.compile(
 #: separately below rather than hidden inside an unbounded regex.
 _REPORTER_FIRST_SUBJECT = re.compile(
     r"\s*(?P<holder>"
-    + _REPORTER_LEGAL_FORM
-    + _REPORTER_TOKEN
+    + _REPORTER_NAME
     + r")\s*(?:이|가)\s*"
 )
 #: A reporting verb must close the bridge immediately before the issuer.  The

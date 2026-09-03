@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -30,14 +30,19 @@ from app.reasoning.holding_evidence_coverage import (
     requested_holding_fields,
 )
 from app.reasoning.holding_report_index import (
+    CHANGE_UNAVAILABLE,
     DEFAULT_ARTIFACT_PATH as DEFAULT_INDEX_PATH,
+    PREVIOUS_UNAVAILABLE,
     RESOLVED,
     HoldingReportIndex,
     ReportExecution,
     execute_report_relative,
     load_index,
+    project_role,
 )
 from app.reasoning.holding_report_relative import (
+    ROLE_CHANGE,
+    ROLE_PREVIOUS,
     SELECTOR_EXACT_RECEIPT_DATE,
     SELECTOR_EXACT_REFERENCE_DATE,
     SELECTOR_LATEST,
@@ -204,9 +209,14 @@ class HoldingReportRelativeExecution:
             reporter=reporter,
             reference_date=period_date,
             receipt_date=period_date,
+            requested_fields=requested,
             active_corpus_identity=self.active_corpus_identity,
         )
-        if not selected.executable or selected.record is None:
+        selected = _prefer_available_equivalent_source(selected, execution)
+        if selected.record is None or (
+            not selected.executable
+            and selected.status not in {PREVIOUS_UNAVAILABLE, CHANGE_UNAVAILABLE}
+        ):
             return ReportRelativeEvidenceExecution(
                 status=selected.status,
                 report_execution=selected,
@@ -218,10 +228,15 @@ class HoldingReportRelativeExecution:
         )
         if candidate is None:
             return ReportRelativeEvidenceExecution(
-                status=failure,
+                status=(
+                    selected.status
+                    if selected.status in {PREVIOUS_UNAVAILABLE, CHANGE_UNAVAILABLE}
+                    else failure
+                ),
                 report_execution=selected,
                 requested_fields=requested,
                 hydrated=hydrated,
+                detail={"evidence_status": failure},
             )
 
         validation_status = _validate_projection(candidate, selected.record)
@@ -235,7 +250,7 @@ class HoldingReportRelativeExecution:
 
         result = _evidence_result(candidate, selected)
         return ReportRelativeEvidenceExecution(
-            status=RESOLVED,
+            status=selected.status,
             report_execution=selected,
             requested_fields=requested,
             chunks=(candidate,),
@@ -280,6 +295,73 @@ class HoldingReportRelativeExecution:
         if len(matches) > 1:
             return None, True, PROJECTION_CHUNK_AMBIGUOUS
         return None, True, PROJECTION_CHUNK_MISSING
+
+
+def _prefer_available_equivalent_source(
+    report_execution: ReportExecution, execution: Any
+) -> ReportExecution:
+    """Use an already available agreeing document as the citation carrier.
+
+    Fact-level resolution preserves every agreeing document in ``candidates``.
+    The index chooses a stable carrier without knowing which chunks retrieval
+    has available; this adapter does know.  Switching carriers here changes no
+    requested fact and avoids an unnecessary hydration failure when another
+    proven source is already present and citable.
+    """
+
+    selection = report_execution.selection
+    if (
+        selection.detail.get("fact_level_resolution")
+        != "authoritative_sources_agree"
+        or report_execution.projection is None
+    ):
+        return report_execution
+
+    chunks = tuple(getattr(execution, "chunks", ()) or ())
+    by_chunk: dict[str, list[CandidateChunk]] = {}
+    for candidate in chunks:
+        by_chunk.setdefault(candidate.chunk_id, []).append(candidate)
+    result_order = [
+        str(result.chunk_id)
+        for result in (getattr(execution, "results", ()) or ())
+    ]
+    chunk_order = [candidate.chunk_id for candidate in chunks]
+    ordered_ids = dict.fromkeys((*result_order, *chunk_order))
+    order = {chunk_id: rank for rank, chunk_id in enumerate(ordered_ids)}
+
+    available = []
+    for record in selection.candidates:
+        matches = by_chunk.get(record.projection_chunk_id, [])
+        if len(matches) != 1 or _validate_projection(matches[0], record) is not None:
+            continue
+        available.append(record)
+    if not available:
+        return report_execution
+
+    carrier = min(
+        available,
+        key=lambda record: (
+            order.get(record.projection_chunk_id, len(order)),
+            record.doc_id,
+            record.projection_chunk_id,
+        ),
+    )
+    if carrier is selection.selected:
+        return report_execution
+    projection = project_role(carrier, report_execution.projection.role)
+    return replace(
+        report_execution,
+        status=RESOLVED if projection.resolved else projection.status,
+        selection=replace(
+            selection,
+            selected=carrier,
+            detail={
+                **dict(selection.detail),
+                "provenance_carrier_chunk_id": carrier.projection_chunk_id,
+            },
+        ),
+        projection=projection,
+    )
 
 
 def repository_corpus_identity(root: str | Path | None = None) -> dict[str, Any]:
@@ -335,9 +417,12 @@ def _eligible(
         and selector != SELECTOR_SELECTED_CONTEXT
     ):
         return False
-    if not _has_report_relative_wording(question, intent):
-        return False
-    if not requested or ACQUISITION_REQUEST_FIELDS.intersection(requested):
+    role = str(intent.get("projection_role") or "")
+    needs_previous = role in {ROLE_PREVIOUS, ROLE_CHANGE}
+    if (
+        (not requested and not needs_previous)
+        or ACQUISITION_REQUEST_FIELDS.intersection(requested)
+    ):
         return False
     if selector == SELECTOR_SELECTED_CONTEXT:
         # An unbound deictic selector can be rejected without resolving an
@@ -349,6 +434,8 @@ def _eligible(
         # unsupported and therefore exposes empty evidence.
         return True
     if not _single_issuer(plan) or not str(getattr(plan, "reporter", "") or "").strip():
+        return False
+    if not _has_report_relative_wording(question, intent):
         return False
     if _comparison_firewall(plan):
         return False
@@ -385,7 +472,14 @@ def _has_report_relative_wording(
     # what distinguishes "2024-05-09 보고서의 보유비율" from a plain event-date
     # holding query.  Acquisition overlap is decided separately by the frozen
     # requested-field helper above.
-    return "보고" in re.sub(r"\s+", "", str(question or ""))
+    compact = re.sub(r"\s+", "", str(question or ""))
+    if "보고" in compact:
+        return True
+    # ``신고한`` is filing-relative wording only in the already-gated holding
+    # path: one issuer, an explicit reporter, an exact holding reference date,
+    # and requested holding fields have all been established by ``_eligible``.
+    # Receipt-date questions and generic uses of 신고 do not enter here.
+    return selector == SELECTOR_EXACT_REFERENCE_DATE and "신고" in compact
 
 
 def _single_issuer(plan: Any) -> bool:

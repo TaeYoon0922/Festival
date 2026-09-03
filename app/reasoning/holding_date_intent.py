@@ -68,6 +68,34 @@ def exact_reference_date(plan: Any) -> str | None:
     return str(start)
 
 
+def question_reference_date(question: str) -> str | None:
+    """The one holding reference date a question names, as eight digits.
+
+    Reads the question with the routed holding semantics, exactly as
+    :func:`derive_exact_period` does, and returns nothing for a range, a year, a
+    receipt date or no date at all.  Offered separately because a component that
+    only needs to know *which day was asked about* has no plan to gate on -- and
+    re-parsing the date with a second ontology is precisely what this module
+    exists to prevent.
+    """
+
+    try:
+        period, _spans, _years, semantics = _period_from_query(
+            str(question or ""), task_type="holding_change", routes=("holding",)
+        )
+    except (TypeError, ValueError):  # a question the frozen parser cannot read
+        return None
+    if isinstance(semantics, Mapping) and str(semantics.get("role") or "") == RECEIPT_ROLE:
+        return None
+    if getattr(period, "period_type", None) != EXACT_PERIOD_TYPE:
+        return None
+    start = getattr(period, "from_date", None)
+    if not start or start != getattr(period, "to_date", None):
+        return None
+    digits = "".join(character for character in str(start) if character.isdigit())
+    return digits[:8] if len(digits) >= 8 else None
+
+
 def _already_exact(plan: Any) -> bool:
     """Whether the frozen plan already pins a single day.
 

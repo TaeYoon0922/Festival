@@ -31,7 +31,7 @@ holder-state on a different date, presented as the requested one.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -55,7 +55,7 @@ from app.reasoning.holding_report_relative import (
     SELECTOR_LATEST,
     SELECTOR_SELECTED_CONTEXT,
 )
-from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.holding_reporter import canonical_reporter_key, reporter_matches
 
 #: The artifact this module can read.  A different layout is a different
 #: contract and is refused rather than best-effort parsed.
@@ -442,18 +442,54 @@ class HoldingReportIndex:
     def record_count(self) -> int:
         return sum(len(v) for v in self._by_pair.values())
 
+    def resolve_reporter_key(
+        self, issuer_corp_code: str, reporter: str
+    ) -> str | None:
+        """Which indexed holder this issuer's timeline is keyed under, if one.
+
+        The canonical key is tried first, so a name written as the filing wrote
+        it costs nothing and can never be reinterpreted.  Only when the corpus
+        holds no such key is the shared holder contract asked whether exactly
+        one of *this issuer's* holders answers to the name -- which is how
+        ``Fidelity`` reaches ``Fidelity Management & Research Company LLC``.
+
+        Exactly one, or nothing.  Two compatible holders mean the question named
+        neither, and the whole point of enumerating is that a plausible holder
+        is a different holder's position reported as theirs.  The contract's own
+        firewall still applies underneath: ``영풍`` is not ``영풍정밀`` here for
+        the same reason it is not anywhere else.
+        """
+
+        key = canonical_reporter_key(reporter)
+        issuer = str(issuer_corp_code or "").strip()
+        if not key or not issuer:
+            return None
+        if (issuer, key) in self._by_pair:
+            return key
+        compatible = [
+            pair_key
+            for (pair_issuer, pair_key), records in sorted(self._by_pair.items())
+            if pair_issuer == issuer
+            and key.isascii()
+            and key.isalnum()
+            and pair_key.isascii()
+            and pair_key.isalnum()
+            and any(reporter_matches(record.raw_reporter, reporter) for record in records)
+        ]
+        return compatible[0] if len(compatible) == 1 else None
+
     def enumerate_reports(
         self, issuer_corp_code: str, reporter: str
     ) -> tuple[HoldingReportRecord, ...]:
         """Every report this corpus holds for one issuer and one holder.
 
-        The holder is compared on the frozen canonical key and nothing else --
-        no containment, no alias table -- so ``영풍`` never answers for
-        ``영풍정밀``.
+        The holder is resolved to one indexed key by
+        :meth:`resolve_reporter_key` and nothing else -- no containment, no
+        alias table -- so ``영풍`` never answers for ``영풍정밀``.
         """
 
-        key = canonical_reporter_key(reporter)
-        if not key or not issuer_corp_code:
+        key = self.resolve_reporter_key(issuer_corp_code, reporter)
+        if key is None:
             return ()
         return self._by_pair.get((str(issuer_corp_code), key), ())
 
@@ -489,7 +525,14 @@ class HoldingReportIndex:
         """The one report a selector names, or why there isn't one."""
 
         key = canonical_reporter_key(reporter)
-        base = {"selector": selector, "reporter_key": key}
+        # The key this issuer's timeline is actually stored under, so a refusal
+        # and a resolution both report the holder the corpus was searched for.
+        base = {
+            "selector": selector,
+            "reporter_key": (
+                self.resolve_reporter_key(issuer_corp_code, reporter) or key
+            ),
+        }
 
         if active_corpus_identity is not None and not self.matches_corpus(
             active_corpus_identity
@@ -730,6 +773,12 @@ def project_role(record: HoldingReportRecord, role: str) -> RoleProjection:
         })
 
     if role == ROLE_CHANGE:
+        if not record.has_previous_state:
+            # A first filing can write its whole current position in the change
+            # column.  That does not create a zero-valued predecessor, so a
+            # question asking for change against the previous report has no
+            # baseline from which this value can be interpreted.
+            return RoleProjection(CHANGE_UNAVAILABLE, role)
         if not (record.change_shares or record.change_ratio):
             return RoleProjection(CHANGE_UNAVAILABLE, role)
         return RoleProjection(PROJECTION_RESOLVED, role, {
@@ -799,6 +848,7 @@ def execute_report_relative(
     reporter: str,
     reference_date: str | None = None,
     receipt_date: str | None = None,
+    requested_fields: Sequence[str] = (),
     active_corpus_identity: Mapping[str, Any] | None = None,
 ) -> ReportExecution:
     """Carry out a parsed report-relative intent against one corpus.
@@ -846,12 +896,113 @@ def execute_report_relative(
         receipt_date=receipt_date,
         active_corpus_identity=active_corpus_identity,
     )
+    selection = _resolve_equivalent_requested_fact(
+        selection,
+        selector=selector,
+        role=role,
+        requested_fields=requested_fields,
+    )
     if not selection.resolved:
         return ReportExecution(selection.status, selection)
 
     projection = project_role(selection.selected, role)
     status = RESOLVED if projection.resolved else projection.status
     return ReportExecution(status, selection, projection)
+
+
+_ROLE_FACT_FIELDS: Mapping[str, Mapping[str, str]] = {
+    ROLE_CURRENT: {
+        "reference_date": "reference_date",
+        "after_shares": "after_shares",
+        "after_ratio": "after_ratio",
+    },
+    ROLE_PREVIOUS: {
+        "reference_date": "reference_date",
+        "before_shares": "before_shares",
+        "before_ratio": "before_ratio",
+    },
+    ROLE_CHANGE: {
+        "reference_date": "reference_date",
+        "change_shares": "change_shares",
+        "change_ratio": "change_ratio",
+    },
+}
+
+
+def _resolve_equivalent_requested_fact(
+    selection: ReportSelection,
+    *,
+    selector: str,
+    role: str,
+    requested_fields: Sequence[str],
+) -> ReportSelection:
+    """Resolve a tied exact-date fact only when every authoritative source agrees.
+
+    This does not identify the filings with each other.  Their document ids and
+    full candidate set stay on the selection; one stable candidate merely
+    carries provenance after all documents have independently proved the same
+    requested values.  Correction finality has already run in ``select_report``
+    and any unproven correction therefore never reaches this rule.
+    """
+
+    requested = tuple(
+        dict.fromkeys(str(field) for field in requested_fields if field)
+    )
+    field_map = _ROLE_FACT_FIELDS.get(role, {})
+    if (
+        selection.status != AMBIGUOUS
+        or selector != SELECTOR_EXACT_REFERENCE_DATE
+        or not requested
+        or any(field not in field_map for field in requested)
+    ):
+        return selection
+
+    by_document: dict[str, list[HoldingReportRecord]] = {}
+    for candidate in selection.candidates:
+        by_document.setdefault(candidate.doc_id, []).append(candidate)
+    if len(by_document) < 2:
+        return selection
+
+    authoritative: list[HoldingReportRecord] = []
+    for records in by_document.values():
+        expected = {record.document_event_projection_count for record in records}
+        if len(expected) != 1 or next(iter(expected), 0) != len(records):
+            return selection
+        if len(records) == 1:
+            if not records[0].is_canonical_body:
+                return selection
+            authoritative.append(records[0])
+            continue
+        current, _authority = _canonical_current_projection(records)
+        if current is None:
+            return selection
+        authoritative.append(current)
+
+    fingerprints = {
+        tuple(getattr(record, field_map[field]) for field in requested)
+        for record in authoritative
+    }
+    if len(fingerprints) != 1 or any(
+        value is None for value in next(iter(fingerprints))
+    ):
+        return selection
+
+    carrier = min(
+        authoritative,
+        key=lambda record: (record.doc_id, record.projection_chunk_id),
+    )
+    return replace(
+        selection,
+        status=RESOLVED,
+        selected=carrier,
+        detail={
+            **dict(selection.detail),
+            "fact_level_resolution": "authoritative_sources_agree",
+            "requested_fields": list(requested),
+            "equivalent_doc_ids": sorted(by_document),
+            "provenance_carrier_chunk_id": carrier.projection_chunk_id,
+        },
+    )
 
 
 def load_index(
