@@ -794,6 +794,25 @@ def _expanded_count(execution: Any) -> int:
             total += max(int(trace.get(key) or 0), 0)
         except (TypeError, ValueError):
             continue
+    # Amount-change operand recovery is also additive: it can append an
+    # explicitly scoped filing after the frozen Top-K.  Count exactly the
+    # results it actually added so public ``retrieved_context`` cannot truncate
+    # away evidence the deterministic arithmetic and citation registry used.
+    routing = getattr(execution, "routing", None)
+    if isinstance(routing, Mapping):
+        hybrid = routing.get("hybrid")
+        if isinstance(hybrid, Mapping):
+            recovery = hybrid.get("amount_change_operand_recovery")
+            if isinstance(recovery, Mapping):
+                added = recovery.get("added_chunk_ids") or ()
+                total += len(
+                    {
+                        str(chunk_id)
+                        for chunk_id in added
+                        if str(chunk_id)
+                    }
+                )
+
     return total
 
 

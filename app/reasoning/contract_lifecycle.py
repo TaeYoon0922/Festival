@@ -46,6 +46,11 @@ _ORIGIN_NAME = re.compile(r"공급계약체결")
 #: the document states it: an outcome may be reported without one.
 _EFFECTIVE_DATE_FIELD = re.compile(
     r"해지\s*(?:일자|일)\s*[:：]?\s*"
+    # Structured table text is rendered as:
+    #   | 6. 해지일자 |  | 2025-05-07 |
+    # Keep the match anchored to the formal field label, but permit the
+    # intervening rendered table-cell separators.
+    r"(?:\|\s*){0,3}"
     r"(?P<date>\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?)"
 )
 _DATE_PARTS = re.compile(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})")

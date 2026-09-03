@@ -453,6 +453,27 @@ class AgentOrchestrator:
             resolution=resolution,
             multi_document=multi_document,
         )
+
+        # A resolved scoped amount-change operation has already bound two
+        # different contract amounts to two explicitly named filing roles.
+        # The ordinary corporate-event field lane intentionally asks for one
+        # flat authoritative contract_amount, so those two legitimate values
+        # appear there as a conflict.  That flat conflict must not veto the
+        # more-specific scoped operation that already resolved and cited both.
+        #
+        # This applies only after contract_amount_change actually resolved;
+        # ordinary single-field corporate-event questions retain their exact
+        # previous conflict behavior.
+        if "contract_amount_change" in trace and field_evidence:
+            field_evidence = tuple(
+                finding
+                for finding in field_evidence
+                if not (
+                    finding.domain == "corporate_event"
+                    and finding.field == "contract_amount"
+                )
+            )
+
         if field_evidence:
             trace.append("field_evidence")
             # A refusal has to point at the evidence that proves it.  Ordinary
@@ -670,21 +691,58 @@ def orchestrate(
     )
 
 
-def _served_chunks(execution: Any, evidence: EvidenceSet) -> tuple[Any, ...]:
-    """The structured chunks behind the served evidence, in served order.
+def _served_chunks(
+    execution: Any, evidence: EvidenceSet
+) -> tuple[Mapping[str, Any], ...]:
+    """Return raw retrieval chunks for the evidence that was actually served.
 
-    Amount cells live on the chunk the chunker persisted, not on the evidence
-    item, so a value read for an operand is read from the same row the citation
-    points at.
+    ``HybridQueryExecution.chunks`` contains ``CandidateChunk`` objects rather
+    than mappings.  Arithmetic readers need the candidate's raw ``chunk``
+    mapping, while identity/date metadata is taken from the already-built
+    ``EvidenceItem`` so the scalar stays bound to exactly the evidence the
+    answer serves.
     """
 
-    by_id: dict[str, Any] = {}
-    for chunk in getattr(execution, "chunks", ()) or ():
-        chunk_id = str(chunk.get("chunk_id") or "") if hasattr(chunk, "get") else ""
+    by_id: dict[str, Mapping[str, Any]] = {}
+
+    for candidate in getattr(execution, "chunks", ()) or ():
+        if isinstance(candidate, Mapping):
+            chunk_id = str(candidate.get("chunk_id") or "")
+            payload = dict(candidate)
+        else:
+            chunk_id = str(getattr(candidate, "chunk_id", "") or "")
+            raw = getattr(candidate, "chunk", None)
+            if not isinstance(raw, Mapping):
+                continue
+            payload = dict(raw)
+            if chunk_id:
+                payload.setdefault("chunk_id", chunk_id)
+            doc_id = getattr(candidate, "doc_id", None)
+            if doc_id:
+                payload.setdefault("doc_id", str(doc_id))
+
         if chunk_id:
-            by_id[chunk_id] = chunk
-    ordered = [by_id[item.chunk_id] for item in evidence.served_items
-               if item.chunk_id in by_id]
+            by_id[chunk_id] = payload
+
+    ordered: list[Mapping[str, Any]] = []
+
+    for item in evidence.served_items:
+        payload = by_id.get(item.chunk_id)
+        if payload is None:
+            continue
+
+        # Candidate.chunk carries the table structure consumed by _amount_cells.
+        # EvidenceItem carries the canonical identity/date metadata already used
+        # by the answer and citation lanes.  Preserve both.
+        hydrated = dict(payload)
+        hydrated["chunk_id"] = item.chunk_id
+        hydrated["doc_id"] = item.doc_id
+        hydrated["corp_code"] = item.corp_code
+        hydrated["rcept_dt"] = item.rcept_dt
+        hydrated["report_nm"] = item.report_nm
+
+        ordered.append(hydrated)
+
     return tuple(ordered)
 
 
@@ -778,11 +836,47 @@ def _compose_amount_change(
         and len(cited) < _general_evidence_limit(evidence, task_type=task_type)
     )
     statement = compose_amount_change_text(delta)
-    text = statement if not base.answer_text else f"{statement}\n\n{base.answer_text}"
+    supporting_ids = tuple(
+        dict.fromkeys(
+            str(operand.source.chunk_id)
+            for operand in (delta.initial, delta.final)
+            if operand.source is not None and operand.source.chunk_id
+        )
+    )
+    section = AnswerSection(
+        title="계약금액 변경",
+        content={"summary": statement},
+        supporting_evidence_ids=supporting_ids,
+    )
+
+    # General evidence has a bounded display/citation set, but a scoped
+    # arithmetic result may use operands that sit beyond that display limit.
+    # The deterministic summary is only supported when both operand filings
+    # remain in the citation registry.  Preserve all existing citations and
+    # add only missing operand citations by exact chunk identity.
+    item_by_id = {
+        item.chunk_id: item
+        for item in evidence.served_items
+    }
+    existing_citation_ids = {
+        citation.chunk_id
+        for citation in base.citations
+    }
+    operand_citations = tuple(
+        _general_citation(item_by_id[chunk_id])
+        for chunk_id in supporting_ids
+        if chunk_id in item_by_id
+        and chunk_id not in existing_citation_ids
+    )
+    citations = (*base.citations, *operand_citations)
+
     return replace(
         base,
-        answer_text=text,
-        citations=tuple(_general_citation(item) for item in cited),
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*supporting_ids, *base.evidence_references))
+        ),
+        citations=citations,
     )
 
 
@@ -807,14 +901,41 @@ def _compose_lifecycle(
     statement = compose_lifecycle_text(outcome)
     if not statement:
         return base
-    cited = lifecycle_items(
-        outcome,
-        evidence.served_items,
-        limit=_general_evidence_limit(evidence, task_type=task_type),
+    supporting_ids = tuple(
+        dict.fromkeys(
+            str(item.chunk_id)
+            for item in outcome.documents
+            if getattr(item, "chunk_id", None)
+        )
     )
-    citations = tuple(_general_citation(item) for item in cited)
-    text = statement if not base.answer_text else f"{statement}\n\n{base.answer_text}"
-    return replace(base, answer_text=text, citations=citations)
+
+    # Keep every citation required by the existing General evidence section.
+    # A lifecycle document that sat beyond the general display limit is added,
+    # never substituted for one of those existing citations.
+    existing_refs = set(base.evidence_references)
+    lifecycle_extra_citations = tuple(
+        _general_citation(item)
+        for item in outcome.documents
+        if getattr(item, "chunk_id", None)
+        and str(item.chunk_id) not in existing_refs
+    )
+    citations = (*base.citations, *lifecycle_extra_citations)
+    section = AnswerSection(
+        title="계약 최종 상태",
+        content={
+            "summary": statement,
+            **outcome.to_dict(),
+        },
+        supporting_evidence_ids=supporting_ids,
+    )
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*supporting_ids, *base.evidence_references))
+        ),
+        citations=citations,
+    )
 
 
 def _compose_general_evidence(
