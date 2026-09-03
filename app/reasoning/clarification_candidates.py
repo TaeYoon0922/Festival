@@ -205,12 +205,17 @@ def _event_instance_request(
         for document in (getattr(execution, "documents", ()) or ())
     }
     bounded = events[:MAX_CANDIDATES]
-    labels = [_event_label(event, document_metadata) for event in bounded]
+    seeds = [_event_seed_doc_id(event, document_metadata) for event in bounded]
+    labels = [
+        _event_label(document_metadata.get(seed) or {}) if seed else None
+        for seed in seeds
+    ]
     if any(label is None for label in labels):
         return None
     public_labels = tuple(str(label) for label in labels)
     if len({_event_label_key(label) for label in public_labels}) != len(public_labels):
         return None
+    sources = [_seed_source(seed, execution) for seed in seeds]
     candidates = tuple(
         ClarificationCandidate(
             id=f"E{index}",
@@ -218,9 +223,11 @@ def _event_instance_request(
             semantic_type=EVENT_INSTANCE,
             provenance="corporate_event_graph",
             value=str(event["event_id"]),
+            source_doc_id=source[1] if source else None,
+            source_chunk_id=source[0] if source else None,
         )
-        for index, (event, label) in enumerate(
-            zip(bounded, public_labels), start=1
+        for index, (event, label, source) in enumerate(
+            zip(bounded, public_labels, sources), start=1
         )
     )
     return ClarificationRequest(
@@ -233,18 +240,56 @@ def _event_instance_request(
     )
 
 
-def _event_label(
+def _event_seed_doc_id(
     event: Mapping[str, Any],
     metadata_by_doc: Mapping[str, Mapping[str, Any]],
 ) -> str | None:
-    metadata: Mapping[str, Any] = {}
+    """The one filing this graph root is named and cited by.
+
+    ``seed_member_doc_id`` is the lifecycle member the seed collapsed to, so a
+    correction chain has already become a single identity here and cannot be
+    offered twice.  Label and provenance both read this, which is what keeps
+    the marker beside a label pointing at the filing that label describes.
+    """
+
     for key in ("seed_member_doc_id", "seed_doc_id"):
         doc_id = str(event.get(key) or "").strip()
         if doc_id and doc_id in metadata_by_doc:
-            candidate = metadata_by_doc[doc_id]
-            if candidate.get("report_nm") or candidate.get("rcept_dt"):
-                metadata = candidate
-                break
+            metadata = metadata_by_doc[doc_id]
+            if metadata.get("report_nm") or metadata.get("rcept_dt"):
+                return doc_id
+    return None
+
+
+def _seed_source(doc_id: str | None, execution: Any) -> tuple[str, str] | None:
+    """The served chunk that evidences one seed filing, if there is one.
+
+    The filing is chosen by the graph, never by rank; rank only orders the
+    chunks *inside* that already-chosen filing, so the best-ranked one is the
+    row the public context would have shown for it anyway.  A filing retrieval
+    never served has no source, and the caller must not invent one.
+    """
+
+    if not doc_id:
+        return None
+    served = {
+        str(candidate.chunk_id)
+        for candidate in (getattr(execution, "chunks", ()) or ())
+        if str(candidate.doc_id) == doc_id
+    }
+    ranked = sorted(
+        (
+            (int(result.rank), str(result.chunk_id))
+            for result in (getattr(execution, "results", ()) or ())
+            if str(result.doc_id) == doc_id and str(result.chunk_id) in served
+        ),
+    )
+    if not ranked:
+        return None
+    return (ranked[0][1], doc_id)
+
+
+def _event_label(metadata: Mapping[str, Any]) -> str | None:
     report = str(metadata.get("report_nm") or "").strip()
     receipt = _date_text(metadata.get("rcept_dt"))
     if report and receipt:

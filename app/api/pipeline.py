@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -42,6 +43,7 @@ from app.reasoning.clarification_candidates import (
     validation_clarification_request,
 )
 from app.reasoning.clarification_request import (
+    EVENT_INSTANCE,
     ClarificationDecision,
     ClarificationState,
     clarification_text,
@@ -97,6 +99,7 @@ from app.retrieval.embeddings import (
     create_embedding_provider,
 )
 from app.retrieval.hybrid import HybridQueryExecutor
+from app.retrieval.interfaces import RetrievalResult
 from app.retrieval.postgres_backend import PostgresBackend
 
 
@@ -735,9 +738,25 @@ class AnswerPipeline:
         answerability: AnswerabilityResult | None,
         decision: ClarificationDecision,
     ) -> dict[str, Any]:
+        context: list[dict[str, Any]] = []
+        unmapped = False
         if decision.state is ClarificationState.CLARIFY:
             answer = clarification_text(decision)
             route = "clarification"
+            proven = _clarification_candidate_evidence(execution, decision)
+            if proven is not None:
+                rows, citations, markers = proven
+                cited, alignment = align_public_citations(
+                    clarification_text(decision, citation_markers=markers),
+                    citations,
+                    rows,
+                )
+                # A marker that cannot be joined to a served row would be a
+                # claim about evidence nobody can check.  Drop the whole
+                # attempt rather than serve half of it.
+                unmapped = bool(alignment["unmapped"])
+                if not unmapped:
+                    answer, context = cited, rows
         elif decision.state is ClarificationState.UNSUPPORTED:
             answer = "현재 시스템이 지원하는 공시 의미로 요청을 해석할 수 없습니다."
             route = "unsupported"
@@ -761,12 +780,18 @@ class AnswerPipeline:
         )
         trace["route"] = route
         trace["answerable"] = False
+        if unmapped:
+            trace["warnings"] = list(
+                dict.fromkeys([*trace["warnings"], "citation_alignment_unmapped"])
+            )
         return {
             "question_id": question_id,
             "question": question,
             # The semantic choice is unresolved, so no candidate's evidence is
-            # exposed as though it were the answer.
-            "retrieved_context": [],
+            # exposed as though it were the answer.  What may be exposed is the
+            # opposite claim: the filings that prove the choice exists, bounded
+            # to exactly those, and only when each one is cited.
+            "retrieved_context": context,
             "think_trace": trace,
             "answer": answer,
         }
@@ -943,6 +968,96 @@ def final_evidence(execution: Any, result: Any) -> Any:
     ):
         return execution
     return _FinalEvidence(execution, chunks, results)
+
+
+def _clarification_candidate_evidence(
+    execution: Any,
+    decision: ClarificationDecision,
+) -> tuple[list[dict[str, Any]], tuple[GeneratedCitation, ...], dict[str, str]] | None:
+    """The filings that prove one event-instance choice, and nothing else.
+
+    Citing a candidate's filing asserts that the filing exists and describes a
+    contract distinct from the other candidate's -- never that its 계약금액 is
+    the answer.  That is why the served rows here are the candidates and only
+    the candidates: exposing the ranked Top-K instead would put the amounts of
+    unrelated filings behind an answer that deliberately states none.
+
+    Returns ``None`` -- leaving the caller on its original uncited path -- for
+    any choice that is not between filings, and for any candidate the provider
+    could not bind to a chunk this execution actually served.  A citation is a
+    claim about evidence, so an unbound candidate ends the attempt rather than
+    borrowing a neighbour's row.
+    """
+
+    candidates = decision.candidates
+    if not candidates or any(
+        candidate.semantic_type != EVENT_INSTANCE for candidate in candidates
+    ):
+        return None
+    chunks_by_id = {
+        str(candidate.chunk_id): candidate
+        for candidate in (getattr(execution, "chunks", ()) or ())
+    }
+    scores: dict[str, float] = {}
+    for result in getattr(execution, "results", ()) or ():
+        scores.setdefault(str(result.chunk_id), float(result.bm25_score))
+
+    served: list[Any] = []
+    ranks: dict[tuple[str, str], int] = {}
+    markers: dict[str, str] = {}
+    citations: list[GeneratedCitation] = []
+    for candidate in candidates:
+        identity = candidate.source
+        if identity is None:
+            return None
+        chunk_id, doc_id = identity
+        chunk = chunks_by_id.get(chunk_id)
+        if chunk is None or str(chunk.doc_id) != doc_id:
+            return None
+        rank = ranks.get(identity)
+        if rank is None:
+            # Two candidates that collapsed onto one filing share its row, so
+            # the same logical root is never served or numbered twice.
+            rank = len(served) + 1
+            ranks[identity] = rank
+            served.append(chunk)
+            citations.append(
+                GeneratedCitation(
+                    citation_id=f"[{rank}]",
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    source_refs=tuple(
+                        copy.deepcopy(list(dict(chunk.chunk).get("source_refs") or []))
+                    ),
+                    section=_chunk_section(chunk.chunk),
+                    evidence_type="clarification_candidate",
+                )
+            )
+        markers[candidate.id] = f"[{rank}]"
+
+    results = tuple(
+        RetrievalResult(
+            chunk_id=str(chunk.chunk_id),
+            doc_id=str(chunk.doc_id),
+            bm25_score=scores.get(str(chunk.chunk_id), 0.0),
+            rank=rank,
+            metadata_match={},
+        )
+        for rank, chunk in enumerate(served, start=1)
+    )
+    rows = retrieved_context(
+        SimpleNamespace(chunks=tuple(served), results=results), len(results)
+    )
+    return rows, tuple(citations), markers
+
+
+def _chunk_section(chunk: Any) -> str:
+    """The section label the citation names, in the generator's own shape."""
+
+    path = dict(chunk or {}).get("section_path") or []
+    if isinstance(path, str):
+        return path
+    return " > ".join(str(part) for part in path if part)
 
 
 def retrieved_context(execution: Any, limit: int) -> list[dict[str, Any]]:

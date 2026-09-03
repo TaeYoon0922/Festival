@@ -374,7 +374,15 @@ class ClarificationPipelineTests(unittest.TestCase):
         self.assertIn("공급계약 B", payload["answer"])
         self.assertNotIn("100", payload["answer"])
         self.assertNotIn("200", payload["answer"])
-        self.assertEqual(payload["retrieved_context"], [])
+        # The two filings that proved the ambiguity are cited, and they are the
+        # only evidence served: the choice is still unresolved, so nothing here
+        # is offered as the contract amount.
+        self.assertEqual(
+            [(row["rank"], row["doc_id"]) for row in payload["retrieved_context"]],
+            [(1, "e1"), (2, "e2")],
+        )
+        self.assertIn("[1]", payload["answer"])
+        self.assertIn("[2]", payload["answer"])
         self.assertNotIn("evt_a", payload["answer"])
         self.assertNotIn("evt_b", payload["answer"])
         self.assertTrue(
