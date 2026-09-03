@@ -609,3 +609,145 @@ class CandidateChunkMergeTest(unittest.TestCase):
 
         self.assertEqual(len(execution.chunks), 2)
         self.assertTrue(all(isinstance(c, dict) for c in execution.chunks))
+
+
+class MergeOrderingTest(unittest.TestCase):
+    """Every company's best document must survive the evidence limit."""
+
+    #: What the evidence builder keeps for a general-evidence answer. The merge
+    #: has to put each company's own rank-1 inside this many positions.
+    GENERAL_EVIDENCE_LIMIT = 5
+
+    def candidate(self, code, index):
+        from app.retrieval.interfaces import CandidateChunk, MetadataMatch
+
+        payload = chunk(f"{code}{index}", "100", corp_code=code)
+        return CandidateChunk(
+            chunk_id=payload["chunk_id"],
+            doc_id=payload["doc_id"],
+            chunk=payload,
+            metadata_match=MetadataMatch(),
+        )
+
+    def execution_for(self, code, depth):
+        from app.retrieval.interfaces import RetrievalResult
+
+        candidates = [self.candidate(code, index) for index in range(1, depth + 1)]
+        return SimpleNamespace(
+            documents=(),
+            chunks=tuple(candidates),
+            results=tuple(
+                RetrievalResult(
+                    chunk_id=candidate.chunk_id, doc_id=candidate.doc_id,
+                    bm25_score=1.0, rank=index + 1, metadata_match={},
+                )
+                for index, candidate in enumerate(candidates)
+            ),
+        )
+
+    def merged(self, codes, depth=10):
+        from app.api.pipeline import AnswerPipeline
+        from app.reasoning.query_plan import QueryPlan
+
+        pipeline = AnswerPipeline(
+            understanding=SimpleNamespace(),
+            executor=SimpleNamespace(
+                execute=lambda plan: self.execution_for(plan.corp_codes[0], depth)
+            ),
+        )
+        plan = QueryPlan(
+            query="원본 질의",
+            raw_query="원본 질의",
+            companies=tuple(NAMES[code] for code in codes),
+            corp_codes=tuple(codes),
+            task_type="corporate_event",
+            disclosure_route=("exchange",),
+        )
+        return pipeline._comparison_execution(request(*codes), plan)
+
+    def test_two_companies_interleave_by_rank(self):
+        execution = self.merged((A, B))
+        order = [result.chunk_id for result in execution.results]
+
+        self.assertEqual(
+            order[:6],
+            [f"{A}1:c", f"{B}1:c", f"{A}2:c", f"{B}2:c", f"{A}3:c", f"{B}3:c"],
+        )
+
+    def test_four_companies_lead_with_every_first_hit(self):
+        execution = self.merged((A, B, C, D))
+        order = [result.chunk_id for result in execution.results]
+
+        self.assertEqual(
+            order[:4], [f"{A}1:c", f"{B}1:c", f"{C}1:c", f"{D}1:c"]
+        )
+
+    def test_every_company_rank_one_survives_the_evidence_limit(self):
+        """The starvation that made a two-company answer cite one company."""
+
+        for codes in ((A, B), (A, B, C, D)):
+            with self.subTest(companies=len(codes)):
+                execution = self.merged(codes)
+                kept = [
+                    result.doc_id
+                    for result in execution.results[: self.GENERAL_EVIDENCE_LIMIT]
+                ]
+                for code in codes:
+                    self.assertIn(f"{code}1", kept)
+
+    def test_ranks_are_renumbered_over_the_merged_order(self):
+        execution = self.merged((A, B), depth=3)
+
+        self.assertEqual(
+            [result.rank for result in execution.results], [1, 2, 3, 4, 5, 6]
+        )
+
+    def test_each_companys_own_order_is_preserved(self):
+        execution = self.merged((A, B))
+        a_order = [
+            result.chunk_id
+            for result in execution.results
+            if result.doc_id.startswith(A)
+        ]
+
+        self.assertEqual(a_order, [f"{A}{index}:c" for index in range(1, 11)])
+
+    def test_chunks_follow_the_merged_result_order(self):
+        from app.retrieval.interfaces import CandidateChunk
+
+        execution = self.merged((A, B))
+
+        self.assertEqual(
+            [candidate.chunk_id for candidate in execution.chunks],
+            [result.chunk_id for result in execution.results],
+        )
+        self.assertTrue(
+            all(isinstance(c, CandidateChunk) for c in execution.chunks)
+        )
+
+    def test_a_shorter_company_does_not_stop_the_interleave(self):
+        """One company returning fewer results must not truncate the others."""
+
+        from app.api.pipeline import AnswerPipeline
+        from app.reasoning.query_plan import QueryPlan
+
+        depths = {A: 1, B: 4}
+        pipeline = AnswerPipeline(
+            understanding=SimpleNamespace(),
+            executor=SimpleNamespace(
+                execute=lambda plan: self.execution_for(
+                    plan.corp_codes[0], depths[plan.corp_codes[0]]
+                )
+            ),
+        )
+        plan = QueryPlan(
+            query="q", raw_query="q",
+            companies=(NAMES[A], NAMES[B]), corp_codes=(A, B),
+            task_type="corporate_event", disclosure_route=("exchange",),
+        )
+        execution = pipeline._comparison_execution(request(A, B), plan)
+
+        self.assertEqual(
+            [result.chunk_id for result in execution.results],
+            [f"{A}1:c", f"{B}1:c", f"{B}2:c", f"{B}3:c", f"{B}4:c"],
+        )

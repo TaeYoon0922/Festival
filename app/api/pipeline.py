@@ -464,14 +464,15 @@ class AnswerPipeline:
         four companies.
         """
 
+        from itertools import zip_longest
+
         from app.reasoning.query_plan import QueryExecution
         from app.retrieval.interfaces import RetrievalResult
 
         documents: list[Any] = []
-        chunks: list[Any] = []
-        results: list[RetrievalResult] = []
         seen_documents: set[str] = set()
-        seen_chunks: set[str] = set()
+        per_company_results: list[list[Any]] = []
+        candidates: dict[str, Any] = {}
         for execution in executions_for(
             comparison, plan, self.executor.execute
         ).values():
@@ -483,18 +484,37 @@ class AnswerPipeline:
                     documents.append(document)
             for chunk in getattr(execution, "chunks", ()) or ():
                 chunk_id, _doc_id = _chunk_identity(chunk)
-                if chunk_id and chunk_id not in seen_chunks:
-                    seen_chunks.add(chunk_id)
+                if chunk_id:
                     # The candidate itself, not a mapping made from it: every
                     # stage after this one reads ``CandidateChunk`` attributes,
                     # and flattening here would hand them a shape they do not
                     # expect. Only identity is read out; the object is kept.
-                    chunks.append(chunk)
-            for result in getattr(execution, "results", ()) or ():
-                results.append(result)
+                    candidates.setdefault(chunk_id, chunk)
+            per_company_results.append(
+                list(getattr(execution, "results", ()) or ())
+            )
+
+        # Interleave by rank instead of concatenating one company after
+        # another. Concatenation starves every company but the first: each
+        # retrieval returns ten results for its own company, so the second
+        # company's best document sits at merged position eleven and never
+        # survives the evidence limit -- which is how a two-company comparison
+        # came back citing one company twice. Taking each company's best first
+        # puts every operand's own top hit inside the first N positions, for any
+        # number of companies. Each company's internal order is untouched.
+        ordered: list[Any] = []
+        seen_results: set[str] = set()
+        for row in zip_longest(*per_company_results):
+            for result in row:
+                if result is None:
+                    continue
+                chunk_id = str(getattr(result, "chunk_id", "") or "")
+                if chunk_id and chunk_id not in seen_results:
+                    seen_results.add(chunk_id)
+                    ordered.append(result)
+
         # Ranks came from separate retrievals and would otherwise collide;
-        # renumbering keeps one coherent served order without reordering any
-        # company's own results relative to each other.
+        # renumbering states the merged order the evidence builder will read.
         ranked = tuple(
             RetrievalResult(
                 chunk_id=result.chunk_id,
@@ -503,7 +523,19 @@ class AnswerPipeline:
                 rank=index + 1,
                 metadata_match=result.metadata_match,
             )
-            for index, result in enumerate(results)
+            for index, result in enumerate(ordered)
+        )
+        # Chunks follow the merged result order, so evidence is built in the
+        # same sequence the ranks describe.
+        chunks = [
+            candidates[result.chunk_id]
+            for result in ranked
+            if result.chunk_id in candidates
+        ]
+        chunks.extend(
+            candidate
+            for chunk_id, candidate in candidates.items()
+            if chunk_id not in seen_results
         )
         return QueryExecution(
             plan=plan,
