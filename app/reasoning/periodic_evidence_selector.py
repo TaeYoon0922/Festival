@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
+from app.reasoning.affiliate_group import affiliate_counts
+from app.reasoning.metric_disambiguation import AFFILIATE_COUNT
 from app.reasoning.periodic_fact_resolver import (
     PeriodicFact,
     PeriodicFactAlternative,
@@ -212,7 +214,14 @@ def select_periodic_evidence(
         ]
         candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
     metric = str(plan.get("metric") or "").strip()
-    if _is_statement_metric_query(plan, signals):
+    affiliate_rows = (
+        _affiliate_count_rows(candidates) if _is_affiliate_count_query(plan) else []
+    )
+    if affiliate_rows:
+        candidates = affiliate_rows
+        selected_rows = candidates[:1]
+        warnings_seed = ["affiliate_count_row_preferred"]
+    elif _is_statement_metric_query(plan, signals):
         exact_rows = [
             row
             for row in candidates
@@ -265,7 +274,8 @@ def select_periodic_evidence(
         tuple(selected_facts),
         explicit_period=explicit_period,
         suppress_temporal_ambiguity=(
-            _is_statement_metric_query(plan, signals) and len(selected_facts) == 1
+            (bool(affiliate_rows) or _is_statement_metric_query(plan, signals))
+            and len(selected_facts) == 1
         ),
         selection_warnings=warnings,
     )
@@ -526,6 +536,45 @@ def _source_period_year(source: PeriodicFactSource) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _is_affiliate_count_query(plan: Mapping[str, Any]) -> bool:
+    """True when query understanding read the question as 계열회사 수."""
+
+    evidence = plan.get("evidence")
+    evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+    return str(evidence.get("periodic_intent") or "") == AFFILIATE_COUNT
+
+
+def _affiliate_count_rows(
+    candidates: Sequence[tuple[float, int, str, PeriodicFact, PeriodicFactSource]],
+) -> list[tuple[float, int, str, PeriodicFact, PeriodicFactSource]]:
+    """The candidates whose own table row states the affiliate counts.
+
+    How many affiliates a 기업집단 has is one row of one 계열회사 현황 table:
+    :func:`app.reasoning.affiliate_group.affiliate_counts` reads the listed
+    count, the unlisted count and their total out of the row they were
+    persisted in.  A source that row cannot be read from does not support this
+    question, so it is not a source to cite for it either.
+
+    Every periodic report of a group restates that row for its own period, and
+    the question names none.  Composing several of them side by side answers a
+    question nobody asked -- how the count moved -- and cites periods the
+    stated total was never read from.  An interim report states the group as it
+    stood at a quarter end; the 사업보고서 states it for the fiscal year the
+    report covers, which is the statement that is not an excerpt of a longer
+    one.  That is the preference :func:`_is_fiscal_year_query` already applies
+    to annual sources, applied here for the same reason.  Where no annual
+    source was retrieved the readable rows stand on their own.
+    """
+
+    counted = [
+        row
+        for row in candidates
+        if affiliate_counts(source_chunk_view(row[4])) is not None
+    ]
+    annual = [row for row in counted if _is_annual_source(row[4])]
+    return annual or counted
 
 
 def _is_fiscal_year_query(plan: Mapping[str, Any]) -> bool:
