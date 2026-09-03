@@ -482,9 +482,13 @@ class AnswerPipeline:
                     seen_documents.add(str(document.doc_id))
                     documents.append(document)
             for chunk in getattr(execution, "chunks", ()) or ():
-                chunk_id = str(chunk.get("chunk_id") or "")
+                chunk_id, _doc_id = _chunk_identity(chunk)
                 if chunk_id and chunk_id not in seen_chunks:
                     seen_chunks.add(chunk_id)
+                    # The candidate itself, not a mapping made from it: every
+                    # stage after this one reads ``CandidateChunk`` attributes,
+                    # and flattening here would hand them a shape they do not
+                    # expect. Only identity is read out; the object is kept.
                     chunks.append(chunk)
             for result in getattr(execution, "results", ()) or ():
                 results.append(result)
@@ -1162,6 +1166,26 @@ def think_trace(
             stages.append("hcx_clarification_classifier")
         trace["clarification"] = clarification_decision.to_public_dict()
     return trace
+
+
+def _chunk_identity(chunk: Any) -> tuple[str, str]:
+    """``(chunk_id, doc_id)`` from a retrieval chunk in either shape.
+
+    ``HybridQueryExecutor`` yields ``CandidateChunk`` dataclasses whose payload
+    sits under ``.chunk``; unit fixtures and some backends yield the payload
+    mapping directly. The candidate's own attributes win when present, because
+    they are the identity retrieval assigned, and the payload is consulted only
+    to fill a gap.
+    """
+
+    if isinstance(chunk, Mapping):
+        return str(chunk.get("chunk_id") or ""), str(chunk.get("doc_id") or "")
+    payload = getattr(chunk, "chunk", None)
+    if not isinstance(payload, Mapping):
+        payload = {}
+    chunk_id = str(getattr(chunk, "chunk_id", "") or payload.get("chunk_id") or "")
+    doc_id = str(getattr(chunk, "doc_id", "") or payload.get("doc_id") or "")
+    return chunk_id, doc_id
 
 
 def _route(result: Any) -> str:

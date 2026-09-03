@@ -501,3 +501,111 @@ class ComparisonDraftTest(unittest.TestCase):
 
         self.assertFalse(draft.answerable)
         self.assertIn("company_comparison_incomplete", draft.warnings)
+
+
+class CandidateChunkMergeTest(unittest.TestCase):
+    """Real retrieval yields CandidateChunk dataclasses, not mappings."""
+
+    def candidate(self, code, amount):
+        from app.retrieval.interfaces import CandidateChunk, MetadataMatch
+
+        payload = chunk(code, amount, corp_code=code)
+        return CandidateChunk(
+            chunk_id=payload["chunk_id"],
+            doc_id=payload["doc_id"],
+            chunk=payload,
+            metadata_match=MetadataMatch(),
+        )
+
+    def pipeline(self, executions):
+        from app.api.pipeline import AnswerPipeline
+
+        return AnswerPipeline(
+            understanding=SimpleNamespace(),
+            executor=SimpleNamespace(execute=executions),
+        )
+
+    def plan(self):
+        from app.reasoning.query_plan import QueryPlan
+
+        return QueryPlan(
+            query="원본 질의",
+            raw_query="원본 질의",
+            companies=("가상항공", "가상로템"),
+            corp_codes=(A, B),
+            task_type="corporate_event",
+            disclosure_route=("exchange",),
+        )
+
+    def merged(self):
+        from app.retrieval.interfaces import RetrievalResult
+
+        def execute(plan):
+            code = plan.corp_codes[0]
+            candidate = self.candidate(code, "100" if code == A else "300")
+            return SimpleNamespace(
+                documents=(),
+                chunks=(candidate,),
+                results=(
+                    RetrievalResult(
+                        chunk_id=candidate.chunk_id, doc_id=candidate.doc_id,
+                        bm25_score=1.0, rank=1, metadata_match={},
+                    ),
+                ),
+            )
+
+        return self.pipeline(execute)._comparison_execution(
+            request(A, B), self.plan()
+        )
+
+    def test_merge_accepts_candidate_chunks(self):
+        execution = self.merged()
+
+        self.assertEqual(len(execution.chunks), 2)
+
+    def test_merge_preserves_the_candidate_object(self):
+        """Downstream reads CandidateChunk attributes; flattening breaks them."""
+
+        from app.retrieval.interfaces import CandidateChunk
+
+        for candidate in self.merged().chunks:
+            self.assertIsInstance(candidate, CandidateChunk)
+            self.assertIsInstance(candidate.chunk, dict)
+
+    def test_merge_preserves_chunk_and_doc_provenance(self):
+        execution = self.merged()
+
+        self.assertEqual(
+            {candidate.doc_id for candidate in execution.chunks}, {A, B}
+        )
+        self.assertEqual(
+            {candidate.chunk_id for candidate in execution.chunks},
+            {f"{A}:c", f"{B}:c"},
+        )
+        self.assertEqual([result.rank for result in execution.results], [1, 2])
+
+    def test_mapping_chunks_still_merge(self):
+        """The mapping shape unit fixtures use keeps working."""
+
+        from app.retrieval.interfaces import RetrievalResult
+
+        def execute(plan):
+            code = plan.corp_codes[0]
+            payload = chunk(code, "100", corp_code=code)
+            return SimpleNamespace(
+                documents=(),
+                chunks=(payload,),
+                results=(
+                    RetrievalResult(
+                        chunk_id=payload["chunk_id"], doc_id=payload["doc_id"],
+                        bm25_score=1.0, rank=1, metadata_match={},
+                    ),
+                ),
+            )
+
+        execution = self.pipeline(execute)._comparison_execution(
+            request(A, B), self.plan()
+        )
+
+        self.assertEqual(len(execution.chunks), 2)
+        self.assertTrue(all(isinstance(c, dict) for c in execution.chunks))
