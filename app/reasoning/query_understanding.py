@@ -18,6 +18,11 @@ from app.reasoning.contract_lifecycle import (
     lifecycle_outcome_requested,
 )
 from app.reasoning.holding_reporter import canonical_reporter_key
+from app.reasoning.metric_disambiguation import (
+    AFFILIATE_COUNT,
+    affiliate_count_intent,
+    contract_sales_ratio_intent,
+)
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -200,6 +205,10 @@ _PERIODIC_SECTION_BOOSTS: dict[str, dict[str, float]] = {
     },
     "listing_history": {
         "회사의 개요": 1.0,
+    },
+    AFFILIATE_COUNT: {
+        "계열회사": 1.0,
+        "기업집단": 0.95,
     },
     "merger_history": {
         "회사의 연혁": 1.0,
@@ -495,6 +504,12 @@ def understand_query(
 
 
 def _find_financial_metric(query: str) -> tuple[str | None, str | None]:
+    if contract_sales_ratio_intent(query) is not None:
+        # "매출액 대비" in a question that names a contract is that contract's
+        # own ratio field, not the periodic revenue line the token also names.
+        # The longer phrase wins, so the question never becomes a periodic
+        # metric question on the strength of the word inside it.
+        return None, None
     compact = re.sub(r"\s+", "", query).casefold()
     for canonical, aliases in _FINANCIAL_METRICS:
         match = next((alias for alias in aliases if alias.casefold() in compact), None)
@@ -543,6 +558,12 @@ def _find_event(query: str) -> tuple[str | None, str | None, str | None]:
         match = next((alias for alias in aliases if alias.casefold() in compact), None)
         if match:
             return event_type, match, route
+    ratio = contract_sales_ratio_intent(query)
+    if ratio:
+        # A contract asked for its 매출액대비(%) cell is a contract question.
+        # Unrouted it reaches the periodic reports that also state 매출액, which
+        # is the one place the answer is certain not to be.
+        return "supply_contract", ratio.phrase, "exchange"
     change = _contract_amount_change_event(query, compact)
     if change:
         # A question comparing one contract's amount across two of its filings
@@ -970,6 +991,12 @@ def _acquisition_unit_price_phrase(tail: str) -> str | None:
 
 
 def _find_periodic_intent(query: str) -> tuple[str | None, str | None]:
+    affiliate = affiliate_count_intent(query)
+    if affiliate is not None:
+        # "상장과 비상장" beside 계열회사 names two columns of one count table.
+        # Read as listing history it answers with a listing date, which is a
+        # different field of a different section.
+        return AFFILIATE_COUNT, affiliate.phrase
     for intent, patterns in _PERIODIC_INTENTS:
         for pattern in patterns:
             match = re.search(pattern, query, flags=re.IGNORECASE)

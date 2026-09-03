@@ -38,16 +38,42 @@ from app.reasoning.field_evidence import (
     FieldReason,
     FieldStatus,
 )
+from app.reasoning.metric_disambiguation import contract_sales_ratio_intent
 
 
-#: The one canonical corporate-event field STEP 11-C answers.
+#: The formal contract-amount field.
 CONTRACT_AMOUNT = "contract_amount"
+
+#: What the contract is worth against the issuer's own recent revenue -- the
+#: filing's ``매출액대비(%)`` cell.  A separate field rather than a reading of
+#: the amount: it is stated in its own row, in its own unit, and a filing can
+#: carry either one without the other.
+SALES_RATIO = "sales_ratio"
 
 #: Generic wording that requests the contract amount itself.  Deliberately one
 #: term: the fielded lane exists to make a specific formal cell authoritative,
 #: and a question about a start date, a counterparty or a reason is not asking
 #: about that cell.  Whitespace is compacted, so "계약 금액" reads the same.
 _CONTRACT_AMOUNT_QUERY_TERM = "계약금액"
+
+#: The ratio row's own label.  ``_label_key`` drops the leading ordinal, so a
+#: filing's "5. 매출액대비(%)" and a bare "매출액대비(%)" are the same cell.
+_SALES_RATIO_LABELS = ("매출액대비(%)", "매출액대비", "최근매출액대비(%)")
+
+#: Which labelled cell each canonical field is read from.  Adding a field is
+#: adding an entry here plus the wording that requests it; nothing about how a
+#: cell is found, bound to its row, or judged blank changes per field.
+_FIELD_LABELS: dict[str, tuple[str, ...]] = {
+    CONTRACT_AMOUNT: _AMOUNT_LABELS,
+    SALES_RATIO: _SALES_RATIO_LABELS,
+}
+
+#: The wording that names each field in a deferral note, so a "추후 공시" remark
+#: is only read as covering the field it actually names.
+_FIELD_QUERY_TERMS: dict[str, str] = {
+    CONTRACT_AMOUNT: _CONTRACT_AMOUNT_QUERY_TERM,
+    SALES_RATIO: "매출액대비",
+}
 
 #: A cell that exists and states nothing.  This is the corpus's own blank.
 _BLANK_CELLS = frozenset({"-", "--", "―", "—", ""})
@@ -69,9 +95,15 @@ def requested_corporate_fields(question: Any) -> tuple[str, ...]:
     """
 
     compact = _compact(question or "")
+    fields: list[str] = []
     if _CONTRACT_AMOUNT_QUERY_TERM in compact:
-        return (CONTRACT_AMOUNT,)
-    return ()
+        fields.append(CONTRACT_AMOUNT)
+    if contract_sales_ratio_intent(question) is not None:
+        # "매출액 대비" beside a named contract asks this filing for its own
+        # ratio cell.  The same phrase without a contract is a periodic metric
+        # and never reaches here, which is where that distinction is made.
+        fields.append(SALES_RATIO)
+    return tuple(fields)
 
 
 def corporate_event_field_evidence(
@@ -110,7 +142,7 @@ def corporate_event_field_evidence(
         # carries no formal amount cell is not competing for this selection, so
         # requiring authority for it would fail closed on ordinary neighbouring
         # evidence rather than on a real rival.
-        candidate_doc_ids=_field_bearing_docs(evidence_items),
+        candidate_doc_ids=_field_bearing_docs(evidence_items, fields),
         selection_intent=_selection_intent(plan),
     )
     if authority.conflict:
@@ -119,12 +151,14 @@ def corporate_event_field_evidence(
     if member is None:
         return ()
 
-    # One field, one reader.  A second canonical field would add its own entry
-    # here rather than widen the reader this one uses.
-    readers = {CONTRACT_AMOUNT: _contract_amount_evidence}
+    # One reader, one labelled cell per field.  Which cell a field is read
+    # from is _FIELD_LABELS' answer; the reading itself is the same work for
+    # every field, down to the row it is bound to.
     records: list[FieldEvidence] = []
     for field in fields:
-        records.extend(readers[field](member, evidence_items=evidence_items))
+        records.extend(
+            _field_evidence(member, field, evidence_items=evidence_items)
+        )
     return tuple(records)
 
 
@@ -172,8 +206,10 @@ def _selection_intent(plan: Any) -> CorporateSelectionIntent:
     )
 
 
-def _field_bearing_docs(evidence_items: Sequence[Any]) -> tuple[str, ...]:
-    """Served filings whose own structured rows carry the formal amount field.
+def _field_bearing_docs(
+    evidence_items: Sequence[Any], fields: Sequence[str]
+) -> tuple[str, ...]:
+    """Served filings whose own structured rows carry a requested field.
 
     Read with the same labelled-cell lookup the extraction uses, so "could this
     filing answer the question" and "what does this filing say" are the same
@@ -188,7 +224,9 @@ def _field_bearing_docs(evidence_items: Sequence[Any]) -> tuple[str, ...]:
         if not doc_id or doc_id in found:
             continue
         chunk = _source_chunk(item)
-        if chunk is not None and _amount_cells(chunk):
+        if chunk is not None and any(
+            _field_cells(chunk, field) for field in fields
+        ):
             found.append(doc_id)
     return tuple(found)
 
@@ -196,10 +234,10 @@ def _field_bearing_docs(evidence_items: Sequence[Any]) -> tuple[str, ...]:
 # ------------------------------------------------------------------ extraction
 
 
-def _contract_amount_evidence(
-    member: Any, *, evidence_items: Sequence[Any]
+def _field_evidence(
+    member: Any, field: str, *, evidence_items: Sequence[Any]
 ) -> list[FieldEvidence]:
-    """Read the formal contract-amount cell of the authoritative filing."""
+    """Read one field's formal cell out of the authoritative filing."""
 
     records: list[FieldEvidence] = []
     found = False
@@ -212,16 +250,18 @@ def _contract_amount_evidence(
         chunk_id = str(getattr(item, "chunk_id", "") or "")
         if chunk is None or not chunk_id:
             continue
-        for cell in _amount_cells(chunk):
+        for cell in _field_cells(chunk, field):
             found = found or authoritative
-            records.append(_record(member, doc_id, chunk_id, cell, authoritative))
+            records.append(
+                _record(member, field, doc_id, chunk_id, cell, authoritative)
+            )
     if not found:
-        # Either the authorised filing was never served, or it carries no formal
-        # contract-amount field.  Both are an absence with nothing to cite, and
-        # neither may be softened into a value.
+        # Either the authorised filing was never served, or it carries no such
+        # formal field.  Both are an absence with nothing to cite, and neither
+        # may be softened into a value.
         records.append(
             FieldEvidence(
-                field=CONTRACT_AMOUNT,
+                field=field,
                 status=FieldStatus.MISSING,
                 domain=DOMAIN_CORPORATE_EVENT,
                 semantic_key=_semantic_key(member, member.authoritative_doc_id),
@@ -235,7 +275,7 @@ def _contract_amount_evidence(
 
 @dataclass(frozen=True)
 class _Cell:
-    """One labelled contract-amount cell, and the row it was read from."""
+    """One labelled field cell, and the row it was read from."""
 
     value: str
     table_id: str | None
@@ -244,8 +284,8 @@ class _Cell:
     deferred: bool
 
 
-def _amount_cells(chunk: Mapping[str, Any]) -> list[_Cell]:
-    """Every formal contract-amount cell this chunk's own table rows carry.
+def _field_cells(chunk: Mapping[str, Any], field: str) -> list[_Cell]:
+    """Every formal cell for ``field`` this chunk's own table rows carry.
 
     Rows come from ``table_rows``, which the chunker persisted alongside the
     chunk: the label and its value were adjacent cells of one physical row when
@@ -256,18 +296,19 @@ def _amount_cells(chunk: Mapping[str, Any]) -> list[_Cell]:
     instances.
     """
 
+    labels = _FIELD_LABELS.get(field)
     rows = list(chunk.get("table_rows") or [])
-    if not rows:
+    if not labels or not rows:
         return []
     table_id = _text(chunk.get("source_table_id") or chunk.get("table_id")) or None
     base = _row_offset(chunk)
-    deferred = _states_deferral(rows)
+    deferred = _states_deferral(rows, field)
     cells: list[_Cell] = []
     for offset, row in enumerate(rows):
         texts = [value.strip() for value in _cells(row)]
         if len(texts) < 2:
             continue
-        if _label_key(texts[-2]) not in _AMOUNT_LABELS:
+        if _label_key(texts[-2]) not in labels:
             continue
         index = None if base is None else base + offset
         cells.append(
@@ -282,17 +323,31 @@ def _amount_cells(chunk: Mapping[str, Any]) -> list[_Cell]:
     return cells
 
 
-def _states_deferral(rows: Iterable[Any]) -> bool:
-    """Whether these rows say the contract amount itself is disclosed later.
+def _amount_cells(chunk: Mapping[str, Any]) -> list[_Cell]:
+    """The contract-amount cells, for readers that only ever want that field.
+
+    A named alias rather than a second implementation: the comparison lane asks
+    one question -- what does this filing state as its contract amount -- and
+    naming the field at every call site would say nothing it does not already.
+    """
+
+    return _field_cells(chunk, CONTRACT_AMOUNT)
+
+
+def _states_deferral(rows: Iterable[Any], field: str) -> bool:
+    """Whether these rows say this field itself is disclosed later.
 
     The note has to name the field.  A filing may withhold anything or nothing,
     and a remark that does not say which field it covers proves neither.
     """
 
+    term = _FIELD_QUERY_TERMS.get(field)
+    if not term:
+        return False
     for row in rows:
         for text in _cells(row):
             compact = _compact(text)
-            if _CONTRACT_AMOUNT_QUERY_TERM not in compact:
+            if term not in compact:
                 continue
             if any(marker in compact for marker in _DEFERRAL_MARKERS):
                 return True
@@ -300,7 +355,12 @@ def _states_deferral(rows: Iterable[Any]) -> bool:
 
 
 def _record(
-    member: Any, doc_id: str, chunk_id: str, cell: _Cell, authoritative: bool
+    member: Any,
+    field: str,
+    doc_id: str,
+    chunk_id: str,
+    cell: _Cell,
+    authoritative: bool,
 ) -> FieldEvidence:
     value = cell.value.strip()
     if value in _BLANK_CELLS or not _DIGITS.search(value):
@@ -312,7 +372,7 @@ def _record(
     else:
         status, reason, stated = FieldStatus.AVAILABLE, None, value
     return FieldEvidence(
-        field=CONTRACT_AMOUNT,
+        field=field,
         status=status,
         domain=DOMAIN_CORPORATE_EVENT,
         semantic_key=_semantic_key(member, doc_id),
@@ -366,6 +426,7 @@ def _text(value: Any) -> str:
 
 __all__ = [
     "CONTRACT_AMOUNT",
+    "SALES_RATIO",
     "corporate_event_field_evidence",
     "requested_corporate_fields",
 ]
