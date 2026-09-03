@@ -7,13 +7,14 @@ and some of its rows say in writing that the unit price was left unrecorded.
 Counting those citations is how a missing unit price became ``answerable=True``
 with no confirmed field at all.
 
-This is a sibling of :mod:`app.reasoning.holding_acquisition`: it reads one more
-column of the one row that module already proved an acquisition from.  Every
-identity question -- which issuer, which reporter, which report, which row -- is
-answered upstream by the frozen holding stack, and this producer consumes those
-answers without widening or re-deciding any of them.  It never scans holding
-chunks for an alias, and it never pairs a blank cell in one report with an
-explanation printed in another.
+This is a sibling of :mod:`app.reasoning.holding_acquisition`: it normally reads
+one more column of the one row that module already proved an acquisition from.
+For an exact report-level holding request with no transaction row, it can also
+record that the selected issuer/reporter/date report states no acquisition unit
+price.  Every identity question is answered upstream by the frozen holding
+stack or by matching the exact structured report projection.  This producer
+never scans holding chunks for an alias and never pairs one report's absence
+with another report's explanation.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from app.reasoning.holding_acquisition import (
     classify_transaction_method,
 )
 from app.reasoning.holding_previous_report import previous_report_baseline_evidence
+from app.reasoning.holding_reporter import canonical_reporter_key
 
 
 #: The one canonical holding field STEP 11-C answers.
@@ -87,8 +89,10 @@ def requested_holding_fields(question: Any) -> tuple[str, ...]:
 def holding_field_evidence(
     *,
     question: Any,
+    plan: Any = None,
     resolution: Any,
     evidence_items: Sequence[Any],
+    authoritative_report: Any = None,
 ) -> tuple[FieldEvidence, ...]:
     """Every holding field finding for this question.
 
@@ -101,7 +105,11 @@ def holding_field_evidence(
 
     return (
         *_acquisition_unit_price_evidence(
-            question=question, resolution=resolution, evidence_items=evidence_items
+            question=question,
+            plan=plan,
+            resolution=resolution,
+            evidence_items=evidence_items,
+            authoritative_report=authoritative_report,
         ),
         *previous_report_baseline_evidence(
             question=question, resolution=resolution, evidence_items=evidence_items
@@ -112,8 +120,10 @@ def holding_field_evidence(
 def _acquisition_unit_price_evidence(
     *,
     question: Any,
+    plan: Any = None,
     resolution: Any,
     evidence_items: Sequence[Any],
+    authoritative_report: Any = None,
 ) -> tuple[FieldEvidence, ...]:
     """Field findings for the holding row the frozen stack already selected.
 
@@ -128,7 +138,17 @@ def _acquisition_unit_price_evidence(
         return ()
     event = _selected_event(resolution)
     if event is None:
-        return ()
+        identity = _requested_report_identity(plan)
+        if identity is None:
+            return ()
+        source = _selected_report_source(
+            identity,
+            evidence_items,
+            authoritative_report=authoritative_report,
+        )
+        if source is None:
+            return (_missing_report_field(identity, authoritative_report),)
+        return (_classify_report_source(identity, source),)
 
     anchor = _anchor(event)
     if anchor is None:
@@ -150,6 +170,202 @@ def _acquisition_unit_price_evidence(
             ),
         )
     return (_classify(event, anchor, item),)
+
+
+class _ReportIdentity:
+    __slots__ = ("corp_code", "reporter", "reference_date")
+
+    def __init__(self, corp_code: str, reporter: str, reference_date: str) -> None:
+        self.corp_code = corp_code
+        self.reporter = reporter
+        self.reference_date = reference_date
+
+
+def _requested_report_identity(plan: Any) -> _ReportIdentity | None:
+    """The exact issuer/reporter/date tuple the validated plan proved."""
+
+    if plan is None:
+        return None
+    corp_code = _text(getattr(plan, "corp_code", None))
+    reporter = canonical_reporter_key(getattr(plan, "reporter", None))
+    period = getattr(plan, "period", None)
+    if hasattr(period, "to_dict"):
+        period = period.to_dict()
+    values = dict(period) if isinstance(period, Mapping) else {}
+    start = values.get("from") or values.get("from_date")
+    end = values.get("to") or values.get("to_date")
+    reference_date = _date(start) if start and start == end else None
+    if not corp_code or not reporter or not reference_date:
+        return None
+    return _ReportIdentity(corp_code, reporter, reference_date)
+
+
+def _selected_report_source(
+    identity: _ReportIdentity,
+    evidence_items: Sequence[Any],
+    *,
+    authoritative_report: Any = None,
+) -> Any | None:
+    """One served source bound to the exact report identity, or nothing."""
+
+    target_doc_id = _authoritative_report_doc_id(identity, authoritative_report)
+    matches: list[Any] = []
+    for item in evidence_items:
+        if _text(getattr(item, "doc_group", None)) != "holding":
+            continue
+        if _text(getattr(item, "corp_code", None)) != identity.corp_code:
+            continue
+        if target_doc_id:
+            if _text(getattr(item, "doc_id", None)) != target_doc_id:
+                continue
+        elif not _item_proves_report_identity(item, identity):
+            continue
+        if not tuple(getattr(item, "source_refs", ()) or ()):
+            continue
+        matches.append(item)
+    if target_doc_id:
+        projection_id = _text(getattr(authoritative_report, "projection_chunk_id", None))
+        projected = [
+            item
+            for item in matches
+            if projection_id and _text(getattr(item, "chunk_id", None)) == projection_id
+        ]
+        if len(projected) == 1:
+            return projected[0]
+        if matches:
+            # The index already selected the one report.  Retrieval rank now
+            # chooses only which served chunk of that same report can carry the
+            # document-bound citation; it never chooses a report or a value.
+            return min(
+                matches,
+                key=lambda item: (
+                    int(getattr(item, "retrieval_rank", 10**9)),
+                    _text(getattr(item, "chunk_id", None)),
+                ),
+            )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _authoritative_report_doc_id(
+    identity: _ReportIdentity, authoritative_report: Any
+) -> str | None:
+    if authoritative_report is None:
+        return None
+    if _text(getattr(authoritative_report, "issuer_corp_code", None)) != identity.corp_code:
+        return None
+    if canonical_reporter_key(
+        getattr(authoritative_report, "reporter_key", None)
+        or getattr(authoritative_report, "raw_reporter", None)
+    ) != identity.reporter:
+        return None
+    if _date(getattr(authoritative_report, "reference_date", None)) != identity.reference_date:
+        return None
+    return _text(getattr(authoritative_report, "doc_id", None)) or None
+
+
+def _item_proves_report_identity(item: Any, identity: _ReportIdentity) -> bool:
+    holding = dict(getattr(item, "holding", {}) or {})
+    if _text(holding.get("projection_type")) != "holding_report":
+        return False
+    if canonical_reporter_key(holding.get("reporter")) != identity.reporter:
+        return False
+    return _date(holding.get("reference_date")) == identity.reference_date
+
+
+def _classify_report_source(identity: _ReportIdentity, item: Any) -> FieldEvidence:
+    """Classify the acquisition price in one exact report-level source."""
+
+    holding = dict(getattr(item, "holding", {}) or {})
+    fields = dict(holding.get("projection_fields") or {})
+    values = [
+        _cell_text(value)
+        for label, value in fields.items()
+        if (
+            _UNIT_PRICE_QUERY_TERM
+            in (header := _WHITESPACE.sub("", str(label or "")))
+            and any(term in header for term in _ACQUISITION_QUERY_TERMS)
+            and not any(term in header for term in _DISPOSAL_HEADER_TERMS)
+        )
+    ]
+    value = next(
+        (
+            candidate
+            for candidate in values
+            if candidate not in _BLANK_CELLS and _DIGITS.search(candidate)
+        ),
+        None,
+    )
+    ref = next(
+        (
+            dict(raw)
+            for raw in (getattr(item, "source_refs", ()) or ())
+            if isinstance(raw, Mapping)
+        ),
+        {},
+    )
+    common = {
+        "field": ACQUISITION_UNIT_PRICE,
+        "domain": DOMAIN_HOLDING,
+        "semantic_key": _report_semantic_key(identity, item),
+        "corp_code": identity.corp_code,
+        "doc_id": _text(getattr(item, "doc_id", None)) or None,
+        "member_role": identity.reporter,
+        "chunk_id": _text(getattr(item, "chunk_id", None)) or None,
+        "table_id": _text(ref.get("table_id")) or None,
+        "row_start": _int(ref.get("row_start")),
+        "row_end": _int(ref.get("row_end", ref.get("row_start"))),
+    }
+    if value is not None:
+        return FieldEvidence(status=FieldStatus.AVAILABLE, value=value, **common)
+    return FieldEvidence(
+        status=FieldStatus.UNAVAILABLE,
+        reason=(
+            FieldReason.OMITTED
+            if any(
+                _states_report_omission(label, candidate)
+                for label, candidate in fields.items()
+            )
+            else FieldReason.NOT_STATED
+        ),
+        **common,
+    )
+
+
+def _states_report_omission(label: Any, value: Any) -> bool:
+    compact = _WHITESPACE.sub("", f"{label or ''}{_cell_text(value)}")
+    return _UNIT_PRICE_QUERY_TERM in compact and any(
+        marker in compact for marker in _OMISSION_MARKERS
+    )
+
+
+def _missing_report_field(
+    identity: _ReportIdentity, authoritative_report: Any
+) -> FieldEvidence:
+    doc_id = _authoritative_report_doc_id(identity, authoritative_report)
+    return FieldEvidence(
+        field=ACQUISITION_UNIT_PRICE,
+        status=FieldStatus.MISSING,
+        domain=DOMAIN_HOLDING,
+        semantic_key=(
+            f"{DOMAIN_HOLDING}:{identity.corp_code}:{identity.reporter}:"
+            f"{identity.reference_date}"
+        ),
+        corp_code=identity.corp_code,
+        doc_id=doc_id,
+        member_role=identity.reporter,
+    )
+
+
+def _report_semantic_key(identity: _ReportIdentity, item: Any) -> str:
+    return ":".join(
+        (
+            DOMAIN_HOLDING,
+            identity.corp_code,
+            identity.reporter,
+            _text(getattr(item, "doc_id", None)),
+            identity.reference_date,
+        )
+    )
 
 
 class _Anchor:
@@ -469,6 +685,13 @@ def _int(value: Any) -> int | None:
         return None if value is None else int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _date(value: Any) -> str | None:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) < 8:
+        return None
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
 
 
 __all__ = [

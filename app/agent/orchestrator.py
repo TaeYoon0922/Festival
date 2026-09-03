@@ -35,7 +35,11 @@ from app.reasoning.answer_composer import (
 from app.reasoning.corporate_event_field_evidence import corporate_event_field_evidence
 from app.reasoning.evidence_builder import EvidenceBuilder, EvidenceItem, EvidenceSet
 from app.reasoning.field_evidence import FieldEvidence, FieldStatus
-from app.reasoning.holding_field_evidence import holding_field_evidence
+from app.reasoning.holding_field_evidence import (
+    ACQUISITION_UNIT_PRICE,
+    holding_field_evidence,
+    requested_holding_fields as requested_holding_field_evidence,
+)
 from app.reasoning.holding_event_resolver import (
     HoldingEventResolver,
     HoldingResolution,
@@ -71,6 +75,7 @@ from app.reasoning.holding_report_relative_execution import (
     ReportRelativeEvidenceExecution,
 )
 from app.reasoning.holding_report_index import HoldingReportIndex
+from app.reasoning.holding_report_relative import SELECTOR_EXACT_REFERENCE_DATE
 from app.reasoning.periodic_evidence_selector import PeriodicEvidenceSelector
 from app.retrieval.interfaces import RetrievalResult
 
@@ -454,6 +459,12 @@ class AgentOrchestrator:
             evidence=evidence,
             resolution=resolution,
             multi_document=multi_document,
+            authoritative_holding_report=_authoritative_holding_report(
+                question,
+                query_plan,
+                self.holding_report_index,
+                active_corpus_identity=self.active_corpus_identity,
+            ),
         )
 
         # A resolved scoped amount-change operation has already bound two
@@ -587,6 +598,7 @@ def _field_evidence(
     evidence: EvidenceSet,
     resolution: Any,
     multi_document: Any = None,
+    authoritative_holding_report: Any = None,
 ) -> tuple[FieldEvidence, ...]:
     """Collect both producers' findings for this question.
 
@@ -608,10 +620,45 @@ def _field_evidence(
         ),
         *holding_field_evidence(
             question=question,
+            plan=plan,
             resolution=resolution,
             evidence_items=items,
+            authoritative_report=authoritative_holding_report,
         ),
     )
+
+
+def _authoritative_holding_report(
+    question: str,
+    plan: Any,
+    index: HoldingReportIndex | None,
+    *,
+    active_corpus_identity: Mapping[str, Any] | None,
+) -> Any | None:
+    """Select an exact report only for the unit-price negative-evidence lane."""
+
+    if index is None or requested_holding_field_evidence(question) != (
+        ACQUISITION_UNIT_PRICE,
+    ):
+        return None
+    corp_code = str(getattr(plan, "corp_code", "") or "").strip()
+    reporter = str(getattr(plan, "reporter", "") or "").strip()
+    period = getattr(plan, "period", None)
+    if hasattr(period, "to_dict"):
+        period = period.to_dict()
+    values = dict(period) if isinstance(period, Mapping) else {}
+    start = values.get("from") or values.get("from_date")
+    end = values.get("to") or values.get("to_date")
+    if not corp_code or not reporter or not start or start != end:
+        return None
+    selection = index.select_report(
+        corp_code,
+        reporter,
+        SELECTOR_EXACT_REFERENCE_DATE,
+        reference_date=str(start),
+        active_corpus_identity=active_corpus_identity,
+    )
+    return selection.selected if selection.resolved else None
 
 
 def _holding_reporter_scope(

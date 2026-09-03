@@ -385,6 +385,7 @@ def seed_expansion_targets(
         if not timeline.found or timeline.event_id in seen_events:
             continue
         seen_events.add(str(timeline.event_id))
+        own = seed_member.get(doc_id, doc_id)
         if not timeline.is_resolved:
             # An ambiguous or unresolved lifecycle is a real filing whose
             # counterpart was never identified.  Nothing lookalike is pulled in.
@@ -395,10 +396,15 @@ def seed_expansion_targets(
                     "reason": "lifecycle_not_resolved",
                     "resolution_status": timeline.resolution_status,
                     "resolution_source": timeline.resolution_source,
+                    "seed_member_doc_id": own,
+                    "seed_corp_code": timeline.corp_code,
+                    "event_family": timeline.event_family,
+                    "lifecycle_status": timeline.lifecycle_status,
+                    "member_count": len(timeline.entries),
+                    "seed_identity": _seed_identity(timeline, own),
                 }
             )
             continue
-        own = seed_member.get(doc_id, doc_id)
         seed_role = next(
             (
                 entry.member_role
@@ -434,6 +440,7 @@ def seed_expansion_targets(
                     "confidence": timeline.confidence,
                     "member_count": len(timeline.entries),
                     "correction_group_id": None,
+                    "seed_identity": _seed_identity(timeline, own),
                     "target_doc_ids": [],
                 }
             )
@@ -464,6 +471,7 @@ def seed_expansion_targets(
                     ),
                     None,
                 ),
+                "seed_identity": _seed_identity(timeline, own),
                 "target_doc_ids": list(targets),
             }
         )
@@ -477,4 +485,23 @@ def seed_expansion_targets(
         "seed_member_doc_ids": dict(seed_member),
         "member_states": dict(member_states),
         "events_considered": len(seen_events),
+    }
+
+
+def _seed_identity(timeline: EventTimeline, doc_id: str) -> dict[str, str]:
+    """The graph-proven contract identity for one event seed.
+
+    Clarification needs to distinguish independent roots that nevertheless name
+    the same counterparty and broad contract.  The timeline already carries
+    those structured fields from the canonical event graph; preserve that
+    identity in the expansion trace instead of making the clarification layer
+    parse answer prose or inspect arbitrary retrieved documents.
+    """
+
+    entry = next((item for item in timeline.entries if item.doc_id == doc_id), None)
+    provenance = dict(entry.provenance) if entry is not None else {}
+    return {
+        key: value
+        for key in ("counterparty", "subject")
+        if (value := str(provenance.get(key) or "").strip())
     }

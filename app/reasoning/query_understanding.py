@@ -87,7 +87,7 @@ _EVENTS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "supply_contract",
         (
-            "단일판매", "공급계약", "수주계약",
+            "단일판매", "공급계약", "수주계약", "위탁생산계약",
             # Ways a question names a supply contract or its life. Bare field
             # names such as "계약금액" are deliberately absent: they also appear
             # in periodic and correction questions, which must not route here.

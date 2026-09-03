@@ -277,9 +277,13 @@ class ClarificationPipelineTests(unittest.TestCase):
 
     def test_multiple_event_instances_return_filing_clarification(self) -> None:
         plan = QueryPlan(
-            query="공급계약 계약금액",
-            raw_query="테스트 회사 공급계약 계약금액 알려줘",
+            query="Pfizer Ireland Pharmaceuticals 위탁생산계약 계약금액",
+            raw_query=(
+                "테스트 회사가 Pfizer Ireland Pharmaceuticals와 체결한 "
+                "위탁생산계약의 계약금액은?"
+            ),
             company="테스트 회사",
+            corp_code="00000001",
             task_type="corporate_event",
             event_type="supply_contract",
             disclosure_route=("exchange",),
@@ -311,13 +315,34 @@ class ClarificationPipelineTests(unittest.TestCase):
                         "event_id": "evt_a",
                         "seed_doc_id": "e1",
                         "seed_member_doc_id": "e1",
-                    },
+                        "seed_corp_code": "00000001",
+                        "event_family": "supply_contract",
+                        "seed_identity": {
+                            "counterparty": "Pfizer Ireland Pharmaceuticals",
+                            "subject": "의약품 위탁생산계약",
+                        },
+                    }
+                ],
+                # An independent open contract has no related document to
+                # expand.  The expansion layer therefore carries its graph
+                # identity as a resolved singleton diagnostic rather than an
+                # expanded lifecycle.
+                "skipped": [
                     {
                         "event_id": "evt_b",
                         "seed_doc_id": "e2",
                         "seed_member_doc_id": "e2",
-                    },
-                ]
+                        "reason": "lifecycle_not_resolved",
+                        "resolution_status": "resolved",
+                        "member_count": 1,
+                        "seed_corp_code": "00000001",
+                        "event_family": "supply_contract",
+                        "seed_identity": {
+                            "counterparty": "PFIZER IRELAND PHARMACEUTICALS",
+                            "subject": "의약품 위탁생산계약",
+                        },
+                    }
+                ],
             },
         }
         documents = (
@@ -360,6 +385,95 @@ class ClarificationPipelineTests(unittest.TestCase):
                 for candidate in payload["think_trace"]["clarification"]["candidates"]
             )
         )
+
+    def test_correction_versions_of_one_logical_contract_do_not_clarify(self) -> None:
+        plan = QueryPlan(
+            query="상대회사 공급계약 계약금액",
+            raw_query="테스트 회사가 상대회사와 체결한 공급계약의 계약금액은?",
+            company="테스트 회사",
+            corp_code="00000001",
+            task_type="corporate_event",
+            event_type="supply_contract",
+            disclosure_route=("exchange",),
+            evidence={"operation": "inspect_event"},
+        )
+        events = {
+            "corporate_event_expansion": {
+                "events": [
+                    {"event_id": "evt_same", "seed_member_doc_id": "original"},
+                    {"event_id": "evt_same", "seed_member_doc_id": "correction"},
+                ]
+            }
+        }
+        pipeline, _executor = _pipeline(
+            plan, _execution(plan, event_expansion=events)
+        )
+
+        payload = pipeline.answer("Q5-correction", plan.raw_query)
+
+        self.assertNotEqual(payload["think_trace"]["route"], "clarification")
+        self.assertNotIn("clarification", payload["think_trace"])
+
+    def test_explicit_contract_date_keeps_normal_answer_path(self) -> None:
+        plan = QueryPlan(
+            query="상대회사 공급계약 계약금액",
+            raw_query=(
+                "테스트 회사가 2024년 1월 2일 공시한 상대회사 공급계약의 "
+                "계약금액은?"
+            ),
+            company="테스트 회사",
+            corp_code="00000001",
+            task_type="corporate_event",
+            event_type="supply_contract",
+            period=QueryPeriod(
+                from_date="2024-01-02",
+                to_date="2024-01-02",
+                period_type="event_date",
+            ),
+            disclosure_route=("exchange",),
+            evidence={"operation": "inspect_event"},
+        )
+        events = {
+            "corporate_event_expansion": {
+                "events": [
+                    {"event_id": "evt_a", "seed_member_doc_id": "e1"},
+                    {"event_id": "evt_b", "seed_member_doc_id": "e2"},
+                ]
+            }
+        }
+        pipeline, _executor = _pipeline(
+            plan, _execution(plan, event_expansion=events)
+        )
+
+        payload = pipeline.answer("Q5-date", plan.raw_query)
+
+        self.assertNotEqual(payload["think_trace"]["route"], "clarification")
+        self.assertNotIn("clarification", payload["think_trace"])
+
+    def test_unique_contract_keeps_normal_answer_path(self) -> None:
+        plan = QueryPlan(
+            query="상대회사 공급계약 계약금액",
+            raw_query="테스트 회사가 상대회사와 체결한 공급계약의 계약금액은?",
+            company="테스트 회사",
+            corp_code="00000001",
+            task_type="corporate_event",
+            event_type="supply_contract",
+            disclosure_route=("exchange",),
+            evidence={"operation": "inspect_event"},
+        )
+        events = {
+            "corporate_event_expansion": {
+                "events": [{"event_id": "evt_only", "seed_member_doc_id": "e1"}]
+            }
+        }
+        pipeline, _executor = _pipeline(
+            plan, _execution(plan, event_expansion=events)
+        )
+
+        payload = pipeline.answer("Q5-unique", plan.raw_query)
+
+        self.assertNotEqual(payload["think_trace"]["route"], "clarification")
+        self.assertNotIn("clarification", payload["think_trace"])
 
     def test_corp_code_conflict_keeps_the_validator_question(self) -> None:
         plan = QueryPlan(

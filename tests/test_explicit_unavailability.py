@@ -1625,6 +1625,92 @@ def _detail_chunk(
     }
 
 
+def _report_chunk(
+    chunk_id: str,
+    doc_id: str,
+    *,
+    corp_code: str = CORP,
+    reporter: str = "성명주식회사",
+    reference_date: str = "2025-08-04",
+) -> dict[str, object]:
+    fields = {
+        "보고자/보유자": reporter,
+        "기준일/보고일": reference_date,
+        "직전 보유주식수": "62,792,705",
+        "증감주식수": "3,333",
+        "보유주식수": "62,796,038",
+        "보유비율": "30.67",
+    }
+    return {
+        "chunk_id": chunk_id,
+        "doc_id": doc_id,
+        "corp_code": corp_code,
+        "corp_name": "예시전자",
+        "doc_group": "holding",
+        "chunk_type": "table_projection",
+        "rcept_dt": reference_date.replace("-", ""),
+        "section_path": ["주식등의 대량보유상황보고서"],
+        "content": "보고자 기준일 직전 보유주식수 증감주식수 보유주식수 보유비율",
+        "retrieval_text": "보고자 기준일 보유주식수 보유비율",
+        "projection_type": "holding_report",
+        "table_id": "t0013",
+        "source_table_id": "t0013",
+        "row_start": 3,
+        "row_end": 3,
+        "projection_fields": fields,
+        "projection_field_refs": {
+            label: [{"table_id": "t0013", "row_start": 3, "row_end": 3}]
+            for label in fields
+        },
+        "source_refs": [{"table_id": "t0013", "row_start": 3, "row_end": 3}],
+    }
+
+
+def _report_field_evidence(
+    question: str,
+    chunk: dict[str, object],
+    *,
+    corp_code: str = CORP,
+    reporter: str = "성명주식회사",
+    day: str = "2025-08-04",
+):
+    candidate = CandidateChunk(
+        str(chunk["chunk_id"]), str(chunk["doc_id"]), chunk, MetadataMatch()
+    )
+    result = RetrievalResult(
+        str(chunk["chunk_id"]), str(chunk["doc_id"]), 1.0, 1, {}
+    )
+    plan = QueryPlan(
+        query=question,
+        raw_query=question,
+        company="예시전자",
+        corp_code=corp_code,
+        task_type="holding_change",
+        metric=ACQUISITION_UNIT_PRICE,
+        reporter=reporter,
+        period=QueryPeriod(
+            from_date=day,
+            to_date=day,
+            period_type="holding_reference_date",
+        ),
+    )
+    evidence = build_evidence_set(
+        question=question,
+        query_plan=plan,
+        candidates=[candidate],
+        results=[result],
+        grouping_intent="holding_change",
+    )
+    resolution = resolve_holding_events(evidence, query_plan=plan)
+    records = holding_field_evidence(
+        question=question,
+        plan=plan,
+        resolution=resolution,
+        evidence_items=evidence.served_items,
+    )
+    return records, resolution, plan, candidate, result
+
+
 def _holding(question: str, chunks: tuple[dict[str, object], ...], *,
              reporter: str | None = None, day: str | None = None):
     pairs = [
@@ -1803,6 +1889,33 @@ class HoldingFieldEvidenceTests(unittest.TestCase):
         self.assertIs(records[0].status, FieldStatus.AVAILABLE)
         self.assertEqual(records[0].value, "120,000")
 
+    def test_c094_exact_report_without_unit_price_is_grounded_unavailable(self) -> None:
+        records, _resolution, _plan, _candidate, _result = _report_field_evidence(
+            "성명주식회사가 보유한 예시전자 주식의 "
+            "2025년 8월 4일 기준 취득 단가는?",
+            _report_chunk("h-target", "holding-target"),
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertIs(records[0].status, FieldStatus.UNAVAILABLE)
+        self.assertIs(records[0].reason, FieldReason.NOT_STATED)
+        self.assertEqual(records[0].doc_id, "holding-target")
+        self.assertEqual(records[0].chunk_id, "h-target")
+        self.assertEqual(records[0].table_id, "t0013")
+
+    def test_report_identity_mismatch_is_missing_and_never_negative(self) -> None:
+        records, _resolution, _plan, _candidate, _result = _report_field_evidence(
+            "성명주식회사가 보유한 예시전자 주식의 "
+            "2025년 8월 4일 기준 취득 단가는?",
+            _report_chunk(
+                "h-wrong", "holding-wrong", reporter="다른보고자"
+            ),
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertIs(records[0].status, FieldStatus.MISSING)
+        self.assertIsNone(records[0].chunk_id)
+
 
 class HoldingNegativeCitationTests(unittest.TestCase):
     """The holding refusal is grounded through the same shared plumbing."""
@@ -1839,6 +1952,60 @@ class HoldingNegativeCitationTests(unittest.TestCase):
         marker = {c.citation_id: c.chunk_id for c in generated.citations}
         self.assertEqual(marker[verdict.refusal_citation], "hSEL")
         self.assertIn("기재되지 않은 것으로 명시", answer)
+
+    def test_c094_report_bound_refusal_keeps_the_target_citation(self) -> None:
+        question = (
+            "성명주식회사가 보유한 예시전자 주식의 "
+            "2025년 8월 4일 기준 취득 단가는?"
+        )
+        source = _report_chunk("h-c094", "holding-c094")
+        source.pop("projection_type")
+        source["projection_fields"] = {}
+        source["projection_field_refs"] = {}
+        _records, _resolution, plan, candidate, retrieval = _report_field_evidence(
+            question, source
+        )
+        execution = SimpleNamespace(
+            plan=plan,
+            chunks=(candidate,),
+            results=(retrieval,),
+            routing={},
+            correction_expansion={},
+            event_expansion={},
+        )
+
+        selected = SimpleNamespace(
+            issuer_corp_code=CORP,
+            reporter_key="성명주식회사",
+            raw_reporter="성명주식회사",
+            reference_date="20250804",
+            doc_id="holding-c094",
+            projection_chunk_id="not-served",
+        )
+        index = SimpleNamespace(
+            select_report=lambda *args, **kwargs: SimpleNamespace(
+                resolved=True, selected=selected
+            )
+        )
+        result = AgentOrchestrator(holding_report_index=index).run(
+            question, plan, execution
+        )
+        generated = generate_answer(result.answer_draft)
+        verdict = AnswerabilityGuard().evaluate(
+            generated,
+            plan=plan,
+            agent_result=result,
+            execution=SimpleNamespace(results=result.evidence_results),
+        )
+        answer = guarded_answer_text(verdict, generated.answer_text)
+
+        self.assertFalse(verdict.answerable)
+        self.assertIn("no_holding_event_groups", result.warnings)
+        self.assertEqual(verdict.unavailable_fields, (ACQUISITION_UNIT_PRICE,))
+        self.assertIsNotNone(verdict.refusal_citation)
+        self.assertIn(verdict.refusal_citation, answer)
+        marker = {citation.citation_id: citation.chunk_id for citation in generated.citations}
+        self.assertEqual(marker[verdict.refusal_citation], "h-c094")
 
     def test_m4_several_reports_cannot_be_answered_as_one(self) -> None:
         """Report-relative and multi-report safety is not bypassed."""

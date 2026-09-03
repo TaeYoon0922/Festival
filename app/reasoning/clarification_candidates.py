@@ -174,12 +174,17 @@ def _event_instance_request(
         return None
     if evidence.get("set_intent") is True:
         return None
+    if _explicit_event_selector(plan):
+        return None
 
     trace = getattr(execution, "event_expansion", None)
     trace = dict(trace) if isinstance(trace, Mapping) else {}
     block = trace.get("corporate_event_expansion")
     block = dict(block) if isinstance(block, Mapping) else {}
-    raw_events = [event for event in block.get("events") or () if isinstance(event, Mapping)]
+    raw_events = [
+        event for event in block.get("events") or () if isinstance(event, Mapping)
+    ]
+    raw_events.extend(_resolved_singleton_events(block))
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in raw_events:
@@ -189,6 +194,7 @@ def _event_instance_request(
             continue
         seen.add(event_id)
         events.append(event)
+    events = _matching_contract_instances(question, plan, events)
     if len(events) < 2:
         return None
 
@@ -263,6 +269,134 @@ def _public_option_label(
 
 def _event_label_key(label: str) -> str:
     return re.sub(r"\s+", " ", label).strip().casefold()
+
+
+def _resolved_singleton_events(block: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Graph-proven open contracts that expansion correctly had nothing to add."""
+
+    return [
+        item
+        for item in (block.get("skipped") or ())
+        if isinstance(item, Mapping)
+        and item.get("reason") == "lifecycle_not_resolved"
+        and _event_text(item.get("resolution_status")) == "resolved"
+        and _event_count(item.get("member_count")) == 1
+        and str(item.get("event_id") or "").strip()
+    ]
+
+
+def _explicit_event_selector(plan: Any) -> bool:
+    """Whether the question already identifies one contract instance."""
+
+    evidence = dict(getattr(plan, "evidence", {}) or {})
+    if any(evidence.get(key) for key in ("event_id", "contract_id")):
+        return True
+    period = getattr(plan, "period", None)
+    if hasattr(period, "to_dict"):
+        period = period.to_dict()
+    values = dict(period) if isinstance(period, Mapping) else {}
+    start = values.get("from") or values.get("from_date")
+    end = values.get("to") or values.get("to_date")
+    return bool(start and start == end)
+
+
+def _matching_contract_instances(
+    question: str,
+    plan: Any,
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep the graph roots matching the question's proven event identity.
+
+    Event ids have already collapsed original/correction members.  This scope
+    then applies the remaining semantic rule: same issuer, same broad contract
+    family, and -- when the graph carried it -- the same normalized
+    counterparty named by the question.  Missing legacy trace fields preserve
+    the previous behavior; conflicting structured identity fails closed.
+    """
+
+    corp_code = str(getattr(plan, "corp_code", None) or "").strip()
+    family = str(getattr(plan, "event_type", None) or "").strip()
+    scoped = [
+        event
+        for event in events
+        if (
+            not corp_code
+            or not str(event.get("seed_corp_code") or "").strip()
+            or str(event.get("seed_corp_code") or "").strip() == corp_code
+        )
+        and (
+            not family
+            or not _event_text(event.get("event_family"))
+            or _event_text(event.get("event_family")) == family
+        )
+    ]
+    if len(scoped) < 2:
+        return scoped
+
+    identities = {
+        str(event.get("event_id")): dict(event.get("seed_identity") or {})
+        for event in scoped
+        if isinstance(event.get("seed_identity"), Mapping)
+    }
+    counterparties = {
+        event_id: _identity_key(identity.get("counterparty"))
+        for event_id, identity in identities.items()
+        if _identity_key(identity.get("counterparty"))
+    }
+    if counterparties:
+        query_key = _identity_key(question)
+        named = {
+            value for value in counterparties.values() if value in query_key
+        }
+        if len(named) == 1:
+            wanted = next(iter(named))
+            scoped = [
+                event
+                for event in scoped
+                if counterparties.get(str(event.get("event_id"))) == wanted
+            ]
+        elif len(set(counterparties.values())) > 1:
+            # Several counterparties were proved and the question selected
+            # none of them.  This is not the same-counterparty ambiguity this
+            # provider owns.
+            return []
+
+    if len(scoped) < 2:
+        return scoped
+
+    subjects = {
+        event_id: _identity_key(identity.get("subject"))
+        for event_id, identity in identities.items()
+        if _identity_key(identity.get("subject"))
+    }
+    named_subjects = {
+        value
+        for value in subjects.values()
+        if value and value in _identity_key(question)
+    }
+    if len(named_subjects) == 1:
+        wanted = next(iter(named_subjects))
+        scoped = [
+            event
+            for event in scoped
+            if subjects.get(str(event.get("event_id"))) == wanted
+        ]
+    return scoped
+
+
+def _identity_key(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).casefold()
+
+
+def _event_text(value: Any) -> str:
+    return str(getattr(value, "value", value) or "").strip()
+
+
+def _event_count(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _protected_semantics(question: str, plan: Any) -> bool:
