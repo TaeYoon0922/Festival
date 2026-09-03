@@ -10,10 +10,10 @@ from typing import Any, Mapping, Sequence
 
 from app.agent.task_router import TaskDecision, TaskRouter
 from app.reasoning.company_comparison import (
-    chunks_by_company,
+    COMPARISON_OUTCOME_KEY,
     compose_comparison_text,
     executable_comparison,
-    resolve_comparison,
+    ranking_from_outcome,
 )
 from app.reasoning.amount_change import (
     compose_amount_change_text,
@@ -394,12 +394,14 @@ class AgentOrchestrator:
             )
             # Several companies, one field, each answered from its own scope.
             comparison = executable_comparison(query_plan)
+            # Read the operands execution already chose, rather than looking
+            # for them again in evidence that no longer carries each company's
+            # own scoping.
             order = (
-                resolve_comparison(
-                    comparison,
-                    chunks_by_company(
-                        comparison, _served_chunks(retrieval_execution, evidence)
-                    ),
+                ranking_from_outcome(
+                    (getattr(retrieval_execution, "routing", None) or {}).get(
+                        COMPARISON_OUTCOME_KEY
+                    )
                 )
                 if comparison is not None
                 else None

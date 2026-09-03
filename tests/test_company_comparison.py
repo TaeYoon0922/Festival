@@ -7,8 +7,11 @@ from app.reasoning.company_comparison import (
     CompanyComparisonRequest,
     CompanyOperand,
     company_operands,
+    COMPARISON_OUTCOME_KEY,
+    comparison_outcome,
     executable_comparison,
     operand_subplan,
+    ranking_from_outcome,
     comparison_requested,
     compose_comparison_text,
     execute_company_scopes,
@@ -750,4 +753,193 @@ class MergeOrderingTest(unittest.TestCase):
         self.assertEqual(
             [result.chunk_id for result in execution.results],
             [f"{A}1:c", f"{B}1:c", f"{B}2:c", f"{B}3:c", f"{B}4:c"],
+        )
+
+
+def plain_chunk(doc_id, corp_code, *, label="최근매출액(원)", value="9,999,999,999"):
+    """A document that carries numbers but not the formal contract amount."""
+
+    payload = chunk(doc_id, "0", corp_code=corp_code)
+    payload["report_nm"] = "분기보고서"
+    payload["table_rows"] = [[{"text": label}, {"text": value}]]
+    return payload
+
+
+class PerExecutionOperandTest(unittest.TestCase):
+    """Operands are chosen inside each company's own execution, by rank."""
+
+    def candidate(self, payload):
+        from app.retrieval.interfaces import CandidateChunk, MetadataMatch
+
+        return CandidateChunk(
+            chunk_id=payload["chunk_id"], doc_id=payload["doc_id"],
+            chunk=payload, metadata_match=MetadataMatch(),
+        )
+
+    def execution(self, payloads):
+        from app.retrieval.interfaces import RetrievalResult
+
+        candidates = [self.candidate(payload) for payload in payloads]
+        return SimpleNamespace(
+            documents=(),
+            chunks=tuple(candidates),
+            results=tuple(
+                RetrievalResult(
+                    chunk_id=c.chunk_id, doc_id=c.doc_id, bm25_score=1.0,
+                    rank=index + 1, metadata_match={},
+                )
+                for index, c in enumerate(candidates)
+            ),
+        )
+
+    def outcome(self, per_company, codes=(A, B)):
+        return comparison_outcome(
+            request(*codes),
+            {code: self.execution(per_company[code]) for code in codes},
+        )
+
+    def test_the_first_amount_bearing_result_wins(self):
+        """C080's shape: each company also returns other amount-bearing docs."""
+
+        got = self.outcome(
+            {
+                A: [chunk("gold_a", "1,195,242,120,000", corp_code=A),
+                    chunk("other_a", "500", corp_code=A)],
+                B: [chunk("gold_b", "174,143,441,588", corp_code=B),
+                    plain_chunk("noise_b", B)],
+            }
+        )
+
+        self.assertTrue(got["resolved"])
+        self.assertEqual(
+            [entry["doc_id"] for entry in got["operands"]], ["gold_a", "gold_b"]
+        )
+        self.assertEqual(got["operands"][0]["value"], 1195242120000)
+
+    def test_the_largest_amount_is_not_preferred_over_relevance(self):
+        """A later, bigger contract must not outrank the one retrieval chose."""
+
+        got = self.outcome(
+            {
+                A: [chunk("gold_a", "100", corp_code=A),
+                    chunk("bigger_a", "999,999,999", corp_code=A)],
+                B: [chunk("gold_b", "50", corp_code=B)],
+            }
+        )
+
+        self.assertEqual(got["operands"][0]["doc_id"], "gold_a")
+        self.assertEqual(got["operands"][0]["value"], 100)
+
+    def test_a_non_amount_first_result_is_skipped_for_the_next(self):
+        got = self.outcome(
+            {
+                A: [plain_chunk("periodic_a", A),
+                    chunk("gold_a", "300", corp_code=A)],
+                B: [chunk("gold_b", "100", corp_code=B)],
+            }
+        )
+
+        self.assertTrue(got["resolved"])
+        self.assertEqual(got["operands"][0]["doc_id"], "gold_a")
+
+    def test_a_company_with_no_amount_anywhere_fails_closed(self):
+        got = self.outcome(
+            {
+                A: [chunk("gold_a", "300", corp_code=A)],
+                B: [plain_chunk("periodic_b", B), plain_chunk("other_b", B)],
+            }
+        )
+
+        self.assertFalse(got["resolved"])
+        self.assertIsNone(got["operands"][1]["value"])
+        self.assertIsNone(ranking_from_outcome(got))
+
+    def test_a_blank_amount_cell_never_resolves_an_operand(self):
+        got = self.outcome(
+            {
+                A: [chunk("gold_a", "300", corp_code=A)],
+                B: [chunk("blank_b", "-", corp_code=B)],
+            }
+        )
+
+        self.assertFalse(got["resolved"])
+
+    def test_another_companys_document_cannot_fill_an_operand(self):
+        got = self.outcome(
+            {
+                A: [chunk("gold_a", "300", corp_code=A)],
+                B: [chunk("stray", "100", corp_code=A)],
+            }
+        )
+
+        self.assertFalse(got["resolved"])
+
+    def test_four_companies_each_resolve_from_their_own_execution(self):
+        got = self.outcome(
+            {
+                A: [chunk("a1", "136,804,509,590", corp_code=A)],
+                B: [chunk("b1", "237,667,488,543", corp_code=B)],
+                C: [chunk("c1", "240,800,000,000", corp_code=C)],
+                D: [chunk("d1", "198,437,328,900", corp_code=D)],
+            },
+            codes=(A, B, C, D),
+        )
+        order = ranking_from_outcome(got)
+
+        self.assertTrue(got["resolved"])
+        self.assertEqual(
+            [operand.scope.company for operand in order.operands],
+            [NAMES[C], NAMES[B], NAMES[D], NAMES[A]],
+        )
+
+    def test_the_outcome_carries_full_operand_provenance(self):
+        got = self.outcome(
+            {
+                A: [chunk("gold_a", "300", corp_code=A)],
+                B: [chunk("gold_b", "100", corp_code=B)],
+            }
+        )
+
+        for entry in got["operands"]:
+            for key in ("label", "corp_code", "value", "doc_id", "chunk_id",
+                        "receipt_date"):
+                self.assertIsNotNone(entry[key], key)
+
+    def test_the_execution_carries_the_outcome_and_both_documents(self):
+        """End to end: selection happens in the subexecutions, evidence merges."""
+
+        from app.api.pipeline import AnswerPipeline
+        from app.reasoning.query_plan import QueryPlan
+
+        per_company = {
+            A: [chunk("gold_a", "1,195,242,120,000", corp_code=A),
+                chunk("other_a", "500", corp_code=A)],
+            B: [chunk("gold_b", "174,143,441,588", corp_code=B),
+                plain_chunk("noise_b", B)],
+        }
+        pipeline = AnswerPipeline(
+            understanding=SimpleNamespace(),
+            executor=SimpleNamespace(
+                execute=lambda plan: self.execution(per_company[plan.corp_codes[0]])
+            ),
+        )
+        plan = QueryPlan(
+            query="q", raw_query="q",
+            companies=(NAMES[A], NAMES[B]), corp_codes=(A, B),
+            task_type="corporate_event", disclosure_route=("exchange",),
+        )
+        execution = pipeline._comparison_execution(request(A, B), plan)
+        outcome = execution.routing[COMPARISON_OUTCOME_KEY]
+        order = ranking_from_outcome(outcome)
+
+        self.assertTrue(outcome["resolved"])
+        self.assertEqual(order.largest.scope.company, NAMES[A])
+        served = {result.doc_id for result in execution.results}
+        self.assertIn("gold_a", served)
+        self.assertIn("gold_b", served)
+        # Both selected documents lead the merged order, so the evidence limit
+        # cannot drop either operand's citation.
+        self.assertEqual(
+            [result.doc_id for result in execution.results][:2],
+            ["gold_a", "gold_b"],
         )

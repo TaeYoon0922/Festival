@@ -31,8 +31,11 @@ from app.reasoning.corporate_event_field_evidence import CONTRACT_AMOUNT
 from app.reasoning.query_plan import DateBasis, QueryPeriod
 from app.reasoning.scoped_operands import (
     ROLE_MEMBER,
+    AmountSource,
     OperandScope,
     Ranking,
+    ResolvedOperand,
+    amount_source,
     amount_sources,
     ranking,
     resolve_operands,
@@ -523,6 +526,155 @@ def resolve_comparison(
     return ranking(operands)
 
 
+#: Where a comparison's chosen operands are carried out of execution, so the
+#: answer reads the documents that were selected rather than searching the
+#: merged evidence for them again.
+COMPARISON_OUTCOME_KEY = "company_comparison"
+
+
+def _chunk_payload(chunk: Any) -> Mapping[str, Any]:
+    """One retrieval chunk as a mapping, whichever shape it arrived in.
+
+    ``HybridQueryExecutor`` yields ``CandidateChunk`` dataclasses whose table
+    rows sit under ``.chunk``; fixtures and some backends yield that payload
+    directly.  Identity comes from the candidate when it has it, because that is
+    what retrieval assigned.
+    """
+
+    if isinstance(chunk, Mapping):
+        return chunk
+    payload = getattr(chunk, "chunk", None)
+    if not isinstance(payload, Mapping):
+        return {}
+    hydrated = dict(payload)
+    for attribute in ("chunk_id", "doc_id"):
+        value = getattr(chunk, attribute, None)
+        if value:
+            hydrated.setdefault(attribute, str(value))
+    return hydrated
+
+
+def select_operand(
+    operand: CompanyOperand, execution: Any, *, field: str = CONTRACT_AMOUNT
+) -> ResolvedOperand:
+    """This company's amount, taken from its own retrieval in rank order.
+
+    The first result that actually states the field wins.  Relevance is the
+    only ordering consulted: the company's own clause and, where the question
+    gave one, its own date already decided what that retrieval returned, and
+    preferring the largest amount instead would answer a comparison with
+    whichever document happened to carry the biggest number.
+
+    Nothing is borrowed.  A company whose retrieval states this field nowhere
+    comes back unresolved, and the comparison fails closed around it.
+    """
+
+    scope = operand.scope(field)
+    if execution is None:
+        return ResolvedOperand(scope=scope)
+    payloads = {}
+    for chunk in getattr(execution, "chunks", ()) or ():
+        payload = _chunk_payload(chunk)
+        chunk_id = str(payload.get("chunk_id") or "")
+        if chunk_id:
+            payloads.setdefault(chunk_id, payload)
+    ordered: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for result in getattr(execution, "results", ()) or ():
+        chunk_id = str(getattr(result, "chunk_id", "") or "")
+        if chunk_id and chunk_id not in seen and chunk_id in payloads:
+            seen.add(chunk_id)
+            ordered.append(payloads[chunk_id])
+    # A chunk retrieval returned without ranking it still belongs to this
+    # company, and is read only after everything ranked above it.
+    ordered.extend(
+        payload for chunk_id, payload in payloads.items() if chunk_id not in seen
+    )
+    for payload in ordered:
+        source = amount_source(payload)
+        if source is None or not scope.matches(source):
+            continue
+        return ResolvedOperand(
+            scope=scope, value=source.value_for(field), source=source
+        )
+    return ResolvedOperand(scope=scope)
+
+
+def select_company_operands(
+    request: CompanyComparisonRequest, executions: Mapping[str, Any]
+) -> tuple[ResolvedOperand, ...]:
+    """One operand per company, each decided inside that company's execution."""
+
+    return tuple(
+        select_operand(operand, executions.get(operand.corp_code), field=request.field)
+        for operand in request.companies
+    )
+
+
+def comparison_outcome(
+    request: CompanyComparisonRequest, executions: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The selected operands, in a form that travels with the execution.
+
+    Serializable on purpose: what the answer needs downstream is which document
+    each company's amount was read from, and carrying that forward is what stops
+    the merged evidence from being searched a second time under weaker scoping.
+    """
+
+    operands = select_company_operands(request, executions)
+    return {
+        "field": request.field,
+        "ordered": bool(request.ordered),
+        "resolved": all(operand.resolved for operand in operands),
+        "operands": [
+            {
+                **operand.to_dict(),
+                "receipt_date": getattr(operand.source, "receipt_date", None),
+                "report_nm": getattr(operand.source, "report_nm", None),
+            }
+            for operand in operands
+        ],
+    }
+
+
+def ranking_from_outcome(outcome: Any) -> Ranking | None:
+    """Rebuild the comparison from the operands execution already selected."""
+
+    if not isinstance(outcome, Mapping) or not outcome.get("resolved"):
+        return None
+    field = str(outcome.get("field") or CONTRACT_AMOUNT)
+    rebuilt: list[ResolvedOperand] = []
+    for entry in outcome.get("operands") or ():
+        if not isinstance(entry, Mapping):
+            return None
+        value = entry.get("value")
+        chunk_id = str(entry.get("chunk_id") or "")
+        doc_id = str(entry.get("doc_id") or "")
+        if value is None or not chunk_id or not doc_id:
+            return None
+        scope = OperandScope(
+            role=ROLE_MEMBER,
+            corp_code=str(entry.get("corp_code") or "") or None,
+            company=str(entry.get("label") or "") or None,
+            field=field,
+        )
+        rebuilt.append(
+            ResolvedOperand(
+                scope=scope,
+                value=int(value),
+                source=AmountSource(
+                    doc_id=doc_id,
+                    chunk_id=chunk_id,
+                    corp_code=scope.corp_code,
+                    receipt_date=entry.get("receipt_date"),
+                    report_nm=entry.get("report_nm"),
+                    amounts={field: int(value)},
+                ),
+            )
+        )
+    return ranking(rebuilt)
+
+
 def compose_comparison_text(
     request: CompanyComparisonRequest, order: Ranking
 ) -> str:
@@ -551,7 +703,12 @@ __all__ = [
     "COMPANY_COMPARISON_KEY",
     "CompanyComparisonRequest",
     "CompanyOperand",
+    "COMPARISON_OUTCOME_KEY",
     "chunks_by_company",
+    "comparison_outcome",
+    "ranking_from_outcome",
+    "select_company_operands",
+    "select_operand",
     "executable_comparison",
     "company_operands",
     "executions_for",

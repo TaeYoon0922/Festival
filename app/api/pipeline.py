@@ -71,6 +71,8 @@ from app.reasoning.query_validation import (
 )
 from app.reasoning.router import QueryRouter
 from app.reasoning.company_comparison import (
+    COMPARISON_OUTCOME_KEY,
+    comparison_outcome,
     executable_comparison,
     executions_for,
 )
@@ -473,9 +475,14 @@ class AnswerPipeline:
         seen_documents: set[str] = set()
         per_company_results: list[list[Any]] = []
         candidates: dict[str, Any] = {}
-        for execution in executions_for(
-            comparison, plan, self.executor.execute
-        ).values():
+        executions = executions_for(comparison, plan, self.executor.execute)
+        # Each operand is decided inside its own company's execution, where
+        # relevance still means that company's clause and date. Once the
+        # executions are merged for evidence and citation, that scoping is gone,
+        # and a company with several amount-bearing documents would no longer
+        # resolve to one.
+        outcome = comparison_outcome(comparison, executions)
+        for execution in executions.values():
             if execution is None:
                 continue
             for document in getattr(execution, "documents", ()) or ():
@@ -542,9 +549,7 @@ class AnswerPipeline:
             documents=tuple(documents),
             chunks=tuple(chunks),
             results=ranked,
-            routing={"company_comparison": [
-                operand.corp_code for operand in comparison.companies
-            ]},
+            routing={COMPARISON_OUTCOME_KEY: outcome},
         )
 
     def _validated_understanding(
