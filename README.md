@@ -182,6 +182,10 @@ HCX는 답을 만들지 않습니다. 이미 검증된 사실을 자연스러운
 
 ## 8. API
 
+평가용 End-point와 요청·응답 스키마는 [`docs/EVALUATION_API.md`](docs/EVALUATION_API.md)에
+정리했습니다.
+
+
 FastAPI 애플리케이션은 `app/api/app.py`이며, 진입점은 `python -m app.api`입니다.
 DB 연결은 요청 시점에 열립니다. 따라서 **DB가 죽어 있어도 서버는 기동하고**, 요청 단위로
 503을 반환합니다.
@@ -267,25 +271,48 @@ curl -sG http://localhost:8000/answer \
 | `PGPASSWORD` | 택1 | 없음 |
 | `PGSSLMODE` | 아니오 | 없음 (적재 스크립트에서 사용) |
 
-### 임베딩 (CLOVA Studio)
+### 임베딩
+
+**운영 설정은 로컬 BGE-M3 추론(`bge_m3_local`)입니다.** 청크 임베딩과 질의 임베딩이
+같은 모델·같은 버전이어야 하며, `chunk_embeddings` 테이블의 기본키가
+`(chunk_id, embedding_model, embedding_version)`이므로 이 값이 어긋나면 벡터 검색이
+아무것도 찾지 못합니다.
+
+| 변수 | 운영값 | 비고 |
+|---|---|---|
+| `FESTIVAL_EMBEDDING_PROVIDER` | `bge_m3_local` | 기본값은 `hash`(테스트용) |
+| `FESTIVAL_EMBEDDING_MODEL` | `BAAI/bge-m3` | 적재된 임베딩과 일치해야 함 |
+| `FESTIVAL_EMBEDDING_VERSION` | `6892b95fed65c899a30896eb40d619ae284d0455` | 모델 리비전. 위와 같음 |
+| `FESTIVAL_EMBEDDING_DIMENSIONS` | `1024` | DB 인덱스와 일치해야 함 |
+| `FESTIVAL_EMBEDDING_MAX_LENGTH` | `2048` | 8192는 8GB GPU에서 VRAM을 초과함 |
+| `FESTIVAL_EMBEDDING_DEVICE` | `cpu` | 서빙은 질의 1건당 1회라 CPU로 충분 |
+| `FESTIVAL_EMBEDDING_CUDA_OOM_RETRY` | `true` | GPU 적재 경로에서 배치 자동 축소 |
+| `FESTIVAL_EMBEDDING_BATCH_SIZE` | `32` | 적재 경로에서만 사용 |
+| `FESTIVAL_EMBEDDING_MIN_BATCH_SIZE` | `1` | |
+
+로컬 추론에는 `requirements-embedding.txt`(FlagEmbedding)가 필요합니다.
+
+<details>
+<summary>HTTP 임베딩 경로 (CLOVA Studio) — 적재 대안</summary>
+
+OpenAI 호환 엔드포인트로도 적재할 수 있습니다. 다만 계정 rate limit(HTTP 429,
+코드 42901)이 있어 배치 16 이상이나 병렬 실행에서 대량 실패합니다. 안전한 조합은
+**단일 프로세스 · 배치 8**이며 약 6.6 청크/초입니다.
 
 | 변수 | 기본값 | 비고 |
 |---|---|---|
-| `FESTIVAL_EMBEDDING_PROVIDER` | `hash` | 운영에서는 `clova_studio` 필요 |
-| `FESTIVAL_EMBEDDING_MODEL` | `festival-hash-embedding` | 운영값 `bge-m3` |
-| `FESTIVAL_EMBEDDING_VERSION` | `v1` | 적재된 임베딩 버전과 일치해야 함 |
-| `FESTIVAL_EMBEDDING_DIMENSIONS` | `1024` | DB 인덱스와 일치해야 함 |
+| `FESTIVAL_EMBEDDING_PROVIDER` | `hash` | HTTP 경로는 `clova_studio` |
 | `FESTIVAL_EMBEDDING_API_URL` | 없음 | OpenAI 호환 `/v1/openai/embeddings` |
 | `FESTIVAL_EMBEDDING_API_KEY` | 없음 | **비밀값** |
 | `FESTIVAL_EMBEDDING_API_KEY_HEADER` | `Authorization` | |
 | `FESTIVAL_EMBEDDING_API_KEY_PREFIX` | `Bearer` | |
 | `FESTIVAL_EMBEDDING_TIMEOUT_SECONDS` | `60` | |
-| `FESTIVAL_EMBEDDING_BATCH_SIZE` | `32` | |
-| `FESTIVAL_EMBEDDING_MAX_LENGTH` | `8192` | |
-| `FESTIVAL_EMBEDDING_MIN_BATCH_SIZE` | `1` | |
 | `FESTIVAL_EMBEDDING_LONG_TEXT_SEGMENT_CHARS` | `1800` | 40003 분할 폴백 |
-| `FESTIVAL_EMBEDDING_DEVICE` | `cpu` | 로컬 추론 경로 |
-| `FESTIVAL_EMBEDDING_CUDA_OOM_RETRY` | `true` | 로컬 추론 경로 |
+
+**HTTP 경로와 로컬 경로는 `embedding_version`이 다르므로 섞이지 않습니다.**
+서빙 설정이 적재에 쓴 값과 같아야 합니다.
+
+</details>
 
 ### HyperCLOVA X
 
