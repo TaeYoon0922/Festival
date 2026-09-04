@@ -63,6 +63,7 @@ from app.reasoning.holding_report_relative_execution import (
 from app.reasoning.holding_company_role_resolution import (
     HoldingCompanyRoleResolver,
 )
+from app.reasoning.input_guard import guard_message, inspect_question
 from app.reasoning.comparison_evidence import (
     evidence_comparison,
     execute_per_company,
@@ -301,6 +302,13 @@ class AnswerPipeline:
         )
 
     def answer(self, question_id: str, question: str) -> dict[str, Any]:
+        # First, before anything reads the question. A question carrying a
+        # resident registration number must not be embedded, must not become a
+        # lexical query, and must not be echoed back inside retrieved_context;
+        # refusing after retrieval would be too late for all three.
+        guard = inspect_question(question)
+        if guard.blocked:
+            return self._sensitive_input_response(question_id, question, guard)
         validation: QueryValidationResult | None = None
         clarification_decision: ClarificationDecision | None = None
         if self.query_validator is None:
@@ -624,6 +632,33 @@ class AnswerPipeline:
             results=ranked,
             routing={COMPARISON_OUTCOME_KEY: outcome},
         )
+
+    def _sensitive_input_response(
+        self, question_id: str, question: str, guard: Any
+    ) -> dict[str, Any]:
+        """Answer a refused question without having looked anything up.
+
+        ``retrieved_context`` is empty because nothing was retrieved, not because
+        evidence was withheld -- the corpus was never consulted.
+        """
+
+        self._query_metrics["unsupported_count"] += 1
+        return {
+            "question_id": question_id,
+            "question": question,
+            "retrieved_context": [],
+            "think_trace": {
+                "task_type": None,
+                "route": "sensitive_input",
+                "stages": ["input_guard"],
+                "retrieval_count": 0,
+                "selected_evidence_count": 0,
+                "answerable": False,
+                "warnings": [f"sensitive_input:{guard.category}"],
+                "hcx_status": "skipped_input_guard",
+            },
+            "answer": guard_message(),
+        }
 
     def _validated_understanding(
         self, question: str
