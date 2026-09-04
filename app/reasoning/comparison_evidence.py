@@ -162,22 +162,49 @@ def evidence_comparison(plan: Any) -> EvidenceComparison:
 
 
 def evidence_subplan(plan: Any, operand: CompanyOperand) -> Any:
-    """One company's own plan, keeping the period the question asked about.
+    """One company's own plan, scoped to the period the question asked about.
 
-    This is where it differs from the amount lane's subplan, and deliberately.
-    There, each company carries its own filing date and inheriting a single
-    global period would ask most of them about a day they filed nothing. Here
-    the period *is* shared -- "2025년 설비투자" means 2025 for every company --
-    and dropping it is what lets one company answer from 2023 while another
-    answers from 2025.
+    This differs from the amount lane's subplan deliberately. There, each
+    company carries its own filing date and inheriting a single global period
+    would ask most of them about a day they filed nothing. Here the period *is*
+    shared -- "2025년 설비투자" means 2025 for every company.
+
+    Carrying the period is not enough on its own. Metadata filtering turns a
+    period into a year condition only when the period is fiscal *and* ``years``
+    is populated, and a question phrased "2025년에" resolves to a reference year
+    with neither. The filter therefore never engages, and each company retrieves
+    every year it ever filed -- which is how a question about 2025 comes back
+    with 2023 and 2024 ranked above it. Naming the year here scopes the leg to
+    ``base_year``, so a fiscal-2025 report filed in March 2026 is kept and the
+    earlier years are not.
+
+    A company that filed nothing for that year retrieves nothing and is simply
+    absent from the answer. That is the honest outcome: showing its 2023 figure
+    beside another company's 2025 one would compare different years without
+    saying so.
     """
 
+    period = getattr(plan, "period", None)
+    years = tuple(getattr(plan, "years", ()) or ())
+    year = getattr(period, "year", None)
+    if year is not None and not years:
+        years = (int(year),)
+        period = replace(
+            period,
+            period_type=(
+                "fiscal_quarter"
+                if getattr(period, "quarter", None) is not None
+                else "fiscal_year"
+            ),
+        )
     return replace(
         plan,
         company=operand.name,
         companies=(operand.name,),
         corp_code=operand.corp_code,
         corp_codes=(operand.corp_code,),
+        years=years,
+        period=period,
         comparison=None,
     )
 
