@@ -132,6 +132,32 @@ class SubplanTests(unittest.TestCase):
             self.assertEqual(len(subplan.corp_codes), 1)
             self.assertIsNone(subplan.comparison)
 
+    def test_a_reference_year_becomes_a_filterable_one(self) -> None:
+        # Metadata filtering reads `years` only when the period is fiscal, so a
+        # reference year alone leaves every year of that company retrievable.
+        plan = _plan()
+        self.assertFalse(plan.period.is_fiscal)
+        self.assertEqual(plan.years, ())
+
+        subplan = evidence_subplan(plan, evidence_comparison(plan).companies[0])
+
+        self.assertEqual(subplan.years, (2025,))
+        self.assertTrue(subplan.period.is_fiscal)
+        self.assertEqual(subplan.backend_filters()["year"], [2025])
+
+    def test_a_year_the_question_already_named_is_left_alone(self) -> None:
+        plan = _plan(
+            years=(2024,),
+            period=QueryPeriod(year=2024, period_type="fiscal_year"),
+        )
+        subplan = evidence_subplan(plan, evidence_comparison(plan).companies[0])
+        self.assertEqual(subplan.years, (2024,))
+
+    def test_a_question_without_a_year_stays_unscoped(self) -> None:
+        plan = _plan(period=QueryPeriod(), years=(), metric="매출액")
+        subplan = evidence_subplan(plan, evidence_comparison(plan).companies[0])
+        self.assertEqual(subplan.years, ())
+
     def test_the_firewall_signal_survives_scoping(self) -> None:
         plan = _plan()
         decision = evidence_comparison(plan)
