@@ -12,6 +12,7 @@ from app.retrieval.correction_expansion import (
     apply_expansion,
 )
 from app.retrieval.event_expansion import EventExpansion
+from app.retrieval.filter_relaxation import relax_when_strict_zero
 from app.reasoning.periodic_metric_view import has_exact_metric_row
 from app.retrieval.embeddings import EmbeddingConfig, EmbeddingProvider
 from app.retrieval.interfaces import (
@@ -234,7 +235,14 @@ class HybridQueryExecutor:
     def execute(self, plan: Any) -> HybridQueryExecution:
         route = self.router.route(plan)
         documents = self._metadata_backend.get_candidate_documents(**route.backend_filters)
-        documents = self.router.filter_documents(documents, route)
+        # Routing can empty the candidate set entirely when it inferred a
+        # narrower event than the question asked for.  P1-B deferred relaxation
+        # until a real strict zero was demonstrated; this recovers that one case
+        # and leaves every non-empty candidate set exactly as it was.
+        strict_documents = self.router.filter_documents(documents, route)
+        documents, relaxation = relax_when_strict_zero(
+            self.router, documents, strict_documents, route
+        )
         chunks = self._chunk_backend.get_candidate_chunks(documents)
         chunks = self.router.prepare_chunks(chunks, route)
         document_metadata = {document.doc_id: document.metadata for document in documents}
@@ -395,6 +403,11 @@ class HybridQueryExecutor:
                 "additive_document_recovery": document_recovery,
                 "amount_change_operand_recovery": amount_change_recovery,
             },
+            **(
+                {"filter_relaxation": relaxation.to_dict()}
+                if relaxation.applied
+                else {}
+            ),
         }
         return HybridQueryExecution(
             plan=plan,
