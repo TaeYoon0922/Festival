@@ -79,6 +79,19 @@ class MultiDocumentTrace(BaseModel):
     evidence_count: int
 
 
+class ComparisonEvidenceTrace(BaseModel):
+    """Which fan-out ran, in counts only.
+
+    A company name never reaches the trace: this says how many companies were
+    retrieved separately and why the layer engaged, not which ones.
+    """
+
+    applied: bool
+    company_count: int
+    subject_kind: str | None = None
+    decline_reason: str | None = None
+
+
 class QuerySlotTrace(BaseModel):
     value: Any = None
     source: str
@@ -213,6 +226,12 @@ class ThinkTrace(BaseModel):
         exclude_if=lambda value: value is None,
     )
     answerability: AnswerabilityTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    #: Present only when a comparison was retrieved company by company.
+    #: ``exclude_if`` keeps every other response's key set unchanged.
+    comparison_evidence: ComparisonEvidenceTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
