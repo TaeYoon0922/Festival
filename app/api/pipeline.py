@@ -68,6 +68,10 @@ from app.reasoning.comparison_evidence import (
     execute_per_company,
     merge_executions,
 )
+from app.reasoning.comparison_ranking import (
+    apply_conditional_ranking,
+    conditional_ranking,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import (
     CorpusScope,
@@ -354,11 +358,13 @@ class AnswerPipeline:
                     # so what reaches evidence building is the ordinary shape and
                     # every named company sits inside the first few positions.
                     plan = validation.plan
-                    execution = merge_executions(
-                        plan,
-                        comparison_evidence,
-                        execute_per_company(
-                            comparison_evidence, plan, self.executor.execute
+                    per_company = execute_per_company(
+                        comparison_evidence, plan, self.executor.execute
+                    )
+                    execution = apply_conditional_ranking(
+                        merge_executions(plan, comparison_evidence, per_company),
+                        conditional_ranking(
+                            comparison_evidence, plan, per_company
                         ),
                     )
                 else:

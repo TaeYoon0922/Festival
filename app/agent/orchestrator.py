@@ -15,6 +15,11 @@ from app.reasoning.company_comparison import (
     executable_comparison,
     ranking_from_outcome,
 )
+from app.reasoning.comparison_ranking import (
+    COMPARISON_RANKING_KEY,
+    compose_conditional_ranking_text,
+    ranking_from_outcome as conditional_ranking_from_outcome,
+)
 from app.reasoning.amount_change import (
     compose_amount_change_text,
     requested_amount_change,
@@ -399,6 +404,11 @@ class AgentOrchestrator:
             )
             # Several companies, one field, each answered from its own scope.
             comparison = executable_comparison(query_plan)
+            evidence_ranking = conditional_ranking_from_outcome(
+                (getattr(retrieval_execution, "routing", None) or {}).get(
+                    COMPARISON_RANKING_KEY
+                )
+            )
             # Read the operands execution already chose, rather than looking
             # for them again in evidence that no longer carries each company's
             # own scoping.
@@ -412,7 +422,20 @@ class AgentOrchestrator:
                 else None
             )
             trace.append("answer_composer")
-            if comparison is not None:
+            ranking_draft = (
+                _compose_conditional_comparison_ranking(
+                    evidence,
+                    evidence_ranking,
+                    task_type=decision.task_type,
+                    multi_document=multi_document,
+                )
+                if evidence_ranking is not None
+                else None
+            )
+            if ranking_draft is not None:
+                trace.insert(len(trace) - 1, "conditional_comparison_ranking")
+                draft = ranking_draft
+            elif comparison is not None:
                 trace.insert(len(trace) - 1, "company_comparison")
                 draft = _compose_company_comparison(
                     evidence,
@@ -856,6 +879,66 @@ def _compose_company_comparison(
             dict.fromkeys((*(item.chunk_id for item in cited), *base.evidence_references))
         ),
         citations=tuple(_general_citation(item) for item in cited),
+        answerable=True,
+    )
+
+
+def _compose_conditional_comparison_ranking(
+    evidence: EvidenceSet,
+    ranking: Any,
+    *,
+    task_type: str,
+    multi_document: Any = None,
+) -> AnswerDraft | None:
+    """Lead with a ranking only when every selected operand remains citable."""
+
+    base = _compose_general_evidence(
+        evidence, task_type=task_type, multi_document=multi_document
+    )
+    by_id = {item.chunk_id: item for item in evidence.served_items}
+    wanted = [operand.chunk_id for operand in ranking.operands]
+    cited = [by_id[chunk_id] for chunk_id in wanted if chunk_id in by_id]
+    if len(cited) != len(ranking.operands):
+        # This is the last fail-closed boundary.  If selected retrieval evidence
+        # did not survive into the evidence set, the caller must use the
+        # stage-one draft rather than state an uncitable ranking.
+        return None
+
+    selected_citations = tuple(_general_citation(item) for item in cited)
+    selected_keys = {
+        (citation.chunk_id, citation.doc_id) for citation in selected_citations
+    }
+    citations = (
+        *selected_citations,
+        *(
+            citation
+            for citation in base.citations
+            if (citation.chunk_id, citation.doc_id) not in selected_keys
+        ),
+    )
+    statement = compose_conditional_ranking_text(
+        ranking,
+        tuple(f"[{index}]" for index in range(1, len(cited) + 1)),
+    )
+    section = AnswerSection(
+        title="기업별 조건부 금액 비교",
+        content={
+            "summary": statement,
+            "report_kind": ranking.report_kind,
+            "base_year": ranking.base_year,
+            "operands": [operand.to_dict() for operand in ranking.operands],
+        },
+        supporting_evidence_ids=tuple(item.chunk_id for item in cited),
+    )
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys(
+                (*(item.chunk_id for item in cited), *base.evidence_references)
+            )
+        ),
+        citations=citations,
         answerable=True,
     )
 

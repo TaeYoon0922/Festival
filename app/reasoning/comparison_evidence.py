@@ -7,17 +7,17 @@ companies named, cannot resolve the single-company slot that retrieval requires,
 and is asked back "어느 회사에 대한 공시를 확인할까요?" when the asker already
 named two.
 
-This answers those questions without ranking them. Each company is retrieved on
-its own plan, scoped to that company and the period the question asked about,
-and the results are interleaved so every company's best evidence sits inside the
-first few positions. What comes out is the ordinary evidence path's input, so
-evidence building, citation alignment, the answerability guard and the think
-trace all run exactly as they do for a single-company question.
+This first answers those questions without ranking them. Each company is
+retrieved on its own plan, scoped to that company and the period the question
+asked about, and the results are interleaved so every company's best evidence
+sits inside the first few positions. What comes out is the ordinary evidence
+path's input, so evidence building, citation alignment, the answerability guard
+and the think trace all run exactly as they do for a single-company question.
 
-No figure is compared. Two filings can state the same subject over different
-windows -- one company's 당기, another's 상반기 -- and declaring a winner from
-that would assert something the evidence does not carry. Ranking belongs to the
-amount lane, where the operands are comparable by construction.
+A separate fail-closed layer may rank narrative amounts only after filing kind,
+fiscal year, amount syntax and a total marker all agree for every company. Two
+filings that merely state the same subject over different windows -- one
+company's 당기, another's 상반기 -- still remain side by side without a winner.
 """
 
 from __future__ import annotations
