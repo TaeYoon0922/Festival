@@ -63,6 +63,11 @@ from app.reasoning.holding_report_relative_execution import (
 from app.reasoning.holding_company_role_resolution import (
     HoldingCompanyRoleResolver,
 )
+from app.reasoning.comparison_evidence import (
+    evidence_comparison,
+    execute_per_company,
+    merge_executions,
+)
 from app.reasoning.query_understanding import QueryUnderstanding
 from app.reasoning.query_validation import (
     CorpusScope,
@@ -298,7 +303,16 @@ class AnswerPipeline:
             plan, execution = self._retrieve(question)
         else:
             plan, validation = self._validated_understanding(question)
+            # A question naming several companies cannot resolve the
+            # single-company slot retrieval requires, so validation blocks it and
+            # asks which company was meant -- of an asker who named two. Before
+            # treating that as an unanswered question, check whether it is a
+            # comparison this pipeline can retrieve company by company.
+            comparison_evidence = None
             if not validation.retrieval_allowed:
+                candidate = evidence_comparison(validation.plan)
+                comparison_evidence = candidate if candidate.applied else None
+            if not validation.retrieval_allowed and comparison_evidence is None:
                 request = (
                     validation_clarification_request(question, validation)
                     if self.clarification_resolver is not None
@@ -335,12 +349,25 @@ class AnswerPipeline:
                 if not validation.retrieval_allowed:
                     return self._blocked_response(question_id, question, validation)
             try:
-                comparison = executable_comparison(plan)
-                execution = (
-                    self._comparison_execution(comparison, plan)
-                    if comparison is not None
-                    else self.executor.execute(plan)
-                )
+                if comparison_evidence is not None:
+                    # Each company retrieved on its own plan, then interleaved,
+                    # so what reaches evidence building is the ordinary shape and
+                    # every named company sits inside the first few positions.
+                    plan = validation.plan
+                    execution = merge_executions(
+                        plan,
+                        comparison_evidence,
+                        execute_per_company(
+                            comparison_evidence, plan, self.executor.execute
+                        ),
+                    )
+                else:
+                    comparison = executable_comparison(plan)
+                    execution = (
+                        self._comparison_execution(comparison, plan)
+                        if comparison is not None
+                        else self.executor.execute(plan)
+                    )
             except Exception as error:  # noqa: BLE001 - sanitized at API boundary
                 raise AnswerPipelineError(_classify(error)) from error
         # P0-C runs after retrieval so it can only add completeness evidence on
@@ -1319,6 +1346,12 @@ def think_trace(
         # into it, so every field a reader already had is unchanged, and absent
         # entirely for a question that never reached the binder.
         trace["correction_pair"] = dict(pair)
+    routing = getattr(execution, "routing", None)
+    if isinstance(routing, Mapping) and routing.get("comparison_evidence"):
+        # Retrieval ran once per company before anything was ranked together,
+        # so the stage belongs ahead of the ordinary ones.
+        stages.insert(0, "comparison_evidence")
+        trace["comparison_evidence"] = routing["comparison_evidence"]
     event = getattr(execution, "event_expansion", None)
     if isinstance(event, Mapping) and event.get("event_expanded"):
         # Which lifecycle contributed which filings. An execution summary, not
