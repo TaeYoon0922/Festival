@@ -45,6 +45,9 @@ from app.reasoning.clarification_request import (
     clarification_text,
 )
 from app.reasoning.clarification_resolver import ClarificationResolver
+from app.reasoning.comparison import ComparisonPlanner
+from app.reasoning.comparison.execution import ComparisonExecutor
+from app.reasoning.comparison.render import render_comparison
 from app.reasoning.hcx_clarification_classifier import HcxClarificationClassifier
 from app.reasoning.multi_document_evidence import (
     MultiDocumentEvidence,
@@ -153,6 +156,8 @@ class AnswerPipeline:
         semantic_fallback: HcxSemanticQueryFallback | None = None,
         answerability_guard: AnswerabilityGuard | None = None,
         clarification_resolver: ClarificationResolver | None = None,
+        comparison_planner: ComparisonPlanner | None = None,
+        comparison_executor: ComparisonExecutor | None = None,
     ) -> None:
         self.settings = settings or ApiSettings()
         self.understanding = understanding
@@ -173,6 +178,13 @@ class AnswerPipeline:
         self.semantic_fallback = semantic_fallback
         self.answerability_guard = answerability_guard
         self.clarification_resolver = clarification_resolver
+        # A comparison names several companies, so validation cannot resolve the
+        # single-company slot it requires and blocks.  This layer is consulted
+        # at exactly that block: it asks each named company its own question and
+        # combines the answers.  It declines everything else, and a declined
+        # question takes the clarification path unchanged.
+        self.comparison_planner = comparison_planner
+        self.comparison_executor = comparison_executor
         self._query_metrics = {
             "deterministic_resolved_count": 0,
             "hcx_fallback_count": 0,
@@ -211,7 +223,7 @@ class AnswerPipeline:
             report_relative_execution.index,
             active_corpus_identity=report_relative_execution.active_corpus_identity,
         )
-        return cls(
+        pipeline = cls(
             settings=settings,
             understanding=QueryUnderstanding(
                 corpus_scope.company_aliases() if corpus_scope else None,
@@ -279,6 +291,16 @@ class AnswerPipeline:
                 HcxClarificationClassifier(hcx_settings)
             ),
         )
+        # The comparison executor reuses the very components wired above, so a
+        # leg is the same retrieval and the same reasoning an ordinary
+        # single-company question gets.
+        pipeline.comparison_planner = ComparisonPlanner()
+        pipeline.comparison_executor = ComparisonExecutor(
+            retrieval_executor=pipeline.executor,
+            orchestrator=pipeline.orchestrator,
+            generator=pipeline.generator,
+        )
+        return pipeline
 
     def answer(self, question_id: str, question: str) -> dict[str, Any]:
         validation: QueryValidationResult | None = None
@@ -288,6 +310,12 @@ class AnswerPipeline:
         else:
             plan, validation = self._validated_understanding(question)
             if not validation.retrieval_allowed:
+                # Before treating an unresolved company slot as a question to
+                # ask back, check whether it is unresolved because the question
+                # named several companies on purpose.
+                comparison = self._comparison(question_id, question, validation)
+                if comparison is not None:
+                    return comparison
                 request = (
                     validation_clarification_request(question, validation)
                     if self.clarification_resolver is not None
@@ -607,6 +635,68 @@ class AnswerPipeline:
             "retrieved_context": [],
             "think_trace": trace,
             "answer": answer,
+        }
+
+    def _comparison(
+        self, question_id: str, question: str, validation: QueryValidationResult
+    ) -> dict[str, Any] | None:
+        """Answer a multi-company question, or ``None`` to decline.
+
+        Declining is the common case and costs one planner call.  Every question
+        the planner turns down reaches the clarification path exactly as it did
+        before this layer existed.
+        """
+
+        if self.comparison_planner is None or self.comparison_executor is None:
+            return None
+        plan = validation.plan
+        comparison_plan = self.comparison_planner.plan(question, plan)
+        if not comparison_plan.applied:
+            return None
+        try:
+            execution = self.comparison_executor.execute(
+                question, plan, comparison_plan
+            )
+        except Exception as error:  # noqa: BLE001 - sanitized at API boundary
+            raise AnswerPipelineError(_classify(error)) from error
+        generated = render_comparison(question, execution)
+        if generated is None:
+            return None
+
+        rows: list[dict[str, Any]] = []
+        for leg in execution.answerable_legs:
+            rows.extend(retrieved_context(leg.execution, self.settings.top_k))
+        for index, row in enumerate(rows, start=1):
+            row["rank"] = index
+
+        stages = [
+            "query_understanding",
+            "query_validation",
+            "comparison_planner",
+            "comparison_executor",
+            "answer_generator",
+        ]
+        if validation.fallback_used:
+            stages.insert(2, "hcx_semantic_fallback")
+            stages.insert(3, "query_revalidation")
+        return {
+            "question_id": question_id,
+            "question": question,
+            "retrieved_context": rows,
+            "think_trace": {
+                "task_type": plan.task_type,
+                "route": "comparison",
+                "stages": stages,
+                "retrieval_count": len(rows),
+                "selected_evidence_count": len(generated.citations),
+                "answerable": generated.answerable,
+                "warnings": list(generated.warnings),
+                "hcx_status": "skipped_comparison",
+                "query_understanding": validation.to_public_dict(),
+                "query_validation": validation.to_validation_dict(),
+                "comparison": execution.trace(),
+            },
+            "answer": _non_empty(generated.answer_text),
         }
 
     def _multi_document(
