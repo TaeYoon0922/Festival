@@ -389,11 +389,21 @@ def _minimum_subset(
 ) -> list[CandidateChunk]:
     """Fewest candidates from one anchor/tier that close the most fields.
 
-    Exhaustive over the unresolved subset, which is tiny -- at most the handful
-    of holding fields a question can request -- so the exact answer is cheaper
-    than reasoning about when a greedy approximation would be good enough.
+    Exhaustive over the *candidates*, in increasing subset size, so the first
+    subset reaching the best achievable coverage is also the smallest one.
     Ordering of equal-sized solutions follows the caller's order, which is
     already deterministic.
+
+    The stopping condition is the coverage the candidates can actually reach,
+    not the coverage the question asked for. Those differ constantly: a
+    세부변동내역 filing states share counts and no ratios, so a question asking
+    for both is never fully covered, and stopping only on full coverage meant
+    enumerating every subset of every candidate. That is 2**n, and this corpus
+    holds filings with 157 candidates on one reference date -- measured at 27,
+    the old form examined 134,217,727 subsets in 144 seconds and the larger
+    ones do not finish at all. Coverage is monotone over union, so no subset
+    covers more than every candidate together does; reaching that is the most
+    there is to find.
     """
 
     wanted = set(unresolved)
@@ -404,6 +414,7 @@ def _minimum_subset(
     ]
     if not useful:
         return []
+    reachable = set().union(*(fields for _chunk, fields in useful))
     best: list[CandidateChunk] | None = None
     best_key: tuple[int, int] | None = None
     for size in range(1, len(useful) + 1):
@@ -413,10 +424,8 @@ def _minimum_subset(
             if best_key is None or key < best_key:
                 best_key = key
                 best = [useful[i][0] for i in combo]
-            if len(gained) == len(wanted):
+            if len(gained) == len(reachable):
                 return best or []
-        if best_key is not None and best_key[1] <= size and best_key[0] == -len(wanted):
-            break
     return best or []
 
 
@@ -885,7 +894,11 @@ def _assess_field_coverage(
         if covered_fields(candidate, probe, requested):
             pool.append(candidate)
 
-    anchored_count = 0
+    # Counted as a set of candidates, not as anchor pairings. One candidate
+    # can anchor to several served rows and stays in the pool until something
+    # selects it, so incrementing per pairing reported more anchored
+    # candidates than exist -- a diagnostic that misleads whoever reads it.
+    anchored: set[str] = set()
     remaining = list(unresolved)
     selected: list[RetrievalResult] = []
     picked: dict[str, tuple[str, int]] = {}
@@ -903,7 +916,7 @@ def _assess_field_coverage(
             tier = anchor_tier(candidate.chunk, served_chunk.chunk, reporter)
             if tier is None:
                 continue
-            anchored_count += 1
+            anchored.add(candidate.chunk_id)
             gained = covered_fields(candidate, _synthetic(candidate, 0), requested)
             tiers[tier].append((candidate, frozenset(gained)))
         if not remaining:
@@ -953,10 +966,11 @@ def _assess_field_coverage(
                     seen.add(candidate.chunk_id)
                     contribution[candidate.chunk_id] = gained
                     picked[candidate.chunk_id] = (ANCHOR_STRONG, served_rank)
-                    anchored_count += 1
+                    anchored.add(candidate.chunk_id)
                     rescue_mode = RESCUE_MODE_CONTRACT_D
                     remaining = [name for name in remaining if name not in gained]
 
+    anchored_count = len(anchored)
     if not selected:
         # Policy: anchored only. A candidate that closes the gap but completes
         # nothing already retrieved would be an event of the lane's own

@@ -1368,6 +1368,53 @@ class AcquisitionProofActivationTests(unittest.TestCase):
         self.assertNotIn(ACQUISITION_PROOF, result.requested)
 
 
+class MinimumSubsetTerminationTests(unittest.TestCase):
+    """The selection has to finish on filings this corpus actually holds.
+
+    A 세부변동내역 filing states share counts and no ratios, and puts dozens to
+    hundreds of rows on one reference date. Ask for both and full coverage is
+    impossible, which is the ordinary case rather than an edge one:
+    "국민연금 보유주식수와 지분율은?" requests exactly that pair.
+
+    The selection used to stop only on full coverage, so an impossible request
+    fell through to every subset of every candidate. Measured on this corpus:
+    27 candidates took 144 seconds, and one filing carries 157 -- which does
+    not finish. This runs on the holding main path with the unpruned candidate
+    pool, so the question would never return an answer.
+
+    Without the fix these do not fail; they hang. That is the point.
+    """
+
+    def _candidates(self, count: int):
+        return [
+            (_acquisition_row(f"c{index}")[0], frozenset({"after_shares"}))
+            for index in range(count)
+        ]
+
+    def test_an_impossible_request_still_returns(self) -> None:
+        for count in (27, 40, 157):
+            with self.subTest(candidates=count):
+                picked = _minimum_subset(
+                    self._candidates(count), ["after_shares", "after_ratio"]
+                )
+                # One row closes everything reachable; the rest add nothing.
+                self.assertEqual([c.chunk_id for c in picked], ["c0"])
+
+    def test_a_reachable_request_is_unchanged(self) -> None:
+        first, _ = _acquisition_row("a1")
+        second, _ = _acquisition_row("a2", row=3)
+        picked = _minimum_subset(
+            [
+                (first, frozenset({"after_shares"})),
+                (second, frozenset({"after_ratio"})),
+            ],
+            ["after_shares", "after_ratio"],
+        )
+        self.assertEqual(
+            sorted(c.chunk_id for c in picked), ["a1", "a2"]
+        )
+
+
 class AcquisitionAmbiguityPreservationTests(unittest.TestCase):
     """Every legitimate proof row reaches the resolver.  This lane picks none."""
 

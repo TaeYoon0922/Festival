@@ -24,3 +24,15 @@ __MACOSX/
 # Local BGE evaluation artifacts
 reports/evaluation/bge/*
 !reports/evaluation/bge/manifest.json
+
+# Scratch output at the repository root.  Diagnostics and one-off runs drop
+# .txt/.jsonl/.log here and they reached 216 MB before anything ignored them --
+# one `git add -A` away from a commit that is painful to undo.  Anchored to the
+# root, so the corpus manifest, the gold sets and the evaluation reports in
+# their own directories are untouched.
+/*.txt
+/*.jsonl
+/*.log
+!/requirements.txt
+!/requirements-dev.txt
+!/requirements-embedding.txt
