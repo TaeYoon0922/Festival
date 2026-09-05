@@ -544,6 +544,33 @@ The gate requires the intended evidence in the final top-10 **for all six**. It
 > re-measured, and the HX04 result above was obtained through the bounded role
 > *simulation*, not through production P0-D, which still declines the question.
 
+> **Re-measured 2026-09-06, on the full corpus.** Embedding coverage is now
+> complete (1,363,336 chunks, 100%) and an HNSW index is built, so the gate was
+> re-run to see whether the ranking condition had changed. It had not, and the
+> reason is not ranking.
+>
+> | question | route | served evidence |
+> |---|---|---|
+> | H01 | `clarification` | 0 |
+> | H02 | `clarification` | 0 |
+> | HX01 | `holding_event_resolver` | 8 |
+> | HX02 | `clarification` | 0 |
+> | HX03 | `holding_event_resolver` | 3 |
+> | HX04 | `clarification` | 0 |
+>
+> Four of the six now ask the asker back rather than serve evidence, so "the
+> intended document in the final top-10" is not a condition they can meet. For
+> H01 and HX02 that is the Target B diagnosis reaching production: the corpus
+> holds seven filings for 에스엠 × 하이브, the intended one is the fifth, and the
+> question names none of them — so those two were never going to pass a
+> top-10 condition from their own text, at any embedding coverage.
+>
+> **This does not activate or further defer P0-D.2; it re-dates the gate's
+> failure and names its cause.** Re-running the gate as written cannot change
+> the result. Activation would need the gate re-specified -- separating the
+> context-dependent questions, or supplying the report context they omit --
+> and that is a change to a frozen judgement standard, not a code change.
+
 ### Safety-positive findings
 Despite those ranking misses:
 
