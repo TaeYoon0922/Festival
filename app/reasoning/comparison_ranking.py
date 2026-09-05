@@ -82,6 +82,9 @@ class RankingAmount:
     chunk_id: str
     doc_id: str
     total_marker: bool = True
+    #: The question's own subject words this filing states.  Ranking compares
+    #: amounts, and an amount means nothing without what it counts.
+    subjects: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -176,6 +179,7 @@ def conditional_ranking(
             operand,
             executions.get(str(getattr(operand, "corp_code", "") or "")),
             report_kind=report_kind,
+            subjects=_subject_terms(plan),
         )
         if found is None:
             return None
@@ -191,6 +195,13 @@ def conditional_ranking(
     if len({operand.corp_code for operand in selected}) != len(selected):
         return None
     if not all(operand.total_marker for operand in selected):
+        return None
+    # Every company's amount must be about the same thing, and that thing must
+    # be one the question named. Without this, "설비투자가 더 큰 곳" ranks a
+    # 총 매출액 against a 총 부채 and calls the larger one the answer: each
+    # figure passes the company, year, filing-kind and total gates on its own,
+    # and nothing above asks what the figure counts.
+    if not _shared_subject(selected):
         return None
 
     direction = _requested_direction(plan)
@@ -390,8 +401,69 @@ def compose_conditional_ranking_text(
     return f"{statement} {' '.join(citation_ids)}"
 
 
+#: Words that say how a comparison is phrased rather than what it is about.
+_SUBJECT_NOISE = frozenset(
+    """
+    중 더 가장 제일 큰 작은 많은 적은 높은 낮은 어디 어느 무엇 누구 얼마 규모
+    기업 회사 곳 쪽 순서 순위 비교 알려줘 알려 정리 확인 인가 인가요 입니까
+    있나 있는지 해줘 그리고 대비 기준 년 년도 연도 분기 반기 상반기 하반기
+    """.split()
+)
+
+
+#: Particles that ride on the end of a Korean noun.  "설비투자가" in a question
+#: and "설비투자에" in a filing are the same subject, and comparing the tokens
+#: whole says they are not.
+_PARTICLES = (
+    "으로부터", "에서는", "에게서", "으로써", "으로서", "이라는", "라는",
+    "에서", "에게", "으로", "부터", "까지", "보다", "처럼", "만큼", "이나",
+    "와의", "과의", "의", "은", "는", "이", "가", "을", "를", "에", "로",
+    "와", "과", "도", "만", "라", "야",
+)
+
+
+def _stem(token: str) -> str:
+    """The token with one trailing particle removed, when one is there."""
+
+    for particle in _PARTICLES:
+        if token.endswith(particle) and len(token) - len(particle) >= 2:
+            return token[: -len(particle)]
+    return token
+
+
+def _subject_terms(plan: Any) -> frozenset[str]:
+    """The content words the question used to say what it is asking about."""
+
+    query = str(getattr(plan, "raw_query", None) or getattr(plan, "query", None) or "")
+    return frozenset(
+        stem
+        for token in re.findall(r"[가-힣A-Za-z][가-힣A-Za-z0-9]+", query)
+        if len(stem := _stem(token)) >= 2 and stem not in _SUBJECT_NOISE
+    )
+
+
+def _shared_subject(selected: Sequence[RankingAmount]) -> bool:
+    """Whether every filing states at least one subject word all of them state.
+
+    Deliberately strict. Structured metrics are not available here -- the
+    amounts are read out of narrative sentences -- so the only evidence that
+    two figures measure the same thing is that both filings say so in the
+    asker's own words. Where they do not, the honest outcome is the evidence
+    side by side without a winner, which is what returning nothing produces.
+    """
+
+    if not selected:
+        return False
+    common = frozenset.intersection(*(operand.subjects for operand in selected))
+    return bool(common)
+
+
 def _select_company_amount(
-    operand: Any, execution: Any, *, report_kind: str
+    operand: Any,
+    execution: Any,
+    *,
+    report_kind: str,
+    subjects: frozenset[str] = frozenset(),
 ) -> RankingAmount | None:
     if execution is None:
         return None
@@ -439,6 +511,9 @@ def _select_company_amount(
             base_year=base_year,
             chunk_id=chunk_id,
             doc_id=doc_id,
+            subjects=frozenset(
+                term for term in subjects if term in evidence_text
+            ),
         )
     return None
 

@@ -408,11 +408,11 @@ class ConditionalRankingTests(unittest.TestCase):
                     {
                         "chunk_id": "lg-half",
                         "report_nm": "반기보고서 (2025.06)",
-                        "content": "2025년 당기 중 총 5.8조원",
+                        "content": "2025년 당기 중 설비투자에 총 5.8조원",
                     },
                     {
                         "chunk_id": "lg-annual",
-                        "content": "2025년 당기 중 총 10.5조원",
+                        "content": "2025년 당기 중 설비투자에 총 10.5조원",
                     },
                 ),
             ),
@@ -422,11 +422,11 @@ class ConditionalRankingTests(unittest.TestCase):
                     {
                         "chunk_id": "sdi-half",
                         "report_nm": "반기보고서 (2025.06)",
-                        "content": "2025년 상반기 누적 1조 8,430억원",
+                        "content": "2025년 상반기 설비투자 누적 1조 8,430억원",
                     },
                     {
                         "chunk_id": "sdi-annual",
-                        "content": "2025년 당기 중 총 3조원",
+                        "content": "2025년 당기 중 설비투자에 총 3조원",
                     },
                 ),
             ),
@@ -456,7 +456,7 @@ class ConditionalRankingTests(unittest.TestCase):
                 {
                     "chunk_id": "sdi-half",
                     "report_nm": "반기보고서 (2025.06)",
-                    "content": "2025년 상반기 누적 1조 8,430억원",
+                    "content": "2025년 상반기 설비투자 누적 1조 8,430억원",
                 },
             ),
         )
@@ -555,6 +555,45 @@ class ConditionalRankingTests(unittest.TestCase):
             [operand.chunk_id for operand in ranking.operands],
             ["sdi-annual", "lg-annual"],
         )
+
+    def test_two_different_quantities_are_never_ranked_against_each_other(self) -> None:
+        """The reported failure: 총 매출액 ranked against 총 부채.
+
+        Each figure passes the company, year, filing-kind and total gates on
+        its own, and nothing above asked what either figure counts. So the
+        larger number won a question about 설비투자.
+        """
+
+        executions = self._executions()
+        executions["00121"] = _amount_execution(
+            "00121", ({"content": "2025년 당기 중 총 매출액 10조원"},)
+        )
+        executions["00122"] = _amount_execution(
+            "00122", ({"content": "2025년 당기 중 총 부채 20조원"},)
+        )
+
+        self.assertIsNone(
+            conditional_ranking(self.comparison, self.plan, executions)
+        )
+
+    def test_one_company_off_subject_declines_the_whole_ranking(self) -> None:
+        # A shared subject means every company states it, not most of them.
+        executions = self._executions()
+        executions["00122"] = _amount_execution(
+            "00122", ({"content": "2025년 당기 중 총 부채 20조원"},)
+        )
+
+        self.assertIsNone(
+            conditional_ranking(self.comparison, self.plan, executions)
+        )
+
+    def test_the_subject_is_matched_past_its_particle(self) -> None:
+        # The question says 설비투자가 and the filing says 설비투자에; comparing
+        # the tokens whole would call those different subjects.
+        ranking = conditional_ranking(
+            self.comparison, self.plan, self._executions()
+        )
+        self.assertIsNotNone(ranking)
 
     def test_a_non_amount_comparison_never_ranks_incidental_money(self) -> None:
         plan = replace(

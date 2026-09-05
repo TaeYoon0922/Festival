@@ -12,6 +12,7 @@ from app.reasoning.periodic_metric_change import (
     PERIODIC_METRIC_CHANGE_KEY,
     PeriodicMetricChangeRequest,
     periodic_metric_change_claims,
+    names_a_derived_ratio,
     requested_periodic_metric_change,
     resolve_periodic_metric_change,
 )
@@ -284,6 +285,50 @@ def test_a_stated_unit_is_carried_on_every_amount() -> None:
 
     assert "증감액: +3,749,222백만원" in rendered
     assert not any(text.startswith("단위:") for text in rendered)
+
+
+def test_a_derived_ratio_is_never_computed_from_the_amount_inside_its_name() -> None:
+    """Query understanding matches a metric by substring and is frozen.
+
+    So "영업이익률" arrives here as metric "영업이익", and a growth rate built
+    from those amounts would answer a question about a ratio with the change
+    in the amount underneath it -- a real number about a different quantity,
+    which is the one way this layer could state something confidently wrong.
+    """
+
+    understanding = QueryUnderstanding({"삼성전자": {"삼성전자"}})
+    for question in (
+        "삼성전자 2025년 영업이익률은 2024년 대비 몇 퍼센트 증가했는가",
+        "삼성전자 2025년 부채비율 증감률",
+        "삼성전자 2025년 ROE 증감률",
+    ):
+        plan = understanding.understand(question)
+        assert names_a_derived_ratio(plan), question
+
+
+def test_the_amount_itself_is_still_computed() -> None:
+    understanding = QueryUnderstanding({"삼성전자": {"삼성전자"}})
+    for question in (
+        "삼성전자 2025년 영업이익은 2024년 대비 몇 퍼센트 증가했는가",
+        "삼성전자 2025년 매출액은 2024년 대비 몇 퍼센트 증가했는가",
+    ):
+        plan = understanding.understand(question)
+        assert not names_a_derived_ratio(plan), question
+
+
+def test_a_ratio_question_declines_the_whole_calculation() -> None:
+    plan, resolution = _selected_resolution()
+    ratio_plan = {
+        **plan,
+        "raw_query": "테스트회사 2025년 영업이익률 전년 동기 대비 증가율",
+    }
+
+    assert (
+        resolve_periodic_metric_change(
+            requested_periodic_metric_change(plan), resolution, query_plan=ratio_plan
+        )
+        is None
+    )
 
 
 def test_mismatched_period_windows_fail_closed() -> None:

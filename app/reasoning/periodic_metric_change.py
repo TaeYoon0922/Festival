@@ -192,6 +192,26 @@ def requested_periodic_metric_change(
     )
 
 
+#: Ratios a filing reports as a percentage, each of which contains the name of
+#: an amount the corpus also reports.  Query understanding matches a metric by
+#: substring and is frozen, so "영업이익률" arrives here as metric "영업이익" --
+#: and computing a growth rate from those amounts would answer a question about
+#: a ratio with a change in the amount underneath it.
+_DERIVED_RATIOS = (
+    "영업이익률", "순이익률", "매출총이익률", "영업이익율", "순이익율",
+    "부채비율", "유동비율", "자기자본비율", "배당성향", "배당수익률",
+    "ROE", "ROA", "ROIC", "EBITDA마진",
+)
+
+
+def names_a_derived_ratio(plan: Any) -> bool:
+    """Whether the question asked for a ratio this layer cannot compute."""
+
+    raw = _plan_mapping(plan).get("raw_query") or getattr(plan, "raw_query", "")
+    compact = re.sub(r"\s+", "", str(raw or ""))
+    return any(ratio.casefold() in compact.casefold() for ratio in _DERIVED_RATIOS)
+
+
 def resolve_periodic_metric_change(
     request: PeriodicMetricChangeRequest,
     resolution: PeriodicFactResolution,
@@ -201,6 +221,11 @@ def resolve_periodic_metric_change(
     """Resolve one exact two-period row and calculate its relative change."""
 
     if len(request.years) != 2 or request.years[0] >= request.years[1]:
+        return None
+    # The metric on the plan is the amount inside the ratio's name, not the
+    # ratio. Its change is a real number about a different quantity, which is
+    # the one way this layer could state something confidently wrong.
+    if names_a_derived_ratio(query_plan):
         return None
     if resolution.unresolved_requirements or resolution.temporal_ambiguity:
         return None
