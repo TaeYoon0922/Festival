@@ -21,6 +21,10 @@ MAX_LISTED_CANDIDATES = 3
 #: question about the corpus, and only the second can name the 공시일 that tells
 #: them apart.
 EVENT_INSTANCE = "event_instance"
+#: The asker named a holder but not one of that holder's filings.  Kept apart
+#: from EVENT_INSTANCE because the sentence differs: those candidates are
+#: contracts, these are reports of one continuing position.
+HOLDING_REPORT_INSTANCE = "holding_report_instance"
 
 
 class ClarificationState(str, Enum):
@@ -177,6 +181,22 @@ def clarification_text(
     candidates = decision.candidates
     if decision.state is not ClarificationState.CLARIFY:
         raise ValueError("clarification text requires a clarify decision")
+    if candidates and all(
+        candidate.semantic_type == HOLDING_REPORT_INSTANCE for candidate in candidates
+    ):
+        # Listed in full, above the guard below, because these labels are dates
+        # rather than prose: the limit exists so an answer does not become a
+        # wall of sentences, and eight dates is not that. The holder is already
+        # right and the position is one timeline; what is missing is which
+        # filing of it, so naming them is what lets the asker say back
+        # something this system can act on.
+        listed = "\n".join(f"- {candidate.label}" for candidate in candidates)
+        return (
+            "해당 보유자의 보고서가 여러 건 있습니다. 질문에 어느 보고서인지가 "
+            "없어 하나를 고르지 않았습니다.\n"
+            f"{listed}\n"
+            "어느 보고서 기준으로 확인할지 알려주세요."
+        )
     if decision.truncated or len(candidates) > MAX_LISTED_CANDIDATES:
         return (
             "여러 가능한 해석이 확인되었습니다. 원하시는 지표, 공시일 또는 "
@@ -222,6 +242,7 @@ def _with_object_particle(label: str) -> str:
 __all__ = [
     "EVENT_INSTANCE",
     "MAX_CANDIDATES",
+    "HOLDING_REPORT_INSTANCE",
     "MAX_LISTED_CANDIDATES",
     "ClarificationCandidate",
     "ClarificationDecision",

@@ -432,6 +432,14 @@ class AnswerPipeline:
                 result,
                 execution,
                 multi_document=multi,
+                report_index=getattr(
+                    self.orchestrator, "holding_report_index", None
+                ),
+                answerable=bool(
+                    answerability.answerable
+                    if answerability is not None
+                    else getattr(generated, "answerable", False)
+                ),
             )
             if request is not None:
                 post_decision = self.clarification_resolver.resolve(request)

@@ -17,6 +17,9 @@ from app.reasoning.clarification_request import (
 from app.reasoning.corporate_event import LIFECYCLE_OPEN, RESOLVED
 from app.reasoning.holding_company_role_resolution import has_role_provenance
 from app.reasoning.holding_evidence_coverage import has_holding_acquisition_semantics
+from app.reasoning.holding_report_clarification import (
+    holding_report_clarification_request,
+)
 from app.reasoning.query_validation import QuerySlotStatus, QueryState
 
 
@@ -127,12 +130,22 @@ def execution_clarification_request(
     execution: Any,
     *,
     multi_document: Any = None,
+    report_index: Any = None,
+    answerable: bool = True,
 ) -> ClarificationRequest | None:
     """Candidates proven by structured corpus or resolver output."""
 
     if multi_document is not None or _protected_semantics(question, plan):
         return None
-    return _event_instance_request(question, plan, result, execution)
+    request = _event_instance_request(question, plan, result, execution)
+    if request is not None:
+        return request
+    # Asked second so nothing that already had an answer is turned into a
+    # question: this provider only speaks for a holding question that named a
+    # holder, did not name one of that holder's filings, and got nothing back.
+    return holding_report_clarification_request(
+        question, plan, report_index=report_index, answerable=answerable
+    )
 
 
 def apply_resolved_candidate(
