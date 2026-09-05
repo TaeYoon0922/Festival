@@ -135,17 +135,21 @@ def execution_clarification_request(
 ) -> ClarificationRequest | None:
     """Candidates proven by structured corpus or resolver output."""
 
-    if multi_document is not None or _protected_semantics(question, plan):
+    if multi_document is not None:
         return None
-    request = _event_instance_request(question, plan, result, execution)
-    if request is not None:
-        return request
-    # Asked second so nothing that already had an answer is turned into a
-    # question: this provider only speaks for a holding question that named a
-    # holder, did not name one of that holder's filings, and got nothing back.
-    return holding_report_clarification_request(
+    # Asked before the protected-semantics guard, and only this provider is.
+    # That guard exists so a report-relative question is never re-read as bare
+    # shares-vs-ratio ambiguity -- which is a different question from which
+    # filing was meant, and the one this provider asks. It stays in force for
+    # every other provider below.
+    request = holding_report_clarification_request(
         question, plan, report_index=report_index, answerable=answerable
     )
+    if request is not None:
+        return request
+    if _protected_semantics(question, plan):
+        return None
+    return _event_instance_request(question, plan, result, execution)
 
 
 def apply_resolved_candidate(

@@ -23,7 +23,7 @@ the question on whatever path it was already taking.
 from __future__ import annotations
 
 import re
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from app.reasoning.clarification_request import (
     HOLDING_REPORT_INSTANCE,
@@ -89,8 +89,16 @@ def holding_report_clarification_request(
     if not text or _dated(text):
         return None
 
-    intent = parse_report_relative(text)
-    if intent is None or getattr(intent, "selector", None) != _CONTEXT_SELECTOR:
+    # Understanding already stored what it parsed; that is the reading the rest
+    # of the pipeline gated on, so it is the one this must agree with. Parsing
+    # is the fallback for a plan that carries none.
+    stored = dict(getattr(plan, "evidence", {}) or {}).get("holding_report_relative")
+    if isinstance(stored, Mapping):
+        selector = str(stored.get("selector") or "")
+    else:
+        intent = parse_report_relative(text)
+        selector = str(getattr(intent, "selector", "") or "") if intent else ""
+    if selector != _CONTEXT_SELECTOR:
         return None
 
     corp_code = str(getattr(plan, "corp_code", "") or "").strip()
