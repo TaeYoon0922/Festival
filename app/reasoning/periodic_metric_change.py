@@ -337,23 +337,29 @@ def _two_period_row(
         return None
     headers = _cells(rows[0])
     values = _cells(rows[1])
-    if len(headers) != 3 or len(values) != 3 or len(headers) != len(values):
+    if len(headers) < 3 or len(headers) != len(values):
         return None
-    period_headers = headers[1:]
-    if _period_signature(period_headers[0]) != _period_signature(period_headers[1]):
+    row_label = values[0]
+    columns = _requested_columns(
+        headers[1:],
+        values[1:],
+        source_year=_source_year(source),
+        requested_years=requested_years,
+    )
+    if columns is None:
         return None
-    source_year = _source_year(source)
-    years = _header_years(period_headers, source_year=source_year)
+    period_headers, values = columns
+    years = _header_years(period_headers, source_year=_source_year(source))
     if years is None or set(years) != set(requested_years):
         return None
-    parsed_values = [_numeric_cell(cell) for cell in values[1:]]
+    parsed_values = [_numeric_cell(cell) for cell in values]
     if any(parsed is None for parsed in parsed_values):
         return None
     numeric_values = [parsed for parsed in parsed_values if parsed is not None]
     cell_units = {unit for _number, unit in numeric_values if unit}
     if len(cell_units) > 1:
         return None
-    row_unit = _unit_from_row_label(values[0])
+    row_unit = _unit_from_row_label(row_label)
     chunk_unit = _normalize_unit(
         dict(source.provenance.get("source_chunk") or {}).get("unit")
     )
@@ -368,13 +374,64 @@ def _two_period_row(
         return None
     output: dict[int, tuple[Decimal, str, str]] = {}
     for year, header, raw, parsed in zip(
-        years, period_headers, values[1:], numeric_values, strict=True
+        years, period_headers, values, numeric_values, strict=True
     ):
         number, parsed_unit = parsed
         if parsed_unit is not None and parsed_unit != unit:
             return None
         output[year] = (number, raw, header)
     return unit, output
+
+
+
+def _requested_columns(
+    headers: Sequence[str],
+    cells: Sequence[str],
+    *,
+    source_year: int | None,
+    requested_years: tuple[int, ...],
+) -> tuple[list[str], list[str]] | None:
+    """Pick the two comparable columns the question asked for.
+
+    A Korean quarterly filing states the prior year beside the current one and
+    splits each into 3개월 and 누적, so one row carries four period columns:
+
+        제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |
+        제 56 기 1분기 / 3개월 | 제 56 기 1분기 / 누적
+
+    Requiring exactly two left every such filing unresolved, which is most of
+    them. So columns are grouped by period signature -- the shape with the
+    fiscal term removed, which is what makes 3개월 comparable to 3개월 and not
+    to 누적 -- and a group is a candidate when it holds exactly the two years
+    asked for.
+
+    More than one group can qualify, as it does above, where Q1 3개월 and Q1
+    누적 are the same window and carry the same figures. That is not ambiguity
+    and is accepted. Groups that disagree are the 3개월/누적 mixing this module
+    already refuses, and are declined rather than picked between.
+    """
+
+    grouped: dict[str, list[int]] = {}
+    for index, header in enumerate(headers):
+        grouped.setdefault(_period_signature(header), []).append(index)
+
+    candidates: list[tuple[list[str], list[str]]] = []
+    for indexes in grouped.values():
+        if len(indexes) != 2:
+            continue
+        group_headers = [headers[index] for index in indexes]
+        years = _header_years(group_headers, source_year=source_year)
+        if years is None or set(years) != set(requested_years):
+            continue
+        candidates.append((group_headers, [cells[index] for index in indexes]))
+
+    if not candidates:
+        return None
+    first = candidates[0]
+    for other in candidates[1:]:
+        if other[1] != first[1]:
+            return None
+    return first
 
 
 def _header_years(

@@ -151,6 +151,69 @@ def test_exact_comparable_row_resolves_delta_and_growth_rate() -> None:
     assert change.initial.chunk_id == change.final.chunk_id == "p:ch_income"
 
 
+def test_a_four_column_quarterly_row_resolves() -> None:
+    """The shape Korean quarterly filings actually use.
+
+    A 분기보고서 states the prior year beside the current one and splits each
+    into 3개월 and 누적, so the row carries four period columns. Requiring
+    exactly two left every such filing unresolved -- measured live on 삼성전자
+    2025 1분기, where all four gates passed and the row was refused for its
+    width alone.
+    """
+
+    table = """| 열 1 | 제 58 기 1분기 / 3개월 | 제 58 기 1분기 / 누적 | 제 57 기 1분기 / 3개월 | 제 57 기 1분기 / 누적 |
+| --- | --- | --- | --- | --- |
+| 매출액 (주26) | 44,407,761 | 44,407,761 | 40,658,539 | 40,658,539 |
+"""
+    plan, resolution = _selected_resolution(table=table)
+
+    change = resolve_periodic_metric_change(
+        requested_periodic_metric_change(plan), resolution, query_plan=plan
+    )
+
+    assert change is not None
+    assert change.initial.year == 2024
+    assert change.final.year == 2025
+    assert change.pct_change == Decimal("9.22")
+
+
+def test_disagreeing_period_windows_still_fail_closed() -> None:
+    """Two candidate groups that differ are the mixing this module refuses.
+
+    Past Q1 the 3개월 and 누적 windows carry different figures, and nothing in
+    the question says which was meant, so neither is chosen.
+    """
+
+    table = """| 열 1 | 제 58 기 반기 / 3개월 | 제 58 기 반기 / 누적 | 제 57 기 반기 / 3개월 | 제 57 기 반기 / 누적 |
+| --- | --- | --- | --- | --- |
+| 매출액 | 22,000,000 | 44,407,761 | 20,000,000 | 40,658,539 |
+"""
+    plan, resolution = _selected_resolution(table=table)
+
+    assert (
+        resolve_periodic_metric_change(
+            requested_periodic_metric_change(plan), resolution, query_plan=plan
+        )
+        is None
+    )
+
+
+def test_a_row_with_no_group_for_the_asked_years_fails_closed() -> None:
+    # Three fiscal terms, none of them pairing into the requested two.
+    table = """| 열 1 | 제 58 기 | 제 56 기 | 제 55 기 |
+| --- | --- | --- | --- |
+| 매출액 | 44,407,761 | 40,658,539 | 38,000,000 |
+"""
+    plan, resolution = _selected_resolution(table=table)
+
+    assert (
+        resolve_periodic_metric_change(
+            requested_periodic_metric_change(plan), resolution, query_plan=plan
+        )
+        is None
+    )
+
+
 def test_serialized_claims_are_recomputed_before_rendering() -> None:
     plan, resolution = _selected_resolution()
     change = resolve_periodic_metric_change(
