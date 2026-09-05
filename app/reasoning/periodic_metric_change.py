@@ -77,7 +77,9 @@ class PeriodicMetricOperand:
     year: int
     value: Decimal
     raw_value: str
-    unit: str
+    #: ``None`` when the filing states no unit for this row.  The ratio between
+    #: two cells of one row does not need one; the difference between them does.
+    unit: str | None
     column_label: str
     chunk_id: str
     doc_id: str
@@ -101,18 +103,21 @@ class PeriodicMetricChange:
     metric: str
     initial: PeriodicMetricOperand
     final: PeriodicMetricOperand
-    difference: Decimal
+    #: ``None`` when no unit was stated, in which case the amounts are reported
+    #: without one and the difference is withheld rather than guessed.
+    difference: Decimal | None
     pct_change: Decimal
 
     @property
-    def unit(self) -> str:
+    def unit(self) -> str | None:
         return self.initial.unit
 
     @property
     def direction(self) -> str:
-        if self.difference > 0:
+        # Read from the rate, which exists whether or not a unit does.
+        if self.pct_change > 0:
             return "increase"
-        if self.difference < 0:
+        if self.pct_change < 0:
             return "decrease"
         return "unchanged"
 
@@ -122,7 +127,9 @@ class PeriodicMetricChange:
             "unit": self.unit,
             "initial": self.initial.to_dict(),
             "final": self.final.to_dict(),
-            "difference": _decimal_text(self.difference),
+            "difference": (
+                None if self.difference is None else _decimal_text(self.difference)
+            ),
             "pct_change": _decimal_text(self.pct_change),
             "direction": self.direction,
         }
@@ -247,9 +254,9 @@ def resolve_periodic_metric_change(
         chunk_id=source.chunk_id,
         doc_id=source.doc_id,
     )
-    difference = final.value - initial.value
+    difference = (final.value - initial.value) if unit is not None else None
     pct_change = (
-        (difference / initial.value) * Decimal("100")
+        ((final.value - initial.value) / initial.value) * Decimal("100")
     ).quantize(_TWO_DECIMALS, rounding=ROUND_HALF_UP)
     return PeriodicMetricChange(
         metric=request.metric,
@@ -274,13 +281,15 @@ def periodic_metric_change_claims(
         final_year = int(final["year"])
         initial_value = Decimal(str(initial["value"]))
         final_value = Decimal(str(final["value"]))
-        difference = Decimal(str(value["difference"]))
+        raw_difference = value["difference"]
+        difference = (
+            None if raw_difference is None else Decimal(str(raw_difference))
+        )
         pct_change = Decimal(str(value["pct_change"]))
     except (KeyError, TypeError, ValueError, InvalidOperation):
         return None
     if (
         not metric
-        or unit is None
         or initial_year >= final_year
         or initial_value <= 0
         or final_value < 0
@@ -292,31 +301,46 @@ def periodic_metric_change_claims(
     calculated_pct = (
         (calculated_difference / initial_value) * Decimal("100")
     ).quantize(_TWO_DECIMALS, rounding=ROUND_HALF_UP)
-    if difference != calculated_difference or pct_change != calculated_pct:
+    if pct_change != calculated_pct:
+        return None
+    # Without a unit the difference is not reported, so a serialized one is a
+    # value nothing produced.
+    if unit is None:
+        if difference is not None:
+            return None
+    elif difference != calculated_difference:
         return None
     initial_ids = _source_ids(initial)
     final_ids = _source_ids(final)
     if not initial_ids or not final_ids:
         return None
     both_ids = tuple(dict.fromkeys((*initial_ids, *final_ids)))
-    return (
+    suffix = unit or ""
+    lines: list[tuple[str, tuple[str, ...]]] = [
         (
-            f"{initial_year}년 {metric}: {_format_number(initial_value)}{unit}",
+            f"{initial_year}년 {metric}: {_format_number(initial_value)}{suffix}",
             initial_ids,
         ),
         (
-            f"{final_year}년 {metric}: {_format_number(final_value)}{unit}",
+            f"{final_year}년 {metric}: {_format_number(final_value)}{suffix}",
             final_ids,
         ),
-        (
-            f"증감액: {_format_signed(difference)}{unit}",
-            both_ids,
-        ),
-        (
-            f"증감률: {_format_signed(pct_change, decimals=2)}%",
-            both_ids,
-        ),
-    )
+    ]
+    if difference is not None:
+        lines.append((f"증감액: {_format_signed(difference)}{suffix}", both_ids))
+    lines.append((f"증감률: {_format_signed(pct_change, decimals=2)}%", both_ids))
+    if unit is None:
+        # Said plainly rather than left for the reader to notice: the rate is
+        # exact, the amounts are the figures as filed, and the difference is
+        # absent because stating an amount without its unit would be a number
+        # nobody can read.
+        lines.append(
+            (
+                "단위: 공시 원문에 표기되지 않아 증감액은 계산하지 않았습니다.",
+                both_ids,
+            )
+        )
+    return tuple(lines)
 
 
 def _two_period_row(
@@ -367,9 +391,12 @@ def _two_period_row(
     specific_units = [unit for unit in (cell_unit, row_unit) if unit]
     if len(set(specific_units)) > 1:
         return None
+    # A missing unit is recorded, not refused.  Measured on this corpus, only
+    # 42.5% of periodic table chunks carry one, so refusing here left the
+    # calculator unable to answer most growth questions -- while the ratio it
+    # is asked for is dimensionless and needs no unit at all.  What does need
+    # one is the difference, and that is withheld further down instead.
     unit = cell_unit or row_unit or chunk_unit
-    if unit is None:
-        return None
     if chunk_unit is not None and not specific_units and chunk_unit != unit:
         return None
     output: dict[int, tuple[Decimal, str, str]] = {}
