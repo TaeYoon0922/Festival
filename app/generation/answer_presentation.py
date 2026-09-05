@@ -37,6 +37,16 @@ _CONTEXT_TAGS = {
 }
 _ALL_TAGS = (_CORP, _REPORT, _SECTION, *_CONTEXT_TAGS)
 
+#: Section titles the composer writes in English because they name internal
+#: lanes.  The reader is not reading about lanes, so they are shown in the
+#: language the rest of the answer is written in.  Matched whole-line only, so a
+#: filing that happens to contain the same words in prose is untouched.
+_SECTION_TITLES = {
+    "General evidence": "공시 근거",
+    "Holding events": "보유 변동",
+}
+_NUMBERED_TITLE = re.compile(r"^(\s*)Periodic fact (\d+)\s*$")
+
 #: An evidence item opens with its ordinal, then the retrieval prefix.  The
 #: ordinal is kept so citation-to-item correspondence stays readable.
 _ITEM_HEAD = re.compile(rf"^(\s*)(\d+)\.\s*{re.escape(_CORP)}\s*(.*)$")
@@ -49,16 +59,29 @@ def _tag_value(line: str, tag: str) -> str | None:
     return stripped[len(tag):].strip()
 
 
-def readable_answer(answer: str) -> str:
-    """Rewrite retrieval tag lines into a heading, leaving everything else alone.
+def _retitled(line: str) -> str:
+    """Show a lane's section title in Korean, or return the line untouched."""
 
-    Returns the input unchanged when no evidence item opens with ``[기업명]``,
-    which covers every answer shape this does not recognise -- refusals,
-    clarifications, holding timelines and the periodic fact sections.
+    stripped = line.strip()
+    if (title := _SECTION_TITLES.get(stripped)) is not None:
+        return f"{line[:len(line) - len(line.lstrip())]}{title}"
+    if (numbered := _NUMBERED_TITLE.match(line)) is not None:
+        indent, ordinal = numbered.groups()
+        return f"{indent}정기공시 근거 {ordinal}"
+    return line
+
+
+def readable_answer(answer: str) -> str:
+    """Rewrite retrieval tag lines and lane titles, leaving everything else alone.
+
+    Two rewrites, both presentation-only: an evidence item's retrieval prefix
+    becomes a heading, and a lane's English section title is shown in Korean.
+    Every other line is passed through, so an answer carrying neither -- a
+    refusal, a clarification, a holding timeline -- comes back unchanged.
     """
 
     text = str(answer or "")
-    if _CORP not in text:
+    if not text:
         return text
 
     lines = text.split("\n")
@@ -68,7 +91,7 @@ def readable_answer(answer: str) -> str:
     while index < len(lines):
         head = _ITEM_HEAD.match(lines[index])
         if head is None:
-            output.append(lines[index])
+            output.append(_retitled(lines[index]))
             index += 1
             continue
 
@@ -105,7 +128,10 @@ def readable_answer(answer: str) -> str:
         output.extend(f"{pad}{entry}" for entry in context)
         changed = True
 
-    return "\n".join(output) if changed else text
+    rewritten = "\n".join(output)
+    # ``changed`` covers the tag rewrite; comparing also catches a retitle-only
+    # answer, which has no evidence item but still has a lane title to show.
+    return rewritten if (changed or rewritten != text) else text
 
 
 def citation_markers(text: str) -> list[str]:

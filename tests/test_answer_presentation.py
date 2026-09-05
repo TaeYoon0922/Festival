@@ -2,7 +2,7 @@
 
 The rewrite runs on a finished, already-guarded answer, so the only way it can
 do harm is by losing something: a citation marker, a table row, a figure. Each
-test below pins one of those, and the last two pin the property that matters
+test below pins one of those, and the last group pins the property that matters
 most -- an answer this does not recognise is returned exactly as it arrived.
 """
 
@@ -69,12 +69,13 @@ class LosslessTests(unittest.TestCase):
         )
 
     def test_no_body_line_is_lost(self) -> None:
-        tags = ("[기업명]", "[공시명]", "[Section Path]", "[Table]", "[단위]", "[기간표현]")
+        # Everything except the lane title and the retrieval prefix -- the two
+        # things this is allowed to rewrite -- must come through untouched.
+        tags = ("[공시명]", "[Section Path]", "[Table]", "[단위]", "[기간표현]")
         body = [
             line
-            for line in GENERAL.split("\n")
-            if not line.strip().startswith(tags) and not line.strip().startswith("1. [")
-            and not line.strip().startswith("2. [")
+            for line in GENERAL.split("\n")[1:]
+            if not line.strip().startswith(tags) and "[기업명]" not in line
         ]
         output = readable_answer(GENERAL)
         for line in body:
@@ -105,6 +106,48 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(readable_answer(once), once)
 
 
+class SectionTitleTests(unittest.TestCase):
+    """Lane titles name internal structure; the reader is not reading about lanes."""
+
+    def test_the_general_lane_title_is_shown_in_korean(self) -> None:
+        self.assertTrue(readable_answer(GENERAL).startswith("공시 근거\n"))
+
+    def test_a_numbered_periodic_title_keeps_its_number(self) -> None:
+        answer = "Periodic fact 2\n근거 1 보고 기간: 2023년"
+        self.assertTrue(readable_answer(answer).startswith("정기공시 근거 2\n"))
+
+    def test_the_same_words_inside_a_filing_are_not_retitled(self) -> None:
+        # Whole-line matching only: a chunk quoting these words in prose keeps
+        # them, because rewriting evidence text is exactly what this must not do.
+        for line in (
+            "내용: General evidence was cited in the filing.",
+            "| 항목 | General evidence |",
+            "Periodic fact 2 는 아래 표에 있습니다",
+        ):
+            with self.subTest(line=line):
+                self.assertIn(line, readable_answer(f"공시 근거\n{line}"))
+
+    def test_retitling_alone_still_returns_the_rewrite(self) -> None:
+        # An answer with a lane title but no evidence item must not be dropped
+        # back to the original by the tag-rewrite short circuit.
+        answer = "Holding events\n2022-12-05 | 국민연금공단 | 613,758주 [1]"
+        output = readable_answer(answer)
+        self.assertTrue(output.startswith("보유 변동\n"))
+        self.assertIn("2022-12-05 | 국민연금공단 | 613,758주 [1]", output)
+
+    def test_a_correction_prefix_is_not_mistaken_for_a_tag(self) -> None:
+        # "[기재정정]사업보고서" opens with a bracket but is a report name, not
+        # one of the retrieval tags, so the line carrying it is untouched.
+        periodic = (
+            "Periodic fact 1\n근거 1 보고 기간: 2025년\n"
+            "근거 1 보고서: [기재정정]사업보고서 (2023.12)\n내용: | 변경일 | [5]"
+        )
+        output = readable_answer(periodic)
+        self.assertIn("근거 1 보고서: [기재정정]사업보고서 (2023.12)", output)
+        self.assertIn("내용: | 변경일 | [5]", output)
+        self.assertEqual(citation_markers(output), citation_markers(periodic))
+
+
 class UnrecognisedInputTests(unittest.TestCase):
     """What this does not recognise, it must not touch."""
 
@@ -118,21 +161,12 @@ class UnrecognisedInputTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(readable_answer(text), text)
 
-    def test_a_holding_timeline_is_returned_unchanged(self) -> None:
+    def test_a_holding_timeline_body_is_returned_unchanged(self) -> None:
         holding = (
             "보유 변동 내역\n파마리서치에 대해 확인된 보유 변동은 다음과 같습니다.\n"
             "2022-12-05 | 국민연금공단 | 613,758주 → 720,039주 | 6.07% → 7.12% [1]"
         )
         self.assertEqual(readable_answer(holding), holding)
-
-    def test_a_correction_prefix_is_not_mistaken_for_a_tag(self) -> None:
-        # "[기재정정]사업보고서" opens with a bracket but is a report name, not
-        # one of the retrieval tags.
-        periodic = (
-            "Periodic fact 1\n근거 1 보고 기간: 2025년\n"
-            "근거 1 보고서: [기재정정]사업보고서 (2023.12)\n내용: | 변경일 | [5]"
-        )
-        self.assertEqual(readable_answer(periodic), periodic)
 
     def test_a_lone_tag_without_an_item_number_is_left_alone(self) -> None:
         text = "[공시명] 반기보고서 (2025.06)\n본문"
