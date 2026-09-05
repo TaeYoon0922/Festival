@@ -130,11 +130,16 @@ FROM hits;
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Measure unit recoverability.")
     parser.add_argument("--doc-group", default="periodic", help="or 'all'")
-    parser.add_argument("--dsn", default=os.getenv("FESTIVAL_DATABASE_URL"))
+    # The backend reads DATABASE_URL; the FESTIVAL_ prefix belongs to the
+    # embedding and API settings, not to the connection string.
+    parser.add_argument(
+        "--dsn",
+        default=os.getenv("DATABASE_URL") or os.getenv("FESTIVAL_DATABASE_URL"),
+    )
     args = parser.parse_args(argv)
 
     if not args.dsn:
-        print("FESTIVAL_DATABASE_URL is not set", file=sys.stderr)
+        print("DATABASE_URL is not set", file=sys.stderr)
         return 1
     group = None if args.doc_group == "all" else args.doc_group
 
