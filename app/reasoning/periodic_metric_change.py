@@ -77,8 +77,10 @@ class PeriodicMetricOperand:
     year: int
     value: Decimal
     raw_value: str
-    #: ``None`` when the filing states no unit for this row.  The ratio between
-    #: two cells of one row does not need one; the difference between them does.
+    #: ``None`` when the filing states no unit for this row.  Every figure is
+    #: then reported without one -- both operands and their difference alike,
+    #: because they are the same quantity and hiding one of the three would
+    #: leave the reader to do the subtraction the answer refused to show.
     unit: str | None
     column_label: str
     chunk_id: str
@@ -103,9 +105,7 @@ class PeriodicMetricChange:
     metric: str
     initial: PeriodicMetricOperand
     final: PeriodicMetricOperand
-    #: ``None`` when no unit was stated, in which case the amounts are reported
-    #: without one and the difference is withheld rather than guessed.
-    difference: Decimal | None
+    difference: Decimal
     pct_change: Decimal
 
     @property
@@ -127,9 +127,7 @@ class PeriodicMetricChange:
             "unit": self.unit,
             "initial": self.initial.to_dict(),
             "final": self.final.to_dict(),
-            "difference": (
-                None if self.difference is None else _decimal_text(self.difference)
-            ),
+            "difference": _decimal_text(self.difference),
             "pct_change": _decimal_text(self.pct_change),
             "direction": self.direction,
         }
@@ -254,7 +252,7 @@ def resolve_periodic_metric_change(
         chunk_id=source.chunk_id,
         doc_id=source.doc_id,
     )
-    difference = (final.value - initial.value) if unit is not None else None
+    difference = final.value - initial.value
     pct_change = (
         ((final.value - initial.value) / initial.value) * Decimal("100")
     ).quantize(_TWO_DECIMALS, rounding=ROUND_HALF_UP)
@@ -281,10 +279,7 @@ def periodic_metric_change_claims(
         final_year = int(final["year"])
         initial_value = Decimal(str(initial["value"]))
         final_value = Decimal(str(final["value"]))
-        raw_difference = value["difference"]
-        difference = (
-            None if raw_difference is None else Decimal(str(raw_difference))
-        )
+        difference = Decimal(str(value["difference"]))
         pct_change = Decimal(str(value["pct_change"]))
     except (KeyError, TypeError, ValueError, InvalidOperation):
         return None
@@ -301,14 +296,7 @@ def periodic_metric_change_claims(
     calculated_pct = (
         (calculated_difference / initial_value) * Decimal("100")
     ).quantize(_TWO_DECIMALS, rounding=ROUND_HALF_UP)
-    if pct_change != calculated_pct:
-        return None
-    # Without a unit the difference is not reported, so a serialized one is a
-    # value nothing produced.
-    if unit is None:
-        if difference is not None:
-            return None
-    elif difference != calculated_difference:
+    if difference != calculated_difference or pct_change != calculated_pct:
         return None
     initial_ids = _source_ids(initial)
     final_ids = _source_ids(final)
@@ -326,17 +314,15 @@ def periodic_metric_change_claims(
             final_ids,
         ),
     ]
-    if difference is not None:
-        lines.append((f"증감액: {_format_signed(difference)}{suffix}", both_ids))
+    lines.append((f"증감액: {_format_signed(difference)}{suffix}", both_ids))
     lines.append((f"증감률: {_format_signed(pct_change, decimals=2)}%", both_ids))
     if unit is None:
-        # Said plainly rather than left for the reader to notice: the rate is
-        # exact, the amounts are the figures as filed, and the difference is
-        # absent because stating an amount without its unit would be a number
-        # nobody can read.
+        # Said rather than left for the reader to infer from three bare
+        # figures. The arithmetic is exact and the figures are as filed; what
+        # the filing did not state is what they are counted in.
         lines.append(
             (
-                "단위: 공시 원문에 표기되지 않아 증감액은 계산하지 않았습니다.",
+                "단위: 공시 원문에 단위 표기가 없어 금액을 단위 없이 표시했습니다.",
                 both_ids,
             )
         )

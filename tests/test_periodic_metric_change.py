@@ -232,13 +232,14 @@ def test_serialized_claims_are_recomputed_before_rendering() -> None:
     assert periodic_metric_change_claims(tampered) is None
 
 
-def test_a_missing_unit_withholds_the_amount_but_not_the_rate() -> None:
+def test_a_missing_unit_still_calculates_everything() -> None:
     """A ratio between two cells of one row is dimensionless.
 
     Only 42.5% of this corpus's periodic table chunks carry a unit, so
     refusing without one left the calculator unable to answer most growth
     questions -- while what was asked for, a percentage, never needed one.
-    The difference does, and it is withheld rather than guessed.
+    The difference is arithmetic on the same two figures and is reported the
+    same way they are.
     """
 
     plan, resolution = _selected_resolution(unit=None)
@@ -250,39 +251,39 @@ def test_a_missing_unit_withholds_the_amount_but_not_the_rate() -> None:
     assert change is not None
     assert change.unit is None
     assert change.pct_change == Decimal("9.22")
-    assert change.difference is None
+    assert change.difference == Decimal("3749222")
     assert change.direction == "increase"
 
 
-def test_a_missing_unit_says_so_and_renders_no_amount() -> None:
+def test_a_missing_unit_is_stated_and_no_figure_carries_one() -> None:
     plan, resolution = _selected_resolution(unit=None)
     change = resolve_periodic_metric_change(
         requested_periodic_metric_change(plan), resolution, query_plan=plan
     )
 
-    claims = periodic_metric_change_claims(change.to_dict())
-    rendered = [text for text, _ids in claims]
+    rendered = [text for text, _ids in periodic_metric_change_claims(change.to_dict())]
 
-    assert "증감률: +9.22%" in rendered
-    assert not any(text.startswith("증감액") for text in rendered)
-    assert rendered[-1] == (
-        "단위: 공시 원문에 표기되지 않아 증감액은 계산하지 않았습니다."
-    )
-    # The figures are still the ones filed; they simply carry no unit suffix.
+    # Operands and difference are shown alike: hiding one of three same-unit
+    # figures would leave the reader doing the subtraction the answer refused.
     assert "2024년 매출액: 40,658,539" in rendered
+    assert "증감액: +3,749,222" in rendered
+    assert "증감률: +9.22%" in rendered
+    assert rendered[-1] == (
+        "단위: 공시 원문에 단위 표기가 없어 금액을 단위 없이 표시했습니다."
+    )
+    assert not any("백만원" in text for text in rendered)
 
 
-def test_a_difference_serialized_without_a_unit_is_refused() -> None:
-    # Nothing produces an amount when no unit was read, so one appearing in a
-    # serialized change did not come from this module.
-    plan, resolution = _selected_resolution(unit=None)
+def test_a_stated_unit_is_carried_on_every_amount() -> None:
+    plan, resolution = _selected_resolution()
     change = resolve_periodic_metric_change(
         requested_periodic_metric_change(plan), resolution, query_plan=plan
     )
-    forged = change.to_dict()
-    forged["difference"] = "3749222"
 
-    assert periodic_metric_change_claims(forged) is None
+    rendered = [text for text, _ids in periodic_metric_change_claims(change.to_dict())]
+
+    assert "증감액: +3,749,222백만원" in rendered
+    assert not any(text.startswith("단위:") for text in rendered)
 
 
 def test_mismatched_period_windows_fail_closed() -> None:
@@ -388,7 +389,7 @@ def test_orchestrator_renders_calculation_with_selected_source_citation() -> Non
     )
 
 
-def test_orchestrator_serves_the_rate_when_no_unit_was_filed() -> None:
+def test_orchestrator_serves_the_calculation_when_no_unit_was_filed() -> None:
     pair = _candidate(
         "p:ch_income",
         "p",
@@ -425,12 +426,7 @@ def test_orchestrator_serves_the_rate_when_no_unit_was_filed() -> None:
     )
     generated = generate_answer(result.answer_draft)
 
-    # The rate is served; the amount is not, and the answer says why.
     assert "periodic_metric_change" in result.execution_trace
     assert "증감률: +9.22%" in generated.answer_text
-    # The word appears only in the notice that explains its absence.
-    assert not any(
-        line.strip().startswith("증감액")
-        for line in generated.answer_text.splitlines()
-    )
-    assert "단위: 공시 원문에 표기되지 않아" in generated.answer_text
+    assert "증감액: +3,749,222" in generated.answer_text
+    assert "단위: 공시 원문에 단위 표기가 없어" in generated.answer_text
