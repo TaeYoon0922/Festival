@@ -20,6 +20,7 @@ from app.reasoning.comparison_evidence import (
     evidence_comparison,
     evidence_subplan,
     execute_per_company,
+    leg_query,
     merge_executions,
 )
 from app.reasoning.comparison_ranking import (
@@ -247,6 +248,58 @@ class SubplanTests(unittest.TestCase):
 
         self.assertIsNotNone(executions["00121"])
         self.assertIsNone(executions["00122"])
+
+
+class LegQueryTests(unittest.TestCase):
+    """A leg asks for the subject, not for who wins.
+
+    The measured failure: "설비투자 규모가 더 큰 기업은 어디인가" retrieved, for
+    삼성SDI, ten 2025 filings none of which stated a capex figure, while the same
+    corpus asked "설비투자 규모" returned "(4) 설비 등 투자현황" first. The
+    comparison's own wording was displacing the subject in both halves of the
+    hybrid query.
+    """
+
+    def test_the_comparative_half_is_removed(self) -> None:
+        self.assertEqual(leg_query("설비투자 규모가 더 큰 기업은 어디인가"), "설비투자 규모")
+
+    def test_a_superlative_is_removed_too(self) -> None:
+        self.assertEqual(leg_query("연구개발비가 가장 많은 곳은 어디인가"), "연구개발비")
+        self.assertEqual(leg_query("매출액이 제일 큰 기업"), "매출액")
+
+    def test_an_explicit_comparison_request_is_removed(self) -> None:
+        self.assertEqual(leg_query("설비투자 규모를 비교해줘"), "설비투자 규모")
+
+    def test_a_query_without_comparative_wording_is_unchanged(self) -> None:
+        # The worst case of this change must be today's behaviour.
+        for query in ("설비투자", "2025년 매출액", "전환사채 발행 내역"):
+            with self.subTest(query=query):
+                self.assertEqual(leg_query(query), query)
+
+    def test_it_never_empties_a_query(self) -> None:
+        # QueryPlan rejects an empty lexical query, so a query that is nothing
+        # but comparative wording must survive untouched rather than raise.
+        for query in ("더 큰 곳은", "비교해줘", "가장 큰"):
+            with self.subTest(query=query):
+                self.assertTrue(leg_query(query))
+
+    def test_each_leg_carries_the_stripped_query(self) -> None:
+        plan = _plan(query="설비투자 규모가 더 큰 기업은 어디인가")
+        for subplan in (
+            evidence_subplan(plan, operand)
+            for operand in evidence_comparison(plan).companies
+        ):
+            self.assertEqual(subplan.query, "설비투자 규모")
+
+    def test_the_asked_question_is_not_rewritten(self) -> None:
+        # The answerability guard reads `raw_query` to decide which fields the
+        # asker requested. Trimming it there would let a leg satisfy the guard by
+        # asking for less, which is the opposite of the intent: this change makes
+        # the evidence reachable, never the requirement weaker.
+        plan = _plan(query="설비투자 규모가 더 큰 기업은 어디인가")
+        subplan = evidence_subplan(plan, evidence_comparison(plan).companies[0])
+
+        self.assertEqual(subplan.raw_query, plan.raw_query)
 
 
 class MergeTests(unittest.TestCase):

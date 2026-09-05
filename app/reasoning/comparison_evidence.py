@@ -22,6 +22,7 @@ company's 당기, another's 상반기 -- still remain side by side without a win
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from itertools import zip_longest
 from typing import Any, Mapping, Sequence
@@ -41,6 +42,15 @@ DECLINE_TOO_MANY = "more_than_max_companies"
 DECLINE_UNRESOLVED = "company_not_resolved_in_corpus"
 DECLINE_NO_INTENT = "no_comparison_intent"
 DECLINE_NO_SUBJECT = "no_shared_subject"
+
+#: The wording that asks which member of the set wins.  It belongs to the
+#: comparison, not to any one company, and a leg that carries it retrieves the
+#: filings that discuss rank rather than the filings that state the figure.
+#: Cutting from the comparative adverb leaves the subject the question named.
+_COMPARATIVE_TAIL = re.compile(r"\s(?:더\s|가장\s|제일\s|비교).*$")
+#: The particle left dangling once the comparison half is gone -- "규모가" from
+#: "규모가 더 큰" -- which no filing writes.
+_TRAILING_PARTICLE = re.compile(r"[이가은는을를와과의]$")
 
 _COMPANY_COMPARISON = "company_comparison"
 _CROSS_COMPANY = "cross_company"
@@ -161,6 +171,30 @@ def evidence_comparison(plan: Any) -> EvidenceComparison:
     )
 
 
+def leg_query(query: str) -> str:
+    """The subject each company is asked about, without the comparison's own wording.
+
+    A comparison question is one question about a set, but each leg is an
+    ordinary single-company retrieval and reads the same lexical query. "설비투자
+    규모가 더 큰 기업은 어디인가" therefore embeds the ranking half too, and the
+    section that states the figure -- "(4) 설비 등 투자현황" -- loses to filings
+    that merely discuss size. Asked as "설비투자 규모" the same corpus returns it
+    first.
+
+    Only the comparison's own wording is removed. The subject, the metric and
+    the period all survive, and ``raw_query`` is deliberately untouched so the
+    answerability guard still requires the field the asker asked for: this makes
+    the evidence reachable, never the requirement weaker.
+
+    A query with no comparative wording is returned unchanged, so a leg can only
+    ever retrieve what it retrieves today.
+    """
+
+    trimmed = _COMPARATIVE_TAIL.sub("", str(query or "")).strip()
+    trimmed = _TRAILING_PARTICLE.sub("", trimmed).strip()
+    return trimmed or str(query or "")
+
+
 def evidence_subplan(plan: Any, operand: CompanyOperand) -> Any:
     """One company's own plan, scoped to the period the question asked about.
 
@@ -199,6 +233,7 @@ def evidence_subplan(plan: Any, operand: CompanyOperand) -> Any:
         )
     return replace(
         plan,
+        query=leg_query(getattr(plan, "query", "")),
         company=operand.name,
         companies=(operand.name,),
         corp_code=operand.corp_code,
