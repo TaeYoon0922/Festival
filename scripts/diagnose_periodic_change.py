@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.agent import orchestrator
 from app.api.pipeline import AnswerPipeline
 from app.reasoning import periodic_metric_change as change_module
+from app.reasoning.periodic_metric_view import project_periodic_metric_table
 
 
 DEFAULT_QUESTIONS = (
@@ -38,7 +39,7 @@ DEFAULT_QUESTIONS = (
 )
 
 
-def _describe(request: Any, resolution: Any) -> list[str]:
+def _describe(request: Any, resolution: Any, query_plan: Any) -> list[str]:
     """Each gate in ``resolve_periodic_metric_change`` order, with its verdict."""
 
     years = tuple(getattr(request, "years", ()) or ())
@@ -70,11 +71,67 @@ def _describe(request: Any, resolution: Any) -> list[str]:
         f"{'PASS' if len(sources) == 1 and not getattr(fact, 'fact_conflict', None) else 'FAIL'}"
         f"   sources={len(sources)} conflict={getattr(fact, 'fact_conflict', None)}"
     )
-    if len(sources) == 1:
-        text = str(getattr(sources[0], "fact_text", "") or "")
-        lines.append("")
-        lines.append("source row:")
-        lines.extend(f"  {line}" for line in text.splitlines()[:6])
+    if len(sources) != 1:
+        return lines
+    source = sources[0]
+    lines.append("")
+    lines.append("raw row:")
+    lines.extend(
+        f"  {line}"
+        for line in str(getattr(source, "fact_text", "") or "").splitlines()[:4]
+    )
+
+    plan = change_module._plan_mapping(query_plan)
+    projected = project_periodic_metric_table(
+        source.fact_text,
+        metric=getattr(request, "metric", None),
+        period=change_module._mapping(plan.get("period")),
+        comparison=change_module._mapping(plan.get("comparison")),
+        raw_query=str(plan.get("raw_query") or getattr(resolution, "question", "") or ""),
+    )
+    lines.append("")
+    lines.append("projected (what the calculator actually reads):")
+    if not projected:
+        lines.append("  None -- the projection produced nothing")
+        return lines
+    lines.extend(f"  {line}" for line in str(projected).splitlines()[:4])
+
+    # The row parser's own steps, in its order, so the refusing one is named.
+    rows = [
+        line
+        for line in str(projected).splitlines()
+        if line.strip().startswith("|")
+        and not change_module._TABLE_SEPARATOR.fullmatch(line.strip())
+    ]
+    lines.append("")
+    lines.append(f"5 exactly two rows             {'PASS' if len(rows) == 2 else 'FAIL'}   rows={len(rows)}")
+    if len(rows) != 2:
+        return lines
+    headers = change_module._cells(rows[0])
+    cells = change_module._cells(rows[1])
+    lines.append(f"6 column count                 headers={len(headers)} values={len(cells)}")
+    source_year = change_module._source_year(source)
+    lines.append(f"7 source year                  {source_year}   reporting_period={dict(getattr(source, 'reporting_period', {}) or {})}")
+    period_headers = headers[1:]
+    signatures = [change_module._period_signature(header) for header in period_headers]
+    lines.append(f"8 period signatures            {signatures}")
+    years = change_module._header_years(period_headers, source_year=source_year)
+    lines.append(
+        f"9 header years                 {years}"
+        f"   {'PASS' if years and set(years) == set(getattr(request, 'years', ())) else 'FAIL'}"
+    )
+    parsed = [change_module._numeric_cell(cell) for cell in cells[1:]]
+    lines.append(f"10 parsed values               {parsed}")
+    row_unit = change_module._unit_from_row_label(cells[0])
+    chunk = dict((getattr(source, "provenance", {}) or {}).get("source_chunk") or {})
+    chunk_unit = change_module._normalize_unit(chunk.get("unit"))
+    cell_units = {unit for value in parsed if value for _n, unit in [value] if unit}
+    lines.append(
+        f"11 unit                        cell={cell_units or None} row={row_unit} chunk={chunk_unit}"
+        f"   {'PASS' if (cell_units or row_unit or chunk_unit) else 'FAIL -- no unit anywhere'}"
+    )
+    if not (cell_units or row_unit or chunk_unit):
+        lines.append(f"   source_chunk keys: {sorted(chunk)}")
     return lines
 
 
@@ -88,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def wrapped(request, resolution, *, query_plan):
         outcome = original(request, resolution, query_plan=query_plan)
-        report = _describe(request, resolution)
+        report = _describe(request, resolution, query_plan)
         report.append("")
         report.append(f"RESULT           {'resolved' if outcome else 'unresolved'}")
         reports.append(report)
