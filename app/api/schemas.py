@@ -79,6 +79,18 @@ class MultiDocumentTrace(BaseModel):
     evidence_count: int
 
 
+class AnswerLeadTrace(BaseModel):
+    """Whether the opening sentence was written, and what stopped it if not.
+
+    ``status`` carries the refusing rule -- ``rejected:digit`` and the rest --
+    so a lead the checks discarded is visible rather than silent. The reply
+    itself is not recorded: a refused sentence is not evidence of anything.
+    """
+
+    status: str
+    applied: bool
+
+
 class ComparisonEvidenceTrace(BaseModel):
     """Which fan-out ran, in counts only.
 
@@ -232,6 +244,11 @@ class ThinkTrace(BaseModel):
     #: Present only when a comparison was retrieved company by company.
     #: ``exclude_if`` keeps every other response's key set unchanged.
     comparison_evidence: ComparisonEvidenceTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    #: Present only when an evidence answer was eligible for an opening line.
+    answer_lead: AnswerLeadTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

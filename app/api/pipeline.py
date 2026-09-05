@@ -19,6 +19,13 @@ import psycopg
 
 from app.agent.orchestrator import AgentOrchestrator
 from app.api.settings import ApiSettings
+from app.generation.answer_lead import (
+    AnswerLeadWriter,
+    lead_period,
+    lead_request,
+    question_topic,
+    with_lead,
+)
 from app.generation.answer_presentation import readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
@@ -168,6 +175,7 @@ class AnswerPipeline:
         orchestrator: AgentOrchestrator | None = None,
         generator: CitationAwareAnswerGenerator | None = None,
         verbalizer: HcxVerbalizer | None = None,
+        lead_writer: AnswerLeadWriter | None = None,
         multi_document_planner: MultiDocumentPlanner | None = None,
         multi_document_executor: MultiDocumentExecutor | None = None,
         multi_document_evidence: MultiDocumentEvidenceBuilder | None = None,
@@ -182,6 +190,7 @@ class AnswerPipeline:
         self.orchestrator = orchestrator or AgentOrchestrator()
         self.generator = generator or CitationAwareAnswerGenerator()
         self.verbalizer = verbalizer or HcxVerbalizer()
+        self.lead_writer = lead_writer or AnswerLeadWriter()
         # P0-C is additive and opt-in. Without an executor wired the pipeline
         # behaves exactly as it did before, which is what the frozen Gold60
         # path depends on.
@@ -277,6 +286,7 @@ class AnswerPipeline:
             # enumerable family, a bounded period, and an explicit date basis;
             # everything else takes the path above unchanged.
             verbalizer=HcxVerbalizer(hcx_settings),
+            lead_writer=AnswerLeadWriter(hcx_settings),
             multi_document_planner=multi_document_planner,
             multi_document_executor=MultiDocumentExecutor(
                 event_repository=event_repository,
@@ -484,16 +494,30 @@ class AnswerPipeline:
                     [*trace["warnings"], "citation_alignment_unmapped"]
                 )
             )
+        # Last thing before the reader. The retrieval prefix each chunk carries
+        # for the embedder becomes a heading, and HCX is asked for the opening
+        # line the answer lacks. Body text, tables and citation markers pass
+        # through untouched in both steps, and either one failing leaves the
+        # answer exactly as it was built.
+        presented = readable_answer(public_answer)
+        lead = self.lead_writer.write(
+            lead_request(
+                presented,
+                period=lead_period(getattr(validation, "plan", None)),
+                topic=question_topic(question),
+            )
+        )
+        if lead.status != "not_eligible":
+            trace["answer_lead"] = lead.to_public_dict()
+            if lead.succeeded:
+                stages = list(trace.get("stages") or ())
+                trace["stages"] = [*stages, "answer_lead"]
         return {
             "question_id": question_id,
             "question": question,
             "retrieved_context": public_context,
             "think_trace": trace,
-            # Last thing before the reader: the retrieval prefix each chunk
-            # carries for the embedder is rewritten into a heading. Body text,
-            # tables and citation markers pass through untouched, and an answer
-            # shape this does not recognise is returned exactly as built.
-            "answer": _non_empty(readable_answer(public_answer)),
+            "answer": _non_empty(with_lead(presented, lead.text)),
         }
 
     @property
