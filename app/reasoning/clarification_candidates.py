@@ -17,6 +17,9 @@ from app.reasoning.clarification_request import (
 from app.reasoning.corporate_event import LIFECYCLE_OPEN, RESOLVED
 from app.reasoning.holding_company_role_resolution import has_role_provenance
 from app.reasoning.holding_evidence_coverage import has_holding_acquisition_semantics
+from app.reasoning.contract_instance_clarification import (
+    contract_instance_clarification_request,
+)
 from app.reasoning.holding_report_clarification import (
     holding_report_clarification_request,
 )
@@ -132,6 +135,7 @@ def execution_clarification_request(
     multi_document: Any = None,
     report_index: Any = None,
     answerable: bool = True,
+    answerability: Any = None,
 ) -> ClarificationRequest | None:
     """Candidates proven by structured corpus or resolver output."""
 
@@ -149,7 +153,14 @@ def execution_clarification_request(
         return request
     if _protected_semantics(question, plan):
         return None
-    return _event_instance_request(question, plan, result, execution)
+    request = _event_instance_request(question, plan, result, execution)
+    if request is not None:
+        return request
+    # Last, so the event graph's own reading is preferred wherever it has one.
+    # This speaks only where the guard proved the served filings disagree, which
+    # is a question the graph did not answer rather than one it answered
+    # differently.
+    return contract_instance_clarification_request(question, execution, answerability)
 
 
 def apply_resolved_candidate(

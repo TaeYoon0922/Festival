@@ -440,6 +440,7 @@ class AnswerPipeline:
                     if answerability is not None
                     else getattr(generated, "answerable", False)
                 ),
+                answerability=answerability,
             )
             if request is not None:
                 post_decision = self.clarification_resolver.resolve(request)
