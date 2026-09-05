@@ -33,6 +33,7 @@ from app.reasoning.clarification_request import (
     ClarificationState,
 )
 from app.reasoning.holding_report_relative import parse as parse_report_relative
+from app.reasoning.holding_reporter import reporter_matches
 
 
 #: The selector the parser assigns when the wording points at a report the
@@ -108,6 +109,8 @@ def holding_report_clarification_request(
 
     try:
         records = report_index.enumerate_reports(corp_code, reporter)
+        if not records:
+            records = _by_matched_holder(report_index, corp_code, reporter)
     except Exception:  # noqa: BLE001 - a provider must never break the answer
         return None
     candidates = _candidates(records)
@@ -123,6 +126,37 @@ def holding_report_clarification_request(
         truncated=len(records) > len(candidates),
         preserve_candidates=True,
     )
+
+
+def _by_matched_holder(report_index: Any, corp_code: str, reporter: str) -> Sequence[Any]:
+    """Enumerate for a holder the question named in short, or return nothing.
+
+    ``enumerate_reports`` keys on the canonical holder, so "국민연금" finds
+    nothing where the corpus writes "국민연금공단". Its own ``resolve_reporter_key``
+    only widens that for ASCII names -- the path that reaches ``Fidelity
+    Management & Research Company LLC`` from ``Fidelity`` -- and the index's
+    freeze does not authorise widening it further.
+
+    Nothing here does. ``enumerate_reporters`` is documented for exactly this:
+    it returns each holder as the filing wrote it "because the caller compares
+    identities with the frozen reporter matcher". So the matcher decides, under
+    its own firewall -- 국민연금공단 answers to 국민연금, 영풍정밀 does not answer
+    to 영풍 -- and only a single match is used, because two holders answering to
+    one name means the question named neither.
+
+    This feeds a question back to the asker, never an answer, so the worst a
+    wrong holder could do here is offer filings to choose from that the asker
+    then declines.
+    """
+
+    try:
+        holders = report_index.enumerate_reporters(corp_code)
+    except Exception:  # noqa: BLE001 - a provider must never break the answer
+        return ()
+    matched = [holder for holder in holders if reporter_matches(holder, reporter)]
+    if len(matched) != 1:
+        return ()
+    return report_index.enumerate_reports(corp_code, matched[0])
 
 
 def _candidates(

@@ -45,18 +45,28 @@ class _Plan:
 
 
 class _Index:
-    """Enumerates one pair, the way the generated artifact does."""
+    """Enumerates one pair, the way the generated artifact does.
 
-    def __init__(self, records: tuple[_Record, ...]) -> None:
+    ``holders`` is the corpus's own spelling; ``enumerate_reports`` answers only
+    to that exact string, which is what the real index does for Korean names.
+    """
+
+    def __init__(
+        self, records: tuple[_Record, ...], holders: tuple[str, ...] = ("하이브",)
+    ) -> None:
         self.records = records
+        self.holders = holders
         self.asked: list[tuple[str, str]] = []
+
+    def enumerate_reporters(self, corp_code: str):
+        return self.holders
 
     def enumerate_reports(self, corp_code: str, reporter: str):
         self.asked.append((corp_code, reporter))
-        return self.records
+        return self.records if reporter in self.holders else ()
 
 
-def _index(count: int = 3) -> _Index:
+def _index(count: int = 3, holders: tuple[str, ...] = ("하이브",)) -> _Index:
     return _Index(
         tuple(
             _Record(
@@ -65,7 +75,8 @@ def _index(count: int = 3) -> _Index:
                 reference_date=f"2024030{index}",
             )
             for index in range(1, count + 1)
-        )
+        ),
+        holders=holders,
     )
 
 
@@ -191,6 +202,43 @@ class StayOutOfTheWayTests(unittest.TestCase):
                 "에스엠 하이브 이번 보고 보유 주식수와 비율",
                 _Plan(),
                 report_index=_Broken(),
+                answerable=False,
+            )
+        )
+
+
+class ShortHolderNameTests(unittest.TestCase):
+    """The corpus writes 국민연금공단; askers write 국민연금."""
+
+    def test_a_shortened_holder_still_enumerates(self) -> None:
+        request = holding_report_clarification_request(
+            "이마트 국민연금 이번보고 보유 수와 비율",
+            _Plan(reporter="국민연금"),
+            report_index=_index(4, holders=("국민연금공단", "정용진")),
+            answerable=False,
+        )
+
+        self.assertIsNotNone(request)
+        self.assertEqual(len(request.candidates), 4)
+
+    def test_the_matcher_firewall_still_holds(self) -> None:
+        # 영풍 is not 영풍정밀 here for the same reason it is not anywhere else.
+        self.assertIsNone(
+            holding_report_clarification_request(
+                "이마트 영풍 이번보고 보유 수와 비율",
+                _Plan(reporter="영풍"),
+                report_index=_index(4, holders=("영풍정밀",)),
+                answerable=False,
+            )
+        )
+
+    def test_two_holders_answering_to_one_name_enumerate_nothing(self) -> None:
+        # Two matches mean the question named neither, so nothing is offered.
+        self.assertIsNone(
+            holding_report_clarification_request(
+                "이마트 국민연금 이번보고 보유 수와 비율",
+                _Plan(reporter="국민연금"),
+                report_index=_index(4, holders=("국민연금공단", "국민연금기금")),
                 answerable=False,
             )
         )
