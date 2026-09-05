@@ -301,6 +301,12 @@ def test_a_derived_ratio_is_never_computed_from_the_amount_inside_its_name() -> 
         "삼성전자 2025년 영업이익률은 2024년 대비 몇 퍼센트 증가했는가",
         "삼성전자 2025년 부채비율 증감률",
         "삼성전자 2025년 ROE 증감률",
+        # A named-ratio list was always one phrasing short: these two reached
+        # the calculator as plain 영업이익 and 당기순이익 while one was in place.
+        "삼성전자 2025년 영업이익 마진 전년 대비 증가율",
+        "삼성전자 2025년 순이익 마진 전년 대비 증가율",
+        "삼성전자 2025년 ROA 변화율",
+        "삼성전자 EBITDA 마진 증가율",
     ):
         plan = understanding.understand(question)
         assert names_a_derived_ratio(plan), question
@@ -314,6 +320,46 @@ def test_the_amount_itself_is_still_computed() -> None:
     ):
         plan = understanding.understand(question)
         assert not names_a_derived_ratio(plan), question
+
+
+def test_the_served_answer_states_no_rate_for_a_ratio_question() -> None:
+    """End to end, not just the predicate: no ``증감률:`` line reaches the reader."""
+
+    pair = _candidate(
+        "p:ch_income",
+        "p",
+        rank=1,
+        doc_group="periodic",
+        content=_COMPARISON_TABLE,
+        section="연결포괄손익계산서",
+        base_year=2025,
+        base_month=3,
+        quarter=1,
+        period_type="fiscal_quarter",
+        statement_scope="연결",
+        report_nm="분기보고서 (2025.03)",
+        source_refs=[{"table_id": "income", "row_start": 1, "row_end": 4}],
+    )
+    plan = QueryPlan(
+        query="영업이익",
+        raw_query="테스트회사 2025년 영업이익 마진 전년 동기 대비 증가율",
+        company="테스트회사",
+        years=(2024, 2025),
+        period=QueryPeriod(quarter=1, period_type="fiscal_quarter"),
+        task_type="financial_metric",
+        metric="영업이익",
+        disclosure_route=("periodic",),
+        basis="consolidated",
+        comparison={"type": "year_over_year", "years": [2024, 2025]},
+        evidence=_change_plan()["evidence"],
+    )
+
+    result = AgentOrchestrator().run(plan.raw_query, plan, _execution(plan, pair))
+    generated = generate_answer(result.answer_draft)
+
+    assert "periodic_metric_change_unresolved" in result.execution_trace
+    assert "증감률:" not in generated.answer_text
+    assert "증감액:" not in generated.answer_text
 
 
 def test_a_ratio_question_declines_the_whole_calculation() -> None:

@@ -66,6 +66,9 @@ class ParsedAmount:
 
     value: int
     text: str
+    #: The clause the amount was read from.  The subject that gives the amount
+    #: its meaning has to be in this, not merely somewhere in the chunk.
+    clause: str = ""
 
 
 @dataclass(frozen=True)
@@ -150,7 +153,11 @@ def parse_total_amount(text: Any) -> ParsedAmount | None:
         value = _parse_amount_expression(amount_text)
         if value is None:
             return None
-        marked.append(ParsedAmount(value=value, text=amount_text))
+        following = _CLAUSE_BOUNDARY.search(source, match.end())
+        clause = source[clause_start : following.start() if following else len(source)]
+        marked.append(
+            ParsedAmount(value=value, text=amount_text, clause=clause)
+        )
 
     # Several totals in one chunk can describe several subjects or periods.
     # Retrieval rank cannot tell which one the question meant, so fail closed.
@@ -407,6 +414,8 @@ _SUBJECT_NOISE = frozenset(
     중 더 가장 제일 큰 작은 많은 적은 높은 낮은 어디 어느 무엇 누구 얼마 규모
     기업 회사 곳 쪽 순서 순위 비교 알려줘 알려 정리 확인 인가 인가요 입니까
     있나 있는지 해줘 그리고 대비 기준 년 년도 연도 분기 반기 상반기 하반기
+    금액 총액 합계 누적 수치 실적 내역 현황 자료 공시 보고서 사업보고서
+    반기보고서 분기보고서 기말 기준일 당기 전기
     """.split()
 )
 
@@ -511,8 +520,11 @@ def _select_company_amount(
             base_year=base_year,
             chunk_id=chunk_id,
             doc_id=doc_id,
+            # Read from the amount's own clause. "설비투자는 검토 중이다.
+            # 총 매출액 10조원" names the subject and then states a different
+            # quantity, and a chunk-wide search cannot tell those apart.
             subjects=frozenset(
-                term for term in subjects if term in evidence_text
+                term for term in subjects if term in parsed.clause
             ),
         )
     return None

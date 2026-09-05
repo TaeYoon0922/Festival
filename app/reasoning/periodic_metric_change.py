@@ -192,16 +192,25 @@ def requested_periodic_metric_change(
     )
 
 
-#: Ratios a filing reports as a percentage, each of which contains the name of
-#: an amount the corpus also reports.  Query understanding matches a metric by
-#: substring and is frozen, so "영업이익률" arrives here as metric "영업이익" --
-#: and computing a growth rate from those amounts would answer a question about
-#: a ratio with a change in the amount underneath it.
-_DERIVED_RATIOS = (
-    "영업이익률", "순이익률", "매출총이익률", "영업이익율", "순이익율",
-    "부채비율", "유동비율", "자기자본비율", "배당성향", "배당수익률",
-    "ROE", "ROA", "ROIC", "EBITDA마진",
+#: Wording that makes a question about a ratio rather than about an amount.
+#: Matched as a pattern rather than a list because the list is always one
+#: phrasing short: "영업이익 마진 증가율" reached the calculator as plain
+#: 영업이익 while a list of named ratios was in place.
+#:
+#: Query understanding matches a metric by substring and is frozen, so any of
+#: these arrives here carrying the amount inside its name. Computing a growth
+#: rate from that amount would answer a question about a ratio with the change
+#: in a different quantity.
+_DERIVED_RATIO = re.compile(
+    r"비율|이익률|이익율|수익률|수익율|마진|margin|EBITDA"
+    # Letter boundaries rather than word boundaries: whitespace is stripped
+    # first, so "삼성전자ROE" puts a Korean character beside the R.
+    r"|(?<![A-Za-z])(?:ROE|ROA|ROIC)(?![A-Za-z])",
+    re.IGNORECASE,
 )
+#: Removed first, so the rate wording a growth question is made of cannot be
+#: read as the ratio it is asking about.
+_CHANGE_WORDING = re.compile(r"증감률|증가율|감소율|성장률|변동률|증감율|증가률")
 
 
 def names_a_derived_ratio(plan: Any) -> bool:
@@ -209,7 +218,7 @@ def names_a_derived_ratio(plan: Any) -> bool:
 
     raw = _plan_mapping(plan).get("raw_query") or getattr(plan, "raw_query", "")
     compact = re.sub(r"\s+", "", str(raw or ""))
-    return any(ratio.casefold() in compact.casefold() for ratio in _DERIVED_RATIOS)
+    return bool(_DERIVED_RATIO.search(_CHANGE_WORDING.sub("", compact)))
 
 
 def resolve_periodic_metric_change(
