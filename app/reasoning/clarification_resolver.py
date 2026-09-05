@@ -88,6 +88,7 @@ class ClarificationResolver:
             candidates=selected_candidates or candidates,
             classifier_status=status,
             truncated=request.truncated,
+            preserve_candidates=request.preserve_candidates,
         )
 
 
@@ -103,6 +104,7 @@ def _clarify(
         candidates=request.candidates,
         classifier_status=classifier_status,
         truncated=request.truncated,
+        preserve_candidates=request.preserve_candidates,
     )
 
 

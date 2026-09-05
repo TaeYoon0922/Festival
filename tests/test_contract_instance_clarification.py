@@ -16,7 +16,12 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from app.reasoning.clarification_request import EVENT_INSTANCE
+from app.reasoning.clarification_request import (
+    EVENT_INSTANCE,
+    ClarificationDecision,
+    ClarificationState,
+    clarification_text,
+)
 from app.reasoning.contract_instance_clarification import (
     REASON,
     conflicting_field,
@@ -191,6 +196,34 @@ class StayOutOfTheWayTests(unittest.TestCase):
         self.assertIsNone(
             contract_instance_clarification_request(QUESTION, execution, _conflict())
         )
+
+
+class TextTests(unittest.TestCase):
+    def _decision(self, count: int) -> ClarificationDecision:
+        request = contract_instance_clarification_request(
+            QUESTION, _execution(count), _conflict()
+        )
+        return ClarificationDecision(
+            state=ClarificationState.CLARIFY,
+            reason=request.reason,
+            candidates=request.candidates,
+            preserve_candidates=request.preserve_candidates,
+        )
+
+    def test_it_says_it_did_not_choose_and_lists_the_filings(self) -> None:
+        text = clarification_text(self._decision(3))
+
+        self.assertIn("질문에 어느 공시인지가 없어 하나를 고르지 않았습니다", text)
+        self.assertIn("- 2025-01-01 단일판매ㆍ공급계약체결", text)
+        self.assertIn("어느 공시일의 계약을 말씀하시는지", text)
+
+    def test_more_filings_than_the_prose_limit_are_still_listed(self) -> None:
+        # Measured on E01: the generic notice told the asker to name a 공시일
+        # while hiding which ones exist.
+        text = clarification_text(self._decision(6))
+
+        self.assertEqual(text.count("\n- "), 6)
+        self.assertNotIn("여러 가능한 해석이 확인되었습니다", text)
 
 
 if __name__ == "__main__":

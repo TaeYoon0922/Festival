@@ -136,6 +136,9 @@ class ClarificationDecision:
     selected_candidate_id: str | None = None
     classifier_status: str = "not_called"
     truncated: bool = False
+    #: Carried from the request: these candidates are the answer, so they are
+    #: shown whole rather than folded into the generic notice.
+    preserve_candidates: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "state", ClarificationState(self.state))
@@ -188,6 +191,21 @@ def clarification_text(
     candidates = decision.candidates
     if decision.state is not ClarificationState.CLARIFY:
         raise ValueError("clarification text requires a clarify decision")
+    labels = [candidate.label for candidate in candidates]
+    if decision.preserve_candidates and candidates and all(
+        candidate.semantic_type == EVENT_INSTANCE for candidate in candidates
+    ):
+        # Above the guard for the same reason the holding branch is: the guard
+        # keeps an answer from becoming a wall of sentences, and these labels
+        # are a date and a filing name. Folding them into the generic notice
+        # would tell the asker to name a 공시일 while hiding which ones exist.
+        listed = "\n".join(f"- {label}" for label in labels)
+        return (
+            "같은 계약 설명에 해당하는 공시가 여러 건 있습니다. 질문에 어느 "
+            "공시인지가 없어 하나를 고르지 않았습니다.\n"
+            f"{listed}\n"
+            "어느 공시일의 계약을 말씀하시는지 알려주세요."
+        )
     if candidates and all(
         candidate.semantic_type == HOLDING_REPORT_INSTANCE for candidate in candidates
     ):
@@ -209,7 +227,6 @@ def clarification_text(
             "여러 가능한 해석이 확인되었습니다. 원하시는 지표, 공시일 또는 "
             "보고서 기준을 구체적으로 알려주세요."
         )
-    labels = [candidate.label for candidate in candidates]
     if all(candidate.semantic_type == EVENT_INSTANCE for candidate in candidates):
         # Each label is one filing, so naming the dimension is what makes the
         # question answerable: the asker is told what to say back, not just
