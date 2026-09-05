@@ -21,6 +21,10 @@ MAX_LISTED_CANDIDATES = 3
 #: question about the corpus, and only the second can name the 공시일 that tells
 #: them apart.
 EVENT_INSTANCE = "event_instance"
+#: The asker named a holder but not one of that holder's filings.  Kept apart
+#: from EVENT_INSTANCE because the sentence differs: those candidates are
+#: contracts, these are reports of one continuing position.
+HOLDING_REPORT_INSTANCE = "holding_report_instance"
 
 
 class ClarificationState(str, Enum):
@@ -94,6 +98,13 @@ class ClarificationRequest:
     classifier_resolution_safe: bool = False
     fallback_state: ClarificationState = ClarificationState.INSUFFICIENT_EVIDENCE
     truncated: bool = False
+    #: Whether the candidate list is itself the answer and must be shown whole.
+    #: The classifier narrows candidates when they are readings of one question
+    #: -- 주식수 against 비율 -- and narrowing there is its job.  When the
+    #: candidates are the filings a corpus holds, narrowing hides filings the
+    #: asker is being invited to choose between, on no signal from a question
+    #: that named none of them.
+    preserve_candidates: bool = False
 
     def __post_init__(self) -> None:
         question = str(self.question or "").strip()
@@ -125,6 +136,9 @@ class ClarificationDecision:
     selected_candidate_id: str | None = None
     classifier_status: str = "not_called"
     truncated: bool = False
+    #: Carried from the request: these candidates are the answer, so they are
+    #: shown whole rather than folded into the generic notice.
+    preserve_candidates: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "state", ClarificationState(self.state))
@@ -177,12 +191,42 @@ def clarification_text(
     candidates = decision.candidates
     if decision.state is not ClarificationState.CLARIFY:
         raise ValueError("clarification text requires a clarify decision")
+    labels = [candidate.label for candidate in candidates]
+    if decision.preserve_candidates and candidates and all(
+        candidate.semantic_type == EVENT_INSTANCE for candidate in candidates
+    ):
+        # Above the guard for the same reason the holding branch is: the guard
+        # keeps an answer from becoming a wall of sentences, and these labels
+        # are a date and a filing name. Folding them into the generic notice
+        # would tell the asker to name a 공시일 while hiding which ones exist.
+        listed = "\n".join(f"- {label}" for label in labels)
+        return (
+            "같은 계약 설명에 해당하는 공시가 여러 건 있습니다. 질문에 어느 "
+            "공시인지가 없어 하나를 고르지 않았습니다.\n"
+            f"{listed}\n"
+            "어느 공시일의 계약을 말씀하시는지 알려주세요."
+        )
+    if candidates and all(
+        candidate.semantic_type == HOLDING_REPORT_INSTANCE for candidate in candidates
+    ):
+        # Listed in full, above the guard below, because these labels are dates
+        # rather than prose: the limit exists so an answer does not become a
+        # wall of sentences, and eight dates is not that. The holder is already
+        # right and the position is one timeline; what is missing is which
+        # filing of it, so naming them is what lets the asker say back
+        # something this system can act on.
+        listed = "\n".join(f"- {candidate.label}" for candidate in candidates)
+        return (
+            "해당 보유자의 보고서가 여러 건 있습니다. 질문에 어느 보고서인지가 "
+            "없어 하나를 고르지 않았습니다.\n"
+            f"{listed}\n"
+            "어느 보고서 기준으로 확인할지 알려주세요."
+        )
     if decision.truncated or len(candidates) > MAX_LISTED_CANDIDATES:
         return (
             "여러 가능한 해석이 확인되었습니다. 원하시는 지표, 공시일 또는 "
             "보고서 기준을 구체적으로 알려주세요."
         )
-    labels = [candidate.label for candidate in candidates]
     if all(candidate.semantic_type == EVENT_INSTANCE for candidate in candidates):
         # Each label is one filing, so naming the dimension is what makes the
         # question answerable: the asker is told what to say back, not just
@@ -222,6 +266,7 @@ def _with_object_particle(label: str) -> str:
 __all__ = [
     "EVENT_INSTANCE",
     "MAX_CANDIDATES",
+    "HOLDING_REPORT_INSTANCE",
     "MAX_LISTED_CANDIDATES",
     "ClarificationCandidate",
     "ClarificationDecision",
