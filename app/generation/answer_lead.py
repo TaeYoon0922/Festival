@@ -38,17 +38,22 @@ from app.retrieval.embeddings import (
 
 
 LEAD_SYSTEM_PROMPT = """You write one Korean sentence introducing a disclosure
-answer. You are given company names, filing kinds, and placeholders of the form
-{{TOKEN}}. Reply with that one sentence and nothing else.
+answer. You are given company names, filing kinds, subject words, and
+placeholders of the form {{TOKEN}}. Reply with that one sentence and nothing
+else.
 
-Rules. Use only the supplied companies and filing kinds. Copy any placeholder
-exactly as given, braces included. Never write a digit. Never write a citation
-marker such as [1]. Never state, compare, rank, estimate or predict any amount,
-change or outcome. Do not answer the question. Do not add a heading, a list, a
-quotation mark or a Markdown fence.
+Write it in this shape:
 
-Write only that the answer below presents the disclosure evidence found for the
-named companies."""
+  <companies>의 {{PERIOD_1}}년 <subject> 관련 공시 근거입니다.
+  <companies>의 <subject>를 <filing kinds>에서 확인한 내용입니다.
+
+Rules. Use only the supplied companies, filing kinds and subject words. Copy any
+placeholder exactly as given, braces included, and write 년 straight after
+{{PERIOD_1}} when you use it. Never write a digit. Never write a citation marker
+such as [1]. Never state, compare, rank, estimate or predict any amount, change
+or outcome. Do not answer the question. Do not add a heading, a list, a quotation
+mark or a Markdown fence."""
+
 
 #: A lead is framing, not content.  Anything longer has started summarising.
 MAX_LEAD_CHARS = 120
@@ -275,8 +280,21 @@ def accept_lead(reply: str, request: LeadRequest) -> str:
         if _looks_like_a_company(token):
             raise LeadRejected("unsupplied_company")
 
-    for token, value in request.placeholders.items():
-        text = text.replace(token, value)
+    return _restore(text, request.placeholders)
+
+
+def _restore(text: str, placeholders: Mapping[str, str]) -> str:
+    """Put the real values back, absorbing a unit the model already wrote.
+
+    The period is a bare year, and Korean needs 년 after it. The model is asked
+    to write that 년 itself and usually does, but a reply that omitted it read
+    "2025에 공시한". So the year is restored with its 년 attached, and a 년 the
+    model did write is consumed rather than doubled.
+    """
+
+    for token, value in placeholders.items():
+        text = re.sub(rf"{re.escape(token)}\s*년", f"{value}년", text)
+        text = text.replace(token, f"{value}년")
     return text
 
 
