@@ -13,6 +13,7 @@ from app.reasoning.correction_pair_roles import (
     ROLE_FIELD_LABELS,
 )
 from app.reasoning.periodic_metric_view import project_periodic_metric_table
+from app.reasoning.periodic_metric_change import periodic_metric_change_claims
 
 
 @dataclass(frozen=True)
@@ -891,8 +892,40 @@ def _periodic_sections(
     output: list[GeneratedSection] = []
     warnings: list[str] = []
     facts_seen = 0
+    calculations_seen = 0
     supported = True
     for section_index, answer_section in enumerate(draft.answer_sections, start=1):
+        change = answer_section.content.get("periodic_metric_change")
+        if isinstance(change, Mapping):
+            calculations_seen += 1
+            claims = periodic_metric_change_claims(change)
+            lines: list[str] = []
+            citation_ids: list[str] = []
+            if claims is None:
+                warnings.append(
+                    f"invalid_periodic_metric_change:section={section_index}"
+                )
+                supported = False
+            else:
+                for text, chunk_ids in claims:
+                    ids = registry.ids_for(chunk_ids)
+                    if len(ids) != len(set(chunk_ids)):
+                        warnings.append(
+                            "missing_provenance:periodic_metric_change:"
+                            f"section={section_index}"
+                        )
+                        supported = False
+                        continue
+                    lines.append(f"{text} {' '.join(ids)}")
+                    citation_ids.extend(ids)
+            output.append(
+                GeneratedSection(
+                    title=answer_section.title,
+                    content="\n".join(lines),
+                    citations=_unique(citation_ids),
+                )
+            )
+            continue
         fact = answer_section.content.get("fact")
         if not isinstance(fact, Mapping):
             continue
@@ -983,7 +1016,7 @@ def _periodic_sections(
                 citations=(),
             )
         )
-    return output, warnings, bool(facts_seen) and supported
+    return output, warnings, bool(facts_seen or calculations_seen) and supported
 
 
 def _periodic_source_lines(
@@ -1137,6 +1170,7 @@ def validate_periodic_citation_scope(
     """Remove periodic claims not copied from their selected cited sources."""
 
     source_text_by_chunk = _selected_periodic_source_text(draft)
+    derived_claims = _selected_periodic_derived_claims(draft)
     chunk_by_citation = {
         citation.citation_id: citation.chunk_id for citation in citations
     }
@@ -1157,6 +1191,21 @@ def validate_periodic_citation_scope(
                 f"[{value}]" for value in re.findall(r"\[(\d+)\]", line)
             )
             citation_ids = inline_ids or section.citations
+            derived_source_ids = derived_claims.get(payload)
+            if derived_source_ids is not None:
+                cited_chunks = {
+                    chunk_by_citation.get(citation_id, "")
+                    for citation_id in citation_ids
+                }
+                if derived_source_ids and derived_source_ids.issubset(cited_chunks):
+                    kept_lines.append(line)
+                    continue
+                valid = False
+                warnings.append(
+                    "unsupported_periodic_calculation_removed:"
+                    f"section={section_index}:line={line_index}"
+                )
+                continue
             allowed_text = "\n".join(
                 source_text_by_chunk.get(chunk_by_citation.get(citation_id, ""), "")
                 for citation_id in citation_ids
@@ -1178,6 +1227,24 @@ def validate_periodic_citation_scope(
             )
         )
     return output, list(dict.fromkeys(warnings)), valid
+
+
+def _selected_periodic_derived_claims(
+    draft: AnswerDraft,
+) -> dict[str, set[str]]:
+    """Claims recomputed from typed operands and the sources each one needs."""
+
+    output: dict[str, set[str]] = {}
+    for section in draft.answer_sections:
+        change = section.content.get("periodic_metric_change")
+        if not isinstance(change, Mapping):
+            continue
+        claims = periodic_metric_change_claims(change)
+        if claims is None:
+            continue
+        for text, chunk_ids in claims:
+            output.setdefault(text, set()).update(chunk_ids)
+    return output
 
 
 def _selected_periodic_source_text(draft: AnswerDraft) -> dict[str, str]:
