@@ -130,17 +130,15 @@ FROM hits;
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Measure unit recoverability.")
     parser.add_argument("--doc-group", default="periodic", help="or 'all'")
-    # The backend reads DATABASE_URL; the FESTIVAL_ prefix belongs to the
-    # embedding and API settings, not to the connection string.
+    # An empty DSN is the normal case here, not a missing one: this deployment
+    # configures PGHOST/PGUSER/PGPASSWORD and libpq reads them itself, which is
+    # also how the backend connects when DATABASE_URL is absent.
     parser.add_argument(
         "--dsn",
-        default=os.getenv("DATABASE_URL") or os.getenv("FESTIVAL_DATABASE_URL"),
+        default=os.getenv("DATABASE_URL") or os.getenv("FESTIVAL_DATABASE_URL") or "",
     )
     args = parser.parse_args(argv)
 
-    if not args.dsn:
-        print("DATABASE_URL is not set", file=sys.stderr)
-        return 1
     group = None if args.doc_group == "all" else args.doc_group
 
     import psycopg
