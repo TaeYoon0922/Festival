@@ -75,7 +75,7 @@ _BANNED = (
     "따라서", "결론적으로", "즉,",
 )
 _DIGIT = re.compile(r"\d")
-_PLACEHOLDER = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
+_PLACEHOLDER = re.compile(r"\{\{[A-Za-z][A-Za-z0-9_]*\}\}")
 _CITATION = re.compile(r"\[\s*\d*\s*\]")
 
 
@@ -96,6 +96,11 @@ class LeadRequest:
     #: Content words from the asker's own question.  Echoing the asker back is
     #: not a claim, and without them the lead cannot name what was looked for.
     topic: tuple[str, ...] = ()
+    #: Every other issuer in the corpus.  Naming one of these is the single
+    #: factual mistake a claim-free framing sentence can still make, and the
+    #: corpus is a closed set of seventy, so the check is exact rather than a
+    #: guess about which Korean nouns look like company names.
+    others: tuple[str, ...] = ()
     placeholders: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -157,6 +162,7 @@ def lead_request(
     *,
     period: str | None = None,
     topic: Sequence[str] = (),
+    corpus_companies: Sequence[str] = (),
 ) -> LeadRequest | None:
     """Read the companies and filing kinds out of an already-presented answer.
 
@@ -184,12 +190,41 @@ def lead_request(
         return None
 
     placeholders = {"{{PERIOD_1}}": period} if period else {}
+    served = tuple(companies[:MAX_LEAD_COMPANIES])
     return LeadRequest(
-        companies=tuple(companies[:MAX_LEAD_COMPANIES]),
+        companies=served,
         reports=tuple(reports[:MAX_LEAD_REPORTS]),
         topic=tuple(topic),
+        # Longest first so a name containing another is removed whole.
+        others=tuple(
+            sorted(
+                (
+                    name
+                    for name in dict.fromkeys(corpus_companies)
+                    if name and not any(name in shown for shown in served)
+                ),
+                key=len,
+                reverse=True,
+            )
+        ),
         placeholders={key: value for key, value in placeholders.items() if value},
     )
+
+
+def corpus_company_names(corpus_scope: Any) -> tuple[str, ...]:
+    """The issuer names a lead must not introduce, read from the frozen scope."""
+
+    companies = getattr(corpus_scope, "companies", None) or {}
+    try:
+        return tuple(
+            dict.fromkeys(
+                str(value[0]).strip()
+                for value in companies.values()
+                if value and str(value[0]).strip()
+            )
+        )
+    except (AttributeError, IndexError, TypeError):
+        return ()
 
 
 def accept_lead(reply: str, request: LeadRequest) -> str:
@@ -222,40 +257,54 @@ def accept_lead(reply: str, request: LeadRequest) -> str:
     # Korean agglutinates, so "LG에너지솔루션과" is one token carrying a supplied
     # name.  Remove the supplied vocabulary first -- longest first, so a name
     # containing another is not half-erased -- and judge only what is left.
+    #
+    # What is judged is narrow on purpose.  An earlier version required every
+    # remaining token to appear in a list of allowed wording, and live replies
+    # showed why that cannot work: it refused 이, 대한, 정보를, 통해, 확인할,
+    # 수, 있습니다 -- ordinary Korean, none of it a claim.  Enumerating a
+    # language's function words is not a safety property.  So the rule now names
+    # the danger instead: another company, which is the one thing a framing
+    # sentence could get wrong that the checks above do not already catch.
     residue = _PLACEHOLDER.sub(" ", text)
     for name in sorted(request.vocabulary, key=len, reverse=True):
         residue = residue.replace(name, " ")
+    for other in request.others:
+        if other in residue:
+            raise LeadRejected("unsupplied_company")
     for token in re.findall(r"[가-힣A-Za-z][가-힣A-Za-z0-9]*", residue):
-        if not _is_ordinary_wording(token):
-            raise LeadRejected("unsupplied_wording")
+        if _looks_like_a_company(token):
+            raise LeadRejected("unsupplied_company")
 
     for token, value in request.placeholders.items():
         text = text.replace(token, value)
     return text
 
 
-#: Function words and framing nouns a lead sentence is made of.  A token outside
-#: this set and outside the supplied names is treated as a name the model
-#: invented, which is the failure this check exists to catch.
-_ORDINARY = frozenset(
-    """
-    공시 근거 자료 내용 답변 결과 아래 다음 관련 대한 대해 확인된 확인 정리한
-    제시한 제공된 기재된 보고서 보고 사항 현황 항목 기준 기간 부문 사업 회사 기업
-    과 와 의 은 는 이 가 을 를 에 서 에서 로 으로 및 등 그 이하 각 해당 총 건 개
-    년 월 분기 반기 두 세 네 여러 관하여 관한 따른 대하여 나온 담긴 실린
-    입니다 있습니다 담았습니다 정리했습니다 나열했습니다 요약 목록 제시
-    """.split()
+#: Endings Korean issuer names carry.  A token outside the supplied names that
+#: ends in one of these is another company, which is the single factual mistake
+#: a claim-free framing sentence can still make.
+_COMPANY_SUFFIX = (
+    "전자", "화학", "중공업", "자동차", "제철", "제강", "건설", "산업", "물산",
+    "금융", "지주", "홀딩스", "은행", "증권", "생명", "화재", "카드", "캐피탈",
+    "해운", "조선", "항공", "통신", "제약", "바이오", "제지", "식품", "유통",
+    "에너지솔루션", "이노베이션", "디스플레이", "반도체", "그룹",
 )
 
 
-def _is_ordinary_wording(token: str) -> bool:
-    if token in _ORDINARY:
+def _looks_like_a_company(token: str) -> bool:
+    """Whether an unsupplied token names an issuer outside the corpus list.
+
+    The corpus check above is exact for the seventy issuers this system serves.
+    This is the backstop for a name outside it: Latin letters, because this
+    corpus's issuer names carry them -- LG, SK, SDI, KT, CJ, HD -- and because
+    an invented placeholder body leaks through as Latin text; otherwise the
+    endings Korean issuer names use.
+    """
+
+    if re.search(r"[A-Za-z]", token):
         return True
-    # Korean agglutination means a framing noun arrives with particles attached.
-    return any(
-        token.startswith(word) and len(token) - len(word) <= 3
-        for word in _ORDINARY
-        if len(word) >= 2
+    return any(token.startswith(name) for name in _COMPANY_SUFFIX) or any(
+        suffix in token for suffix in _COMPANY_SUFFIX
     )
 
 

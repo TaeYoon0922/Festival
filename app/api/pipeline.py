@@ -21,6 +21,7 @@ from app.agent.orchestrator import AgentOrchestrator
 from app.api.settings import ApiSettings
 from app.generation.answer_lead import (
     AnswerLeadWriter,
+    corpus_company_names,
     lead_period,
     lead_request,
     question_topic,
@@ -191,6 +192,7 @@ class AnswerPipeline:
         self.generator = generator or CitationAwareAnswerGenerator()
         self.verbalizer = verbalizer or HcxVerbalizer()
         self.lead_writer = lead_writer or AnswerLeadWriter()
+        self._lead_corpus_companies: tuple[str, ...] | None = None
         # P0-C is additive and opt-in. Without an executor wired the pipeline
         # behaves exactly as it did before, which is what the frozen Gold60
         # path depends on.
@@ -505,6 +507,7 @@ class AnswerPipeline:
                 presented,
                 period=lead_period(getattr(validation, "plan", None)),
                 topic=question_topic(question),
+                corpus_companies=self._corpus_companies(),
             )
         )
         if lead.status != "not_eligible":
@@ -519,6 +522,19 @@ class AnswerPipeline:
             "think_trace": trace,
             "answer": _non_empty(with_lead(presented, lead.text)),
         }
+
+    def _corpus_companies(self) -> tuple[str, ...]:
+        """The issuer names a lead must not introduce, read once and kept.
+
+        Read through the validator rather than held separately, so the lead is
+        checked against the same corpus scope every other gate uses.
+        """
+
+        if self._lead_corpus_companies is None:
+            self._lead_corpus_companies = corpus_company_names(
+                getattr(self.query_validator, "corpus_scope", None)
+            )
+        return self._lead_corpus_companies
 
     @property
     def query_metrics(self) -> dict[str, int]:

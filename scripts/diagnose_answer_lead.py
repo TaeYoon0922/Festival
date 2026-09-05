@@ -105,13 +105,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"       ACCEPTED: {accept_lead(reply, request)}")
             except LeadRejected as rejected:
                 print(f"       REJECTED: {rejected.reason}")
-                unknown = [
-                    token
-                    for token in _residue(reply, request)
-                    if rejected.reason == "unsupplied_wording"
-                ]
-                if unknown:
-                    print(f"       tokens judged: {unknown}")
+                if rejected.reason == "unsupplied_company":
+                    print(f"       tokens judged: {_residue(reply, request)}")
     return 0
 
 

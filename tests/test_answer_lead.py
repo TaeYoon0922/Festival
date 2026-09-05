@@ -40,8 +40,17 @@ PRESENTED = """공시 근거
 당사는 2조 3,421억원을 시설 투자에 사용하였습니다. [2]"""
 
 
+#: Two other issuers from the corpus, to check the closed-set rule.
+OTHERS = ("카카오", "한화오션", "삼성전자")
+
+
 def _request() -> LeadRequest:
-    request = lead_request(PRESENTED, period="2025", topic=question_topic(QUESTION))
+    request = lead_request(
+        PRESENTED,
+        period="2025",
+        topic=question_topic(QUESTION),
+        corpus_companies=OTHERS,
+    )
     assert request is not None
     return request
 
@@ -109,10 +118,32 @@ class AcceptanceTests(unittest.TestCase):
         with self.assertRaises(LeadRejected):
             accept_lead("향후 설비투자가 확대될 전망입니다.", _request())
 
-    def test_a_company_nobody_supplied_is_refused(self) -> None:
+    def test_another_corpus_issuer_is_refused(self) -> None:
+        # The corpus is a closed set, so this is exact rather than a guess about
+        # which Korean nouns look like company names.
+        for reply in (
+            "카카오의 설비투자 공시 근거입니다.",
+            "한화오션과 관련된 공시 근거를 정리했습니다.",
+        ):
+            with self.subTest(reply=reply):
+                with self.assertRaises(LeadRejected) as caught:
+                    accept_lead(reply, _request())
+                self.assertEqual(caught.exception.reason, "unsupplied_company")
+
+    def test_an_issuer_outside_the_corpus_is_refused_too(self) -> None:
         with self.assertRaises(LeadRejected) as caught:
-            accept_lead("현대차의 설비투자 공시 근거입니다.", _request())
-        self.assertEqual(caught.exception.reason, "unsupplied_wording")
+            accept_lead("현대자동차의 설비투자 공시 근거입니다.", _request())
+        self.assertEqual(caught.exception.reason, "unsupplied_company")
+
+    def test_ordinary_korean_is_not_refused(self) -> None:
+        # The live reply that the first version of this check wrongly refused.
+        # Enumerating a language's function words is not a safety property.
+        text = accept_lead(
+            "이 답변은 LG에너지솔루션과 삼성SDI의 설비투자 규모에 대한 정보를 "
+            "담고 있는 반기보고서와 분기보고서를 통해 확인할 수 있습니다.",
+            _request(),
+        )
+        self.assertIn("LG에너지솔루션", text)
 
     def test_a_citation_marker_is_refused(self) -> None:
         with self.assertRaises(LeadRejected) as caught:
@@ -120,9 +151,16 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason, "citation_marker")
 
     def test_an_invented_placeholder_is_refused(self) -> None:
-        with self.assertRaises(LeadRejected) as caught:
-            accept_lead("설비투자 {{NUM_9}} 공시 근거입니다.", _request())
-        self.assertEqual(caught.exception.reason, "unknown_placeholder")
+        # Matched case-insensitively: a lowercase {{year}} is an invented
+        # placeholder, and naming it as stray wording would hide what happened.
+        for reply in (
+            "설비투자 {{NUM_9}} 공시 근거입니다.",
+            "해당 내용은 {{year}}년에 제출된 보고서입니다.",
+        ):
+            with self.subTest(reply=reply):
+                with self.assertRaises(LeadRejected) as caught:
+                    accept_lead(reply, _request())
+                self.assertEqual(caught.exception.reason, "unknown_placeholder")
 
     def test_a_summary_length_reply_is_refused(self) -> None:
         with self.assertRaises(LeadRejected) as caught:
