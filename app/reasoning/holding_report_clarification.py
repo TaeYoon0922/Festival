@@ -121,6 +121,7 @@ def holding_report_clarification_request(
         reason=REASON,
         fallback_state=ClarificationState.INSUFFICIENT_EVIDENCE,
         truncated=len(records) > len(candidates),
+        preserve_candidates=True,
     )
 
 

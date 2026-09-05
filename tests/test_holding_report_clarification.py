@@ -196,6 +196,62 @@ class StayOutOfTheWayTests(unittest.TestCase):
         )
 
 
+class ClassifierNarrowingTests(unittest.TestCase):
+    """What the corpus holds is not the classifier's call."""
+
+    def test_the_request_asks_for_its_candidates_to_be_kept_whole(self) -> None:
+        request = holding_report_clarification_request(
+            "에스엠 하이브 이번 보고 보유 주식수와 비율",
+            _Plan(),
+            report_index=_index(7),
+            answerable=False,
+        )
+
+        self.assertTrue(request.preserve_candidates)
+
+    def test_a_narrowing_classifier_does_not_drop_filings(self) -> None:
+        from app.reasoning.clarification_resolver import ClarificationResolver
+
+        request = holding_report_clarification_request(
+            "에스엠 하이브 이번 보고 보유 주식수와 비율",
+            _Plan(),
+            report_index=_index(7),
+            answerable=False,
+        )
+
+        class _PicksTwo:
+            def classify(self, question, candidates):
+                @dataclass(frozen=True)
+                class _Result:
+                    decision: str
+                    candidate_ids: tuple
+
+                @dataclass(frozen=True)
+                class _Outcome:
+                    result: _Result
+                    status: str = "success"
+
+                    @property
+                    def succeeded(self) -> bool:
+                        return True
+
+                    def diagnostic(self) -> dict:
+                        return {}
+
+                return _Outcome(
+                    _Result(
+                        "clarify",
+                        tuple(c.id for c in candidates[:2]),
+                    )
+                )
+
+        decision = ClarificationResolver(_PicksTwo()).resolve(request)
+
+        # Seven filings exist; offering two would invite a choice the corpus
+        # does not limit the asker to.
+        self.assertEqual(len(decision.candidates), 7)
+
+
 class TextTests(unittest.TestCase):
     def _decision(self, count: int) -> ClarificationDecision:
         request = holding_report_clarification_request(

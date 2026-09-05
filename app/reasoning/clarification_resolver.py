@@ -77,6 +77,11 @@ class ClarificationResolver:
         selected_candidates = tuple(
             candidate for candidate in candidates if candidate.id in set(candidate_ids)
         )
+        if request.preserve_candidates:
+            # The classifier decided *whether* to ask; what exists is not its
+            # call.  Dropping a filing here would offer a choice the corpus
+            # does not actually limit the asker to.
+            selected_candidates = candidates
         return ClarificationDecision(
             state=ClarificationState.CLARIFY,
             reason="classifier_requested_clarification",

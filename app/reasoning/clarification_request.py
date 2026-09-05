@@ -98,6 +98,13 @@ class ClarificationRequest:
     classifier_resolution_safe: bool = False
     fallback_state: ClarificationState = ClarificationState.INSUFFICIENT_EVIDENCE
     truncated: bool = False
+    #: Whether the candidate list is itself the answer and must be shown whole.
+    #: The classifier narrows candidates when they are readings of one question
+    #: -- 주식수 against 비율 -- and narrowing there is its job.  When the
+    #: candidates are the filings a corpus holds, narrowing hides filings the
+    #: asker is being invited to choose between, on no signal from a question
+    #: that named none of them.
+    preserve_candidates: bool = False
 
     def __post_init__(self) -> None:
         question = str(self.question or "").strip()
