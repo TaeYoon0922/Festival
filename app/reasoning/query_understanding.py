@@ -23,6 +23,11 @@ from app.reasoning.metric_disambiguation import (
     affiliate_count_intent,
     contract_sales_ratio_intent,
 )
+from app.reasoning.periodic_metric_change import (
+    PERIODIC_METRIC_CHANGE_KEY,
+    periodic_metric_change_requested,
+    periodic_metric_change_spans,
+)
 from app.reasoning.query_plan import QueryPeriod, QueryPlan
 
 
@@ -381,6 +386,12 @@ class QueryUnderstanding:
         comparison = _comparison_from_query(
             raw_query, companies, mentioned_years, company_mentions
         )
+        periodic_metric_change = periodic_metric_change_requested(
+            raw_query,
+            metric=financial_metric,
+            comparison=comparison,
+            mentioned_years=mentioned_years,
+        )
 
         subtype = extracted["doc_subtype"]
         if not subtype:
@@ -414,6 +425,8 @@ class QueryUnderstanding:
         structured_spans.extend(_metadata_term_spans(raw_query, extracted, period.period_type))
         if task_type == "financial_metric":
             structured_spans.extend(_period_column_spans(raw_query))
+            if periodic_metric_change is not None:
+                structured_spans.extend(periodic_metric_change_spans(raw_query))
         structured_spans.extend(_correction_spans(raw_query, correction_evidence))
         lexical_query = _normalize_lexical_query(
             raw_query,
@@ -485,6 +498,14 @@ class QueryUnderstanding:
                 AMOUNT_CHANGE_KEY: (
                     change.to_dict()
                     if (change := amount_change_requested(raw_query))
+                    else None
+                ),
+                # A percentage request over a periodic statement row.  The
+                # selector and arithmetic stage consume this typed request;
+                # neither has to reinterpret the user's prose.
+                PERIODIC_METRIC_CHANGE_KEY: (
+                    periodic_metric_change.to_dict()
+                    if periodic_metric_change is not None
                     else None
                 ),
             },

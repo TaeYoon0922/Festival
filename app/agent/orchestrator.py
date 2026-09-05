@@ -57,6 +57,11 @@ from app.reasoning.periodic_fact_resolver import (
     PeriodicFactResolution,
     PeriodicFactResolver,
 )
+from app.reasoning.periodic_metric_change import (
+    PeriodicMetricChange,
+    requested_periodic_metric_change,
+    resolve_periodic_metric_change,
+)
 from app.reasoning.holding_date_intent import (
     exact_reference_date,
     execution_plan as holding_execution_plan,
@@ -374,10 +379,30 @@ class AgentOrchestrator:
             selection = self.periodic_evidence_selector.select(
                 resolution, query_plan=query_plan
             )
+            periodic_change_request = requested_periodic_metric_change(query_plan)
+            periodic_change = (
+                resolve_periodic_metric_change(
+                    periodic_change_request,
+                    selection.resolution,
+                    query_plan=query_plan,
+                )
+                if periodic_change_request is not None
+                else None
+            )
+            if periodic_change_request is not None:
+                trace.append(
+                    "periodic_metric_change"
+                    if periodic_change is not None
+                    else "periodic_metric_change_unresolved"
+                )
             trace.append("answer_composer")
             draft = self.answer_composer.compose(
                 evidence, periodic_resolution=selection.resolution
             )
+            if periodic_change is not None:
+                draft = _compose_periodic_metric_change(draft, periodic_change)
+            elif periodic_change_request is not None:
+                draft = _unresolved_periodic_metric_change(draft)
         else:
             resolution = None
             resolution_before = None
@@ -1009,6 +1034,53 @@ def _compose_amount_change(
             dict.fromkeys((*supporting_ids, *base.evidence_references))
         ),
         citations=citations,
+    )
+
+
+def _compose_periodic_metric_change(
+    base: AnswerDraft,
+    change: PeriodicMetricChange,
+) -> AnswerDraft:
+    """Lead with verified periodic arithmetic while retaining its source row."""
+
+    supporting_ids = tuple(
+        dict.fromkeys((change.initial.chunk_id, change.final.chunk_id))
+    )
+    section = AnswerSection(
+        title="정기공시 지표 증감",
+        content={"periodic_metric_change": change.to_dict()},
+        supporting_evidence_ids=supporting_ids,
+    )
+    return replace(
+        base,
+        answer_sections=(section, *base.answer_sections),
+        evidence_references=tuple(
+            dict.fromkeys((*supporting_ids, *base.evidence_references))
+        ),
+    )
+
+
+def _unresolved_periodic_metric_change(base: AnswerDraft) -> AnswerDraft:
+    """Do not let a raw table masquerade as the requested calculated rate."""
+
+    confidence = copy.deepcopy(dict(base.confidence))
+    unresolved = list(confidence.get("unresolved_requirements") or ())
+    unresolved.append("periodic_metric_change")
+    confidence.update(
+        {
+            "level": "low",
+            "score": 0.0,
+            "answerable": False,
+            "unresolved_requirements": list(dict.fromkeys(unresolved)),
+        }
+    )
+    return replace(
+        base,
+        warnings=tuple(
+            dict.fromkeys((*base.warnings, "periodic_metric_change_unresolved"))
+        ),
+        confidence=confidence,
+        answerable=False,
     )
 
 
