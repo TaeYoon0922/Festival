@@ -19,6 +19,7 @@ import psycopg
 
 from app.agent.orchestrator import AgentOrchestrator
 from app.api.settings import ApiSettings
+from app.generation.answer_presentation import readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
@@ -488,7 +489,11 @@ class AnswerPipeline:
             "question": question,
             "retrieved_context": public_context,
             "think_trace": trace,
-            "answer": _non_empty(public_answer),
+            # Last thing before the reader: the retrieval prefix each chunk
+            # carries for the embedder is rewritten into a heading. Body text,
+            # tables and citation markers pass through untouched, and an answer
+            # shape this does not recognise is returned exactly as built.
+            "answer": _non_empty(readable_answer(public_answer)),
         }
 
     @property
