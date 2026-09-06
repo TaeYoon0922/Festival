@@ -29,8 +29,12 @@ from app.generation.answer_lead import (
     question_topic,
     with_lead,
 )
-from app.generation.answer_narration import AnswerNarrator
-from app.generation.answer_synthesis import AnswerSynthesizer, citation_block
+from app.generation.answer_narration import AnswerNarrator, NarrationOutcome
+from app.generation.answer_synthesis import (
+    AnswerSynthesizer,
+    SynthesisOutcome,
+    citation_block,
+)
 from app.generation.answer_presentation import annotate_citations, readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
@@ -144,6 +148,12 @@ EMPTY_ANSWER_FALLBACK = "확인되지 않은 정보가 있습니다."
 #: The lead a narrated answer does not ask for.  ``with_lead`` takes ``None``
 #: and returns the answer untouched, so the return path stays one expression.
 _NO_LEAD = LeadOutcome(None, LEAD_NOT_ELIGIBLE)
+
+#: What the answer-stage layers report when the answer states a figure. Not a
+#: failure and not a refusal: the deterministic sentence is what serves that
+#: question, so the model is never asked.
+_NO_SYNTHESIS = SynthesisOutcome(None, "skipped_stated_figure")
+_NO_NARRATION = NarrationOutcome(None, "skipped_stated_figure")
 
 #: Statuses reached without ever calling the model.
 _HCX_NOT_CALLED = frozenset(
@@ -555,8 +565,22 @@ class AnswerPipeline:
         # citation must point at one of them, and no issuer may appear that
         # they do not name. A refusal returns nothing and the deterministic
         # answer continues below, so this is tried on every question.
-        synthesis, synthesis_citations = self.synthesizer.synthesize(
-            question, public_context, corpus_companies=self._corpus_companies()
+        # HyperCLOVA X is attached where it helps and left off where it hurts.
+        # An answer that states a resolved figure is already a sentence, and a
+        # figure is the one thing a model can ruin silently -- a fabricated
+        # unit, a comparison naming the smaller company larger. Those answers
+        # are served exactly as the deterministic layer wrote them.
+        #
+        # A narrative answer is the opposite case. It has no resolved figure to
+        # protect and it is the one that reads worst: a page of the filing's own
+        # prose where a reader wanted an answer. That is what the model is for.
+        wordy = not generated.states_figure
+        synthesis, synthesis_citations = (
+            self.synthesizer.synthesize(
+                question, public_context, corpus_companies=self._corpus_companies()
+            )
+            if wordy
+            else (_NO_SYNTHESIS, "")
         )
         if synthesis.status != "not_eligible":
             trace["answer_synthesis"] = synthesis.to_public_dict()
@@ -590,8 +614,12 @@ class AnswerPipeline:
         # the call and is restored byte for byte after it. A refused rewrite
         # leaves the deterministic answer exactly as it was built, which is why
         # this can run for every question rather than for one task type.
-        narration = self.narrator.narrate(
-            presented, corpus_companies=self._corpus_companies()
+        narration = (
+            self.narrator.narrate(
+                presented, corpus_companies=self._corpus_companies()
+            )
+            if wordy
+            else _NO_NARRATION
         )
         if narration.status != "not_eligible":
             trace["answer_narration"] = narration.to_public_dict()

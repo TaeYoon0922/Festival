@@ -211,12 +211,14 @@ _WORD = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9]*")
 #: newest thing HCX does here and the only one whose live behaviour is not yet
 #: measured, so it can be turned off by restarting the server without giving up
 #: the verbalizer, the semantic fallback, or the opening line.
+#: Default on, for the same reason as the synthesis layer beside it: the
+#: pipeline only reaches it for a narrative answer.
 NARRATION_ENV_FLAG = "FESTIVAL_HCX_NARRATION_ENABLED"
 
 
 def _narration_enabled(environment: Mapping[str, str] | None = None) -> bool:
     values = os.environ if environment is None else environment
-    return str(values.get(NARRATION_ENV_FLAG, "false")).strip().lower() not in (
+    return str(values.get(NARRATION_ENV_FLAG, "true")).strip().lower() not in (
         "0",
         "false",
         "no",

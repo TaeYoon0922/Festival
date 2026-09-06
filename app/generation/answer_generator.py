@@ -63,6 +63,10 @@ class GeneratedAnswer:
     warnings: tuple[str, ...]
     confidence: Mapping[str, Any]
     answerable: bool
+    #: Whether the 답변 section states a resolved metric figure. A figure is
+    #: the part of an answer a language model can silently ruin, so the layers
+    #: that hand an answer to one ask this first.
+    states_figure: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,9 +99,10 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
         sections, render_warnings, factual_supported = _holding_sections(
             draft, registry
         )
+        states_figure = False
     elif answer_kind == "periodic":
-        sections, render_warnings, factual_supported = _periodic_sections(
-            draft, registry
+        sections, render_warnings, factual_supported, states_figure = (
+            _periodic_sections(draft, registry)
         )
         sections, scope_warnings, scope_valid = validate_periodic_citation_scope(
             draft,
@@ -110,6 +115,7 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
         sections, render_warnings, factual_supported = _general_sections(
             draft, registry
         )
+        states_figure = False
 
     warnings = [*draft.warnings, *registry.warnings, *render_warnings]
     answerable = bool(draft.answerable and factual_supported)
@@ -140,6 +146,7 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
         warnings=tuple(dict.fromkeys(warnings)),
         confidence=confidence,
         answerable=answerable,
+        states_figure=states_figure,
     )
 
 
@@ -1155,7 +1162,12 @@ def _periodic_sections(
                 ),
             ),
         )
-    return output, warnings, bool(facts_seen or calculations_seen) and supported
+    return (
+        output,
+        warnings,
+        bool(facts_seen or calculations_seen) and supported,
+        bool(stated_figures),
+    )
 
 
 def _periodic_source_lines(

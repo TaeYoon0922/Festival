@@ -135,12 +135,16 @@ _MARKUP = re.compile(r"\*\*|^\s*[-*+]\s+", re.MULTILINE)
 
 #: Its own switch. This is the layer that shows the model real figures, so it
 #: can be turned off on its own without giving up anything else HCX does here.
+#: Default on. The pipeline only reaches this layer for an answer that
+#: states no resolved figure, which is the case where a model helps and the
+#: case where it has no figure to ruin. The switch stays for turning it off
+#: on a live server without a deploy.
 SYNTHESIS_ENV_FLAG = "FESTIVAL_HCX_SYNTHESIS_ENABLED"
 
 
 def _synthesis_enabled(environment: Mapping[str, str] | None = None) -> bool:
     values = os.environ if environment is None else environment
-    return str(values.get(SYNTHESIS_ENV_FLAG, "false")).strip().lower() not in (
+    return str(values.get(SYNTHESIS_ENV_FLAG, "true")).strip().lower() not in (
         "0",
         "false",
         "no",
