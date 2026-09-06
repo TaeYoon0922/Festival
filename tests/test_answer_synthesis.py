@@ -110,9 +110,16 @@ class AcceptanceTests(unittest.TestCase):
         self.extracts = evidence_extracts(ROWS)
 
     def _reject(self, reply: str) -> str:
+        """The rule that refused it.
+
+        A reason now carries what it caught -- ``unsupported_number:12,345`` --
+        so a live rejection can be diagnosed from the trace without the reply
+        itself. The rule is the part before the colon.
+        """
+
         with self.assertRaises(SynthesisRejected) as raised:
             accept_synthesis(reply, self.extracts, corpus_companies=CORPUS)
-        return raised.exception.reason
+        return raised.exception.reason.split(":", 1)[0]
 
     def _accept(self, reply: str) -> str:
         return accept_synthesis(reply, self.extracts, corpus_companies=CORPUS)

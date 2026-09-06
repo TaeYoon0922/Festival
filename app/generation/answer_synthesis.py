@@ -30,6 +30,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
+from app.generation.answer_generator import UNIT_ABSENT_NOTICE
 from app.generation.answer_lead import _looks_like_a_company
 from app.generation.hcx_verbalizer import HcxSettings, _response_content
 from app.retrieval.embeddings import (
@@ -338,6 +339,20 @@ _UNIT_AFTER_NUMBER = re.compile(
 #: is checked separately. Only the monetary and count scales are guarded here.
 
 
+def _without_units(text: str, invented: set[str]) -> str:
+    """Remove a unit no filing printed, leaving the figure and the sentence.
+
+    The scale is the model's guess and the figure is not, so the guess comes
+    off and the figure stays. Longest first, so 백만원 is removed whole rather
+    than leaving 만원 behind.
+    """
+
+    for unit in sorted(invented, key=len, reverse=True):
+        spaced = r"\s*".join(re.escape(character) for character in unit)
+        text = re.sub(rf"(\d)\s*{spaced}", r"\1", text)
+    return text
+
+
 def _units_after_numbers(text: str) -> set[str]:
     return {
         re.sub(r"\s+", "", match) for match in _UNIT_AFTER_NUMBER.findall(text)
@@ -492,18 +507,27 @@ def accept_synthesis(
         # on cited numbers is not invention -- an unaccounted-for number is.
         if _amount(match) in derived:
             continue
-        raise SynthesisRejected("unsupported_number")
+        raise SynthesisRejected(f"unsupported_number:{match}")
 
-    if _scaled_forms(without_markers) - _scaled_forms(evidence):
-        raise SynthesisRejected("rescaled_number")
+    rescaled = _scaled_forms(without_markers) - _scaled_forms(evidence)
+    if rescaled:
+        raise SynthesisRejected(f"rescaled_number:{sorted(rescaled)[0]}")
 
+    # A unit the filings never printed is removed rather than fatal. The model
+    # guesses the scale -- it wrote 십억 원 over figures whose filings state no
+    # unit at all -- and the honest form of that answer is the figure with the
+    # notice the deterministic path already uses. Discarding the whole reply
+    # threw away the sentences too.
     invented = _units_after_numbers(without_markers) - _unit_words(evidence)
     if invented:
-        raise SynthesisRejected("invented_unit")
+        text = _without_units(text, invented)
+        without_markers = _CITATION.sub(" ", text)
+        if UNIT_ABSENT_NOTICE not in text:
+            text = f"{text.rstrip()} {UNIT_ABSENT_NOTICE}"
 
     for word in _BANNED:
         if word in text and word not in evidence:
-            raise SynthesisRejected("evaluative_wording")
+            raise SynthesisRejected(f"evaluative_wording:{word}")
 
     _refuse_unsupplied_companies(without_markers, evidence, corpus_companies)
     return text
