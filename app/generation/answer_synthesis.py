@@ -302,6 +302,10 @@ _SCALES = {
 #: take part. Sums and differences are searched with a set and use them all.
 MAX_RATIO_OPERANDS = 80
 
+#: Below this a bare figure matching an evidence amount is coincidence. 46 turns
+#: up inside 446,389; 41,460,512 does not turn up by accident.
+MIN_STRIPPABLE_DIGITS = 4
+
 
 def _amount(value: str) -> Decimal | None:
     text = str(value or "").strip().rstrip(".").replace(",", "")
@@ -566,6 +570,8 @@ def accept_synthesis(
     without_markers = _CITATION.sub(" ", text)
     operands = _evidence_amounts(evidence)
     compact_evidence = re.sub(r"\s+", "", evidence)
+    printed = set(operands)
+    guessed_scales: set[str] = set()
     for match in _SCALED_NUMBER.finditer(without_markers):
         written, scale = match.group("number"), match.group("scale")
         digits = _digits(written)
@@ -579,10 +585,22 @@ def accept_synthesis(
             if scale and f"{digits}{scale}" not in _digit_scales(compact_evidence):
                 # 383십억 is 383,000,000,000, which is the figure the filing
                 # prints. Restating a number at a scale is only wrong when the
-                # arithmetic is wrong, and that is checkable: refusing it
-                # outright refused four correct answers in one run.
-                if not _accounted_for(written, scale, operands):
-                    raise SynthesisRejected(f"rescaled_number:{written}{scale}")
+                # arithmetic is wrong, and that is checkable.
+                if _accounted_for(written, scale, operands):
+                    continue
+                # The bare figure is one the filing prints, so the scale beside
+                # it is the model's reading of a unit the filing left out --
+                # 41,460,512 is in the table and 백만 is not. Removing the guess
+                # keeps the figure and the sentence; the notice says the filing
+                # states no unit. Short numbers are excluded because a bare 46
+                # matching some cell is coincidence, not the figure.
+                if (
+                    len(digits) >= MIN_STRIPPABLE_DIGITS
+                    and _amount(written) in printed
+                ):
+                    guessed_scales.add(scale)
+                    continue
+                raise SynthesisRejected(f"rescaled_number:{written}{scale}")
             continue
         # A comparison question asks for the gap, and the gap is in no filing.
         # It is still checkable: it has to be the difference between two figures
@@ -599,6 +617,17 @@ def accept_synthesis(
     # unit at all -- and the honest form of that answer is the figure with the
     # notice the deterministic path already uses. Discarding the whole reply
     # threw away the sentences too.
+    if guessed_scales:
+        # 백만원 comes off whole. Removing only the 백만 would leave 원 behind
+        # next to a notice saying the filing states no unit, which contradicts
+        # itself on the same line.
+        text = _without_units(
+            text, {form for scale in guessed_scales for form in (scale + "원", scale)}
+        )
+        without_markers = _CITATION.sub(" ", text)
+        if UNIT_ABSENT_NOTICE not in text:
+            text = f"{text.rstrip()} {UNIT_ABSENT_NOTICE}"
+
     invented = (
         _units_after_numbers(without_markers, evidence_digits)
         - _unit_words(evidence)

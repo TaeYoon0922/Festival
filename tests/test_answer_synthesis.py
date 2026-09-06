@@ -271,6 +271,46 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertIn("383십억", accept_synthesis(reply, extracts))
 
+    def test_a_guessed_scale_on_a_printed_figure_is_removed(self) -> None:
+        """41,460,512 is in the table; 백만 is the model reading a missing unit.
+
+        Refusing the whole reply threw away a correct answer over a unit the
+        filing never printed. The guess comes off with its 원, the figure
+        stays, and the notice says what the filing does not state.
+        """
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "삼성중공업",
+                 "report_nm": "사업보고서 (2024.12)", "rcept_dt": "2025-03-11",
+                 "section_path": [],
+                 "content": "| 합 계 | - | 41,460,512 | - | 19,957,710 |"},
+            ]
+        )
+        reply = "삼성중공업의 계약금액 합계는 41,460,512백만원입니다. [1]"
+
+        accepted = accept_synthesis(reply, extracts)
+
+        self.assertIn("41,460,512입니다", accepted)
+        self.assertNotIn("백만", accepted)
+        self.assertIn("단위 표기 없음", accepted)
+
+    def test_a_short_figure_matching_a_cell_is_not_a_printed_figure(self) -> None:
+        """46 turns up inside 446,389. That is coincidence, not the figure."""
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "삼성중공업",
+                 "report_nm": "사업보고서 (2024.12)", "rcept_dt": "2025-03-11",
+                 "section_path": [],
+                 "content": "| 합 계 | 41,460,512 | (446,389) |"},
+            ]
+        )
+
+        with self.assertRaises(SynthesisRejected) as raised:
+            accept_synthesis("합계는 46조원입니다. [1]", extracts)
+        self.assertTrue(raised.exception.reason.startswith("rescaled_number"))
+
     def test_a_rescale_the_arithmetic_does_not_support_is_refused(self) -> None:
         extracts = evidence_extracts(
             [
