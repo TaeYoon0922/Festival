@@ -962,6 +962,7 @@ def _periodic_sections(
     warnings: list[str] = []
     direct_answers: list[str] = []
     stated_figures: list[StatedFigure] = []
+    stated_already: set[tuple[Any, ...]] = set()
     narrative_sources: list[tuple[Mapping[str, Any], str]] = []
     facts_seen = 0
     calculations_seen = 0
@@ -1023,9 +1024,14 @@ def _periodic_sections(
                     continue
                 marker = " ".join(source_ids)
                 figure = _stated_figure(fact, source, marker, request=request)
-                if figure is not None and figure.sentence not in direct_answers:
+                if figure is not None:
                     stated_figures.append(figure)
-                    direct_answers.append(figure.sentence)
+                    # The same statement arrives again from its 기재정정, and
+                    # the reader does not need to be told the figure twice.
+                    said = (figure.company, figure.label, figure.period, figure.value)
+                    if said not in stated_already:
+                        stated_already.add(said)
+                        direct_answers.append(figure.sentence)
                 narrative_sources.append((source, marker))
                 source_lines = _periodic_source_lines(source, marker, request=request)
                 if not source_lines:
@@ -1467,6 +1473,34 @@ def _grouped(amount: Decimal) -> str:
     return f"{quantised:,f}"
 
 
+def _one_figure_per_company(
+    figures: Sequence[StatedFigure],
+) -> list[StatedFigure] | None:
+    """One figure per company, or ``None`` when a company gave two of them.
+
+    The same statement often arrives twice, once from the original filing and
+    once from its 기재정정 -- KB금융's 당기순이익 came back under both, which
+    made three figures out of two companies and stopped the comparison. Two
+    copies agreeing is one fact, so the first is kept.
+
+    Two copies disagreeing is not: the correction changed the figure, and which
+    one is being compared is exactly the question. That returns nothing.
+    """
+
+    kept: dict[str, StatedFigure] = {}
+    for figure in figures:
+        company = figure.company or ""
+        if not company:
+            return None
+        existing = kept.get(company)
+        if existing is None:
+            kept[company] = figure
+            continue
+        if existing.amount != figure.amount or existing.unit != figure.unit:
+            return None
+    return list(kept.values())
+
+
 def _comparison_line(figures: Sequence[StatedFigure]) -> str | None:
     """State which of two figures is larger, and by how much.
 
@@ -1480,7 +1514,8 @@ def _comparison_line(figures: Sequence[StatedFigure]) -> str | None:
     thing over the same period in the same unit.
     """
 
-    if len(figures) != 2:
+    figures = _one_figure_per_company(figures)
+    if figures is None or len(figures) != 2:
         return None
     first, second = figures
     if not first.comparable_with(second):

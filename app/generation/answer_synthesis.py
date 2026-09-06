@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
@@ -53,8 +54,9 @@ Rules:
 - If an extract states a unit for a figure, say the figure with that unit. If
   none of them does, say the figure and add that the filing states no unit.
 - Answer what was asked. If the question compares two companies, give both
-  figures; state which is larger only if you can do so from the figures as
-  written, and say nothing about it if they are in different units or periods.
+  figures and say which is larger. You may state a difference, a total, a share
+  or a rate of change worked out from figures in the extracts; show the figures
+  it came from. Compare nothing across different units or different periods.
 - If the extracts do not answer the question, say so plainly and say what is
   missing. Do not fill the gap.
 - No opinion, no interpretation, no advice, no outlook, no evaluation of a
@@ -265,6 +267,61 @@ def citation_block(
     return "\n".join(lines)
 
 
+#: Enough figures to cover a statement without turning the pair scan into work.
+MAX_DERIVATION_OPERANDS = 120
+
+
+def _amount(value: str) -> Decimal | None:
+    text = str(value or "").strip().rstrip(".").replace(",", "")
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def _evidence_amounts(evidence: str) -> list[Decimal]:
+    seen: dict[Decimal, None] = {}
+    for match in _NUMBER.findall(evidence):
+        amount = _amount(match)
+        if amount is not None:
+            seen.setdefault(amount, None)
+        if len(seen) >= MAX_DERIVATION_OPERANDS:
+            break
+    return list(seen)
+
+
+def _derivable_amounts(evidence: str) -> set[Decimal]:
+    """Figures a reader could work out from the filings, exactly.
+
+    A comparison answer states a gap, a total or a rate of change, and none of
+    those is written in any filing -- so a check that only looks for the number
+    would refuse the answer the question asked for. Each of these is arithmetic
+    on two figures that *are* in the filings, so it can be verified rather than
+    trusted, which is the same standard everything else here is held to.
+
+    Rates are matched to one and two decimal places because that is how an
+    answer writes them; nothing else about a rounded value is accepted.
+    """
+
+    amounts = _evidence_amounts(evidence)
+    derived: set[Decimal] = set()
+    for index, first in enumerate(amounts):
+        for second in amounts[index + 1 :]:
+            derived.add(abs(first - second))
+            derived.add(first + second)
+            for numerator, denominator in ((first, second), (second, first)):
+                if denominator == 0:
+                    continue
+                for scale in (Decimal("0.1"), Decimal("0.01")):
+                    ratio = numerator / denominator * 100
+                    change = (numerator - denominator) / denominator * 100
+                    derived.add(ratio.quantize(scale, rounding=ROUND_HALF_UP))
+                    derived.add(change.quantize(scale, rounding=ROUND_HALF_UP))
+    return derived
+
+
 def _evidence_text(extracts: Sequence[Mapping[str, Any]]) -> str:
     """Everything the model was shown, which is what it may draw on.
 
@@ -329,12 +386,20 @@ def accept_synthesis(
     # markers are stripped first: they are the answer's own numbering, not a
     # figure, and they are checked above.
     without_markers = _CITATION.sub(" ", text)
+    derived = _derivable_amounts(evidence)
     for match in _NUMBER.findall(without_markers):
         digits = _digits(match)
         if len(digits) < 2:
             continue
-        if digits not in evidence_digits:
-            raise SynthesisRejected("unsupported_number")
+        if digits in evidence_digits:
+            continue
+        # A comparison question asks for the gap, and the gap is in no filing.
+        # It is still checkable: it has to be the difference between two figures
+        # that are, and so does a total, a share and a rate of change. Arithmetic
+        # on cited numbers is not invention -- an unaccounted-for number is.
+        if _amount(match) in derived:
+            continue
+        raise SynthesisRejected("unsupported_number")
 
     if _scaled_forms(without_markers) - _scaled_forms(evidence):
         raise SynthesisRejected("rescaled_number")

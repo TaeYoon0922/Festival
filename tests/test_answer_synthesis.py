@@ -163,6 +163,26 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(self._accept(reply), reply)
 
+    def test_a_difference_worked_out_from_the_figures_is_allowed(self) -> None:
+        """The gap is in no filing, and is still checkable arithmetic."""
+
+        reply = (
+            "삼성전자 333,605,938, SK하이닉스 66,192,960으로 "
+            "삼성전자가 267,412,978 더 큽니다. [1] [2]"
+        )
+
+        self.assertIn("267,412,978", self._accept(reply))
+
+    def test_a_difference_that_is_not_the_difference_is_refused(self) -> None:
+        reply = "삼성전자가 SK하이닉스보다 999,999,999 더 큽니다. [1] [2]"
+
+        self.assertEqual(self._reject(reply), "unsupported_number")
+
+    def test_a_share_worked_out_from_the_figures_is_allowed(self) -> None:
+        reply = "SK하이닉스 매출액은 삼성전자의 19.8% 수준입니다. [1] [2]"
+
+        self.assertIn("19.8%", self._accept(reply))
+
     def test_a_comparison_the_figures_support_is_allowed(self) -> None:
         reply = (
             "삼성전자 333,605,938, SK하이닉스 66,192,960으로 "
