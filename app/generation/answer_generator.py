@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -145,6 +146,23 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
 #: The section the direct answer is written into.
 DIRECT_ANSWER_TITLE = "답변"
 
+#: Turns off the answer-shape work in one place: the 답변 section, the removal
+#: of the evidence blocks from the answer text, and the dropped confidence line.
+#: It exists so the shape can be attributed. A Gold60 run with it off and one
+#: with it on differ only in this, which settles whether a change in the metrics
+#: came from here or from somewhere else in the branch.
+DIRECT_ANSWER_ENV_FLAG = "FESTIVAL_ANSWER_DIRECT_ENABLED"
+
+
+def direct_answer_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    values = os.environ if environment is None else environment
+    return str(values.get(DIRECT_ANSWER_ENV_FLAG, "true")).strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
 #: Sections whose body is retrieved chunk text, under the titles the composer
 #: writes before presentation renames them.
 _EVIDENCE_TITLE = re.compile(
@@ -180,6 +198,8 @@ def _stated_sections(
     removed and the reply is exactly what it was.
     """
 
+    if not direct_answer_enabled():
+        return list(sections)
     sections = [
         section for section in sections if section.title != CONFIDENCE_TITLE
     ]
@@ -1073,7 +1093,9 @@ def _periodic_sections(
                 citations=(),
             )
         )
-    if not direct_answers and narrative_sources:
+    if not direct_answer_enabled():
+        direct_answers = []
+    if not direct_answers and narrative_sources and direct_answer_enabled():
         # No metric row could answer, so the filing's own prose is the answer.
         # Every source, not just the first: a question answered across two
         # filings is answered by both, and dropping one drops a period.
