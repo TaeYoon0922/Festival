@@ -262,7 +262,7 @@ FROM chunk_embeddings WHERE embedding_model='BAAI/bge-m3';"
 `answerable=True → False`로 회귀한 원인이 이것으로 보이며, **100% 도달 후 재측정하면 회복될
 가능성이 큽니다.**
 
-완료되면 6문항을 다시 재고, `docs/TECHNICAL_PROPOSAL.md` §6.2의 수치를 갱신하십시오.
+완료되면 6문항을 다시 재고, `기술제안서.md` §9.2의 수치를 갱신하십시오.
 
 ### 임베딩 설정 관련 주의
 
