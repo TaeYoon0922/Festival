@@ -363,6 +363,46 @@ def _unit_words(evidence: str) -> set[str]:
     }
 
 
+def _attributed(text: str, extracts: Sequence[Mapping[str, Any]]) -> str:
+    """Append the markers of the extracts the answer's figures came from.
+
+    Every grouped figure in the reply is looked up in each extract, and an
+    extract that contains it is a source for it. This is the same lookup the
+    number check already does, read for where rather than for whether, so it
+    adds no claim the check has not already made.
+
+    An answer with no figure to trace gets nothing, and is refused above: an
+    unattributed statement about a filing is not something to serve.
+    """
+
+    digits_by_marker = {
+        int(extract["marker"]): _digits(str(extract.get("content") or ""))
+        for extract in extracts
+    }
+    used: set[int] = set()
+    for match in _NUMBER.findall(text):
+        digits = _digits(match)
+        if len(digits) < 4:
+            continue
+        for marker, evidence in digits_by_marker.items():
+            if digits in evidence:
+                used.add(marker)
+    if not used:
+        return text
+    markers = " ".join(f"[{marker}]" for marker in sorted(used))
+    return f"{text.rstrip()} {markers}"
+
+
+def _plain_sentences(text: str) -> str:
+    """The reply without the markup the prompt asked it not to use."""
+
+    without = _FENCE.sub(" ", str(text or ""))
+    without = re.sub(r"\*\*", "", without)
+    without = re.sub(r"(?m)^\s*[-*+]\s+", "", without)
+    without = re.sub(r"(?m)^\s*#{1,6}\s+", "", without)
+    return re.sub(r"\n{3,}", "\n" + "\n", without).strip()
+
+
 def _evidence_text(extracts: Sequence[Mapping[str, Any]]) -> str:
     """Everything the model was shown, which is what it may draw on.
 
@@ -408,8 +448,12 @@ def accept_synthesis(
     text = _text(reply).strip('"').strip("'")
     if not text:
         raise SynthesisRejected("empty")
-    if _FENCE.search(text) or _MARKUP.search(text):
-        raise SynthesisRejected("markdown_fence")
+    # Emphasis and bullets are formatting, not facts. Discarding a correct
+    # answer because it arrived in bold threw away the layer's best replies;
+    # the markup is removed and the sentences kept.
+    text = _plain_sentences(text)
+    if not text:
+        raise SynthesisRejected("empty")
     if len(text) > MAX_ANSWER_CHARS:
         raise SynthesisRejected("too_long")
 
@@ -418,10 +462,18 @@ def accept_synthesis(
     markers = {int(extract["marker"]) for extract in extracts}
 
     cited = [int(value) for value in _CITATION.findall(text)]
-    if not cited:
-        raise SynthesisRejected("no_citation")
     if any(marker not in markers for marker in cited):
         raise SynthesisRejected("unknown_citation")
+    if not cited:
+        # The commonest refusal by far was a good answer with no [n] on it.
+        # Attribution does not have to come from the model: a figure it stated
+        # is in whichever extracts contain that figure, and that is a lookup.
+        # Only an answer whose figures all trace back this way gets markers,
+        # so nothing is attributed to a filing that does not carry it.
+        text = _attributed(text, extracts)
+        cited = [int(value) for value in _CITATION.findall(text)]
+        if not cited:
+            raise SynthesisRejected("no_citation")
 
     # Every figure the answer states has to be one the filings state. Citation
     # markers are stripped first: they are the answer's own numbering, not a

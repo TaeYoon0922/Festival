@@ -30,6 +30,17 @@ from typing import Any
 #: Between two served chunks. Long enough not to occur inside filing text.
 CHUNK_SEPARATOR = "-" * 60
 
+#: A served chunk can be a whole 손익계산서, and ten of them ran to 47,933
+#: characters on one comparison question. The organiser's notice says a field
+#: past what the evaluation system takes in one pass has its excess dropped, and
+#: an excess dropped at an arbitrary point takes the last chunks with it. Each
+#: chunk is bounded instead, so all ten still appear and the cut is visible.
+MAX_CHUNK_CONTENT_CHARS = 1500
+
+#: What one line of a filing's table costs, roughly, so the cut lands on a row
+#: boundary rather than mid-figure where a reader could misread it.
+TRUNCATION_NOTICE = "…(이하 생략)"
+
 #: Section path joiner, matching how the presented answer writes a path.
 SECTION_JOINER = " > "
 
@@ -91,6 +102,18 @@ def _facts(row: Mapping[str, Any]) -> str:
     return " | ".join(f"{key}: {value}" for key, value in pairs if value)
 
 
+def _bounded(content: str) -> str:
+    """The chunk's text, cut at a line boundary when it runs long."""
+
+    if len(content) <= MAX_CHUNK_CONTENT_CHARS:
+        return content
+    head = content[:MAX_CHUNK_CONTENT_CHARS]
+    cut = head.rfind("\n")
+    if cut > MAX_CHUNK_CONTENT_CHARS // 2:
+        head = head[:cut]
+    return f"{head.rstrip()}{"\n"}{TRUNCATION_NOTICE}"
+
+
 def render_retrieved_context(rows: Sequence[Mapping[str, Any]]) -> str:
     """Render the served Top-K chunks as one delimited string.
 
@@ -120,7 +143,7 @@ def render_retrieved_context(rows: Sequence[Mapping[str, Any]]) -> str:
         content = _scalar(row.get("content"))
         if content:
             lines.append("내용:")
-            lines.append(content)
+            lines.append(_bounded(content))
         for key in ("source_refs", "provenance"):
             value = row.get(key)
             if value:

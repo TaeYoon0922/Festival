@@ -132,9 +132,17 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(self._reject(reply), "rescaled_number")
 
-    def test_an_answer_with_no_citation_is_refused(self) -> None:
+    def test_a_missing_citation_is_traced_to_the_filing(self) -> None:
+        """Attribution is a lookup, not something only the model can supply."""
+
+        accepted = self._accept("삼성전자의 매출액은 333,605,938입니다.")
+
+        self.assertIn("[1]", accepted)
+        self.assertNotIn("[2]", accepted)
+
+    def test_an_answer_with_no_traceable_figure_is_refused(self) -> None:
         self.assertEqual(
-            self._reject("삼성전자의 매출액은 333,605,938입니다."), "no_citation"
+            self._reject("두 회사의 실적을 확인했습니다."), "no_citation"
         )
 
     def test_a_citation_to_a_filing_not_served_is_refused(self) -> None:
@@ -152,8 +160,25 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(self._reject(reply), "unsupplied_company")
 
-    def test_a_markdown_fence_is_refused(self) -> None:
-        self.assertEqual(self._reject(f"```\n{GOOD}\n```"), "markdown_fence")
+    def test_markup_is_removed_rather_than_refused(self) -> None:
+        """Bold is formatting. Refusing over it lost 24 of 30 live replies.
+
+        The run discarded four fifths of its own good answers for arriving in
+        bold with a bulleted calculation under them, so the markup comes off
+        and the sentences stay. None of it could carry a fact.
+        """
+
+        reply = (
+            "삼성전자 매출액은 **333,605,938**입니다. [1]\n"
+            "- SK하이닉스는 66,192,960입니다. [2]"
+        )
+
+        accepted = self._accept(reply)
+
+        self.assertNotIn("**", accepted)
+        self.assertNotIn("- SK", accepted)
+        self.assertIn("333,605,938", accepted)
+        self.assertIn("[2]", accepted)
 
     def test_an_empty_reply_is_refused(self) -> None:
         self.assertEqual(self._reject("  "), "empty")
