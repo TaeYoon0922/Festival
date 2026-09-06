@@ -252,6 +252,13 @@ class ThinkTrace(BaseModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    #: Present whenever the answer was long enough to be worth rewriting.
+    #: ``status`` carries the refusing rule when HCX's rewrite was discarded,
+    #: so a narration the checks refused is visible rather than silent.
+    answer_narration: AnswerLeadTrace | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     holding_evidence_coverage: HoldingEvidenceCoverageTrace | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

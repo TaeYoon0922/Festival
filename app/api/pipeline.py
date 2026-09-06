@@ -20,13 +20,16 @@ import psycopg
 from app.agent.orchestrator import AgentOrchestrator
 from app.api.settings import ApiSettings
 from app.generation.answer_lead import (
+    STATUS_NOT_ELIGIBLE as LEAD_NOT_ELIGIBLE,
     AnswerLeadWriter,
+    LeadOutcome,
     corpus_company_names,
     lead_period,
     lead_request,
     question_topic,
     with_lead,
 )
+from app.generation.answer_narration import AnswerNarrator
 from app.generation.answer_presentation import annotate_citations, readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
@@ -136,6 +139,10 @@ INTERNAL_ERROR = "internal_error"
 #: the corpus supports the question.
 EMPTY_ANSWER_FALLBACK = "확인되지 않은 정보가 있습니다."
 
+#: The lead a narrated answer does not ask for.  ``with_lead`` takes ``None``
+#: and returns the answer untouched, so the return path stays one expression.
+_NO_LEAD = LeadOutcome(None, LEAD_NOT_ELIGIBLE)
+
 #: Statuses reached without ever calling the model.
 _HCX_NOT_CALLED = frozenset(
     {
@@ -182,6 +189,7 @@ class AnswerPipeline:
         generator: CitationAwareAnswerGenerator | None = None,
         verbalizer: HcxVerbalizer | None = None,
         lead_writer: AnswerLeadWriter | None = None,
+        narrator: AnswerNarrator | None = None,
         multi_document_planner: MultiDocumentPlanner | None = None,
         multi_document_executor: MultiDocumentExecutor | None = None,
         multi_document_evidence: MultiDocumentEvidenceBuilder | None = None,
@@ -197,6 +205,7 @@ class AnswerPipeline:
         self.generator = generator or CitationAwareAnswerGenerator()
         self.verbalizer = verbalizer or HcxVerbalizer()
         self.lead_writer = lead_writer or AnswerLeadWriter()
+        self.narrator = narrator or AnswerNarrator()
         self._lead_corpus_companies: tuple[str, ...] | None = None
         # P0-C is additive and opt-in. Without an executor wired the pipeline
         # behaves exactly as it did before, which is what the frozen Gold60
@@ -294,6 +303,7 @@ class AnswerPipeline:
             # everything else takes the path above unchanged.
             verbalizer=HcxVerbalizer(hcx_settings),
             lead_writer=AnswerLeadWriter(hcx_settings),
+            narrator=AnswerNarrator(hcx_settings),
             multi_document_planner=multi_document_planner,
             multi_document_executor=MultiDocumentExecutor(
                 event_repository=event_repository,
@@ -534,19 +544,37 @@ class AnswerPipeline:
         presented = annotate_citations(
             readable_answer(public_answer), public_context
         )
-        lead = self.lead_writer.write(
-            lead_request(
-                presented,
-                period=lead_period(getattr(validation, "plan", None)),
-                topic=question_topic(question),
-                corpus_companies=self._corpus_companies(),
-            )
+        # HyperCLOVA X rewrites the answer into prose it can read but cannot
+        # alter: every figure, date and citation is a digit-free token before
+        # the call and is restored byte for byte after it. A refused rewrite
+        # leaves the deterministic answer exactly as it was built, which is why
+        # this can run for every question rather than for one task type.
+        narration = self.narrator.narrate(
+            presented, corpus_companies=self._corpus_companies()
         )
-        if lead.status != "not_eligible":
-            trace["answer_lead"] = lead.to_public_dict()
-            if lead.succeeded:
-                stages = list(trace.get("stages") or ())
-                trace["stages"] = [*stages, "answer_lead"]
+        if narration.status != "not_eligible":
+            trace["answer_narration"] = narration.to_public_dict()
+        if narration.succeeded:
+            presented = narration.text
+            stages = list(trace.get("stages") or ())
+            trace["stages"] = [*stages, "answer_narration"]
+        lead = _NO_LEAD
+        if not narration.succeeded:
+            # The opening line is the smaller version of the same idea, so it
+            # runs only when the rewrite did not: two framings would repeat.
+            lead = self.lead_writer.write(
+                lead_request(
+                    presented,
+                    period=lead_period(getattr(validation, "plan", None)),
+                    topic=question_topic(question),
+                    corpus_companies=self._corpus_companies(),
+                )
+            )
+            if lead.status != "not_eligible":
+                trace["answer_lead"] = lead.to_public_dict()
+                if lead.succeeded:
+                    stages = list(trace.get("stages") or ())
+                    trace["stages"] = [*stages, "answer_lead"]
         return {
             "question_id": question_id,
             "question": question,

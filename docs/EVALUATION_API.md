@@ -122,6 +122,11 @@ result = response.json()
 | `query_understanding` · `query_validation` | 질의 검증 경로 |
 | `answerability` | 답변 가능성 판정이 실행된 경우 |
 | `clarification` | 역질문 판정이 실행된 경우 |
+| `answer_narration` | 답변이 다시 쓰기 대상 길이였던 경우 (거의 모든 응답) |
+
+`answer_narration.status`가 `success`면 HyperCLOVA X가 다시 쓴 답변이고, 그 외의 값이면
+결정적 답변이 그대로 서빙된 것입니다. 어느 쪽이든 수치·날짜·인용은 동일합니다 — 모델은
+값을 볼 수 없고, 토큰이 하나라도 어긋나면 다시 쓰기가 폐기됩니다.
 
 ### 응답 예시
 

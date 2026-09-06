@@ -62,6 +62,9 @@ THINK_TRACE_KEYS = {
     "warnings",
     "hcx_status",
     "correction",
+    # HCX rewrites every answer long enough to be worth rewriting, so the
+    # narration's outcome is reported on every response that reaches it.
+    "answer_narration",
 }
 
 #: The identifiers the correction graph reports when it supplied evidence.

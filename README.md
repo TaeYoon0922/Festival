@@ -172,6 +172,35 @@ retrieval 결과의 순서·점수·후보 payload를 변경하지 않는다는 
 ## 7. HyperCLOVA X Safety Strategy
 
 HCX는 답을 만들지 않습니다. 이미 검증된 사실을 자연스러운 한국어로 옮기는 변환기입니다.
+**모델은 어떤 수치도 보지 못합니다.** 인용 마커·날짜·숫자는 호출 전에 전부 자릿수 없는
+토큰으로 치환되고, 호출 후 원본 문자 그대로 복원됩니다.
+
+### 7.1 답변 나레이션 (모든 질의)
+
+`AnswerNarrator`(`app/generation/answer_narration.py`)가 완성된 결정적 답변을 읽기 쉬운
+한국어로 다시 씁니다. **task_type을 가리지 않으므로 모든 질의에서 HCX가 관여합니다.**
+
+| 단계 | 내용 |
+|---|---|
+| 입력 | 결정적 답변 본문. 인용 블록(`doc_id`·`chunk_id`)은 **전송하지 않음** |
+| 마스킹 | 인용 마커·날짜·숫자 → `__FESTIVAL_NUMBER_A__` 등 자릿수 없는 토큰 |
+| 요청 | 토큰을 그대로·같은 순서로 유지한 채 산문으로 다시 쓸 것 |
+| 검증 | 토큰 무결성(누락·중복·순서) · 새 숫자 · 새 인용 마커 · 금지 표현 · 미제공 기업명 · 길이 |
+| 복원 | `restore_literals`로 원본 값 복귀 후 인용 블록 재부착 |
+| 실패 | 결정적 답변을 그대로 서빙 (`answer_narration.status`에 거부 사유 기록) |
+
+모델이 바꿀 수 있는 것은 **표현뿐**입니다. 수치·날짜·인용·출처는 바꿀 수 없습니다.
+
+스위치는 `FESTIVAL_HCX_NARRATION_ENABLED`(기본 `true`)로 분리돼 있어, 이 계층만 끄고
+verbalizer·semantic fallback·opening line은 유지할 수 있습니다.
+
+라이브 성공률 측정:
+
+```bash
+python scripts/measure_answer_narration.py --base-url http://HOST:PORT --show
+```
+
+### 7.2 Compact claim verbalizer (지분공시 단일 이벤트)
 
 **호출 조건** — 다음을 모두 만족할 때만 호출합니다.
 
@@ -393,6 +422,7 @@ OpenAI 호환 엔드포인트로도 적재할 수 있습니다. 다만 계정 ra
 | `FESTIVAL_HCX_TIMEOUT_SECONDS` | `15.0` | |
 | `FESTIVAL_HCX_MAX_TOKENS` | `1024` | |
 | `FESTIVAL_HCX_TEMPERATURE` | `0.0` | |
+| `FESTIVAL_HCX_NARRATION_ENABLED` | `true` | 답변 나레이션만 개별로 끄는 스위치 |
 
 ### API / 실행
 
