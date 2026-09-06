@@ -20,6 +20,7 @@ from app.generation.answer_narration import (
     NarrationRejected,
     accept_narration,
     narration_source,
+    split_answer_section,
     split_citation_block,
 )
 from app.generation.hcx_verbalizer import HcxSettings
@@ -202,6 +203,77 @@ class AcceptanceTests(unittest.TestCase):
         reply = _faithful_reply(self.protection) + " 설명을 덧붙입니다." * 200
 
         self.assertEqual(self._reject(reply), "expanded")
+
+
+ANSWERED = """답변
+삼성전자의 2025년 연결기준 매출액은 333,605,938백만원입니다. [1]
+
+정기공시 근거 1
+근거 1 보고서: 사업보고서 (2025.12)
+내용: | 매출액 (주30) | 333,605,938 | [1]
+
+신뢰도
+답변 신뢰도: 높음
+
+인용
+[1]
+doc_id: periodic_20260310002820
+공시: 삼성전자 · 사업보고서 (2025.12) · 접수일 2026-03-10"""
+
+
+class AnswerSectionTests(unittest.TestCase):
+    """When the answer has a 답변 section, HCX writes that and only that."""
+
+    def setUp(self) -> None:
+        body, _ = split_citation_block(ANSWERED)
+        self.parts = split_answer_section(body)
+        self.protection = protect_literals(self.parts[1])
+
+    def test_the_section_is_found_with_what_surrounds_it(self) -> None:
+        before, answer, after = self.parts
+
+        self.assertEqual(before, "")
+        self.assertIn("매출액", answer)
+        self.assertIn("정기공시 근거 1", after)
+
+    def test_an_answer_without_the_section_opts_out(self) -> None:
+        body, _ = split_citation_block(ANSWER)
+
+        self.assertIsNone(split_answer_section(body))
+
+    def test_only_the_answer_sentence_reaches_the_model(self) -> None:
+        transport = _StubTransport(_faithful_reply(self.protection))
+
+        AnswerNarrator(_settings(), transport=transport).narrate(ANSWERED)
+
+        sent = transport.payloads[0]["messages"][-1]["content"]
+        self.assertNotIn("정기공시 근거", sent)
+        self.assertNotIn("신뢰도", sent)
+        self.assertNotIn("333,605,938", sent)
+
+    def test_the_ask_is_far_smaller_than_the_whole_body(self) -> None:
+        body, _ = split_citation_block(ANSWERED)
+        whole = protect_literals(narration_source(body))
+
+        self.assertLess(len(self.protection.literals), len(whole.literals))
+
+    def test_the_evidence_below_survives_untouched(self) -> None:
+        transport = _StubTransport(_faithful_reply(self.protection))
+
+        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWERED)
+
+        self.assertEqual(outcome.status, STATUS_SUCCESS)
+        self.assertIn("정기공시 근거 1", outcome.text)
+        self.assertIn("| 매출액 (주30) | 333,605,938 |", outcome.text)
+        self.assertTrue(outcome.text.startswith("답변\n"))
+
+    def test_a_refused_sentence_keeps_the_deterministic_answer(self) -> None:
+        transport = _StubTransport("매출액은 999,999백만원입니다.")
+
+        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWERED)
+
+        self.assertFalse(outcome.succeeded)
+        self.assertIsNone(outcome.text)
 
 
 class NarratorTests(unittest.TestCase):
