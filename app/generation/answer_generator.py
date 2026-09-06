@@ -124,7 +124,7 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
     confidence = _confidence(draft.confidence, answerable=answerable)
     sections.append(
         GeneratedSection(
-            title="신뢰도",
+            title=CONFIDENCE_TITLE,
             content=confidence["display_text"],
             citations=(),
         )
@@ -150,6 +150,13 @@ _EVIDENCE_TITLE = re.compile(
     r"^\s*(?:Periodic fact\s+\d+|General evidence|Holding events)\s*$"
 )
 
+#: The generator's own estimate of how well the evidence supported the answer.
+#: It is a useful internal signal and it is kept on ``GeneratedAnswer``, but it
+#: is not part of the answer: a reader asking 매출액은 얼마인가 was told
+#: "이러한 정보를 바탕으로 한 답변의 신뢰도는 높은 편입니다", which answers
+#: nothing and is the model's own assessment of itself.
+CONFIDENCE_TITLE = "신뢰도"
+
 
 def _stated_sections(
     sections: Sequence[GeneratedSection],
@@ -172,7 +179,9 @@ def _stated_sections(
     removed and the reply is exactly what it was.
     """
 
-    sections = list(sections)
+    sections = [
+        section for section in sections if section.title != CONFIDENCE_TITLE
+    ]
     if not any(section.title == DIRECT_ANSWER_TITLE for section in sections):
         return sections
     return [
@@ -931,6 +940,7 @@ def _periodic_sections(
     output: list[GeneratedSection] = []
     warnings: list[str] = []
     direct_answers: list[str] = []
+    narrative_sources: list[tuple[Mapping[str, Any], str]] = []
     facts_seen = 0
     calculations_seen = 0
     supported = True
@@ -993,6 +1003,7 @@ def _periodic_sections(
                 direct = _direct_answer_line(fact, source, marker, request=request)
                 if direct is not None and direct not in direct_answers:
                     direct_answers.append(direct)
+                narrative_sources.append((source, marker))
                 source_lines = _periodic_source_lines(source, marker, request=request)
                 if not source_lines:
                     lines.append("확인되지 않은 정보가 있습니다.")
@@ -1059,17 +1070,34 @@ def _periodic_sections(
                 citations=(),
             )
         )
+    if not direct_answers and narrative_sources:
+        # No metric row could answer, so the filing's own prose is the answer.
+        # Every source, not just the first: a question answered across two
+        # filings is answered by both, and dropping one drops a period.
+        for source, marker in narrative_sources[:MAX_DIRECT_ANSWERS]:
+            narrative = _narrative_answer_line(fact, source, marker)
+            if narrative is not None and narrative not in direct_answers:
+                direct_answers.append(narrative)
     if direct_answers:
         # First, because it is the answer. Everything below it is the evidence
         # for it, and a reader who stops after one sentence has still been told
         # what was asked. Each line was built only from a figure this answer
         # already cites, so nothing here outruns the evidence under it.
+        stated = direct_answers[:MAX_DIRECT_ANSWERS]
         output.insert(
             0,
             GeneratedSection(
                 title=DIRECT_ANSWER_TITLE,
-                content="\n".join(direct_answers[:MAX_DIRECT_ANSWERS]),
-                citations=(),
+                content="\n".join(stated),
+                # The sentences declare the citations they carry, so a reader
+                # and the scope diagnostics both see each figure sourced.
+                citations=_unique(
+                    [
+                        marker
+                        for line in stated
+                        for marker in _CITATION_MARKER_IN_LINE.findall(line)
+                    ]
+                ),
             ),
         )
     return output, warnings, bool(facts_seen or calculations_seen) and supported
@@ -1169,6 +1197,10 @@ _ROW_NUMBERING = re.compile(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX0-9]+\s*[.．)]
 #: More than this and the opening stops being an answer and becomes a list.
 MAX_DIRECT_ANSWERS = 4
 
+#: The citation markers a stated answer carries, read back so its section can
+#: declare them.
+_CITATION_MARKER_IN_LINE = re.compile(r"\[\d+\]")
+
 
 def _table_cells(row: str) -> list[str]:
     return [cell.strip() for cell in str(row).strip().strip("|").split("|")]
@@ -1260,6 +1292,67 @@ def _direct_answer_line(
     tail = "" if unit else " (공시 원문에 단위 표기 없음)"
     particle = _topic_particle(label)
     return f"{subject}{particle} {amount}입니다.{tail} {marker}".replace("  ", " ")
+
+
+#: A narrative answer is prose, so the table rows in the same chunk are not it.
+_TABLE_LINE = re.compile(r"^\s*[|\[]")
+
+#: The retrieval prefix the chunker writes for the embedder, which presentation
+#: normally rewrites into a heading. It is not part of what the filing says.
+_PREFIX_LINE = re.compile(r"^\s*\[[^\]]+\]\s")
+
+#: Long enough for the sentences that answer a "정리해줘", short enough that the
+#: model is restating rather than summarising a report.
+MAX_NARRATIVE_ANSWER_CHARS = 420
+
+
+def _narrative_answer_line(
+    fact: Mapping[str, Any], source: Mapping[str, Any], marker: str
+) -> str | None:
+    """The filing's own sentences, for a question no metric row can answer.
+
+    "주요 투자 계획을 정리해줘" is answered in prose, not in a table cell, so
+    there is no figure to state and the answer would otherwise have no opening
+    at all -- which is how a question about investment came back headed by a
+    page of IFRS 1118 accounting policy.
+
+    This takes the prose from the highest-ranked source only, bounded, cut at a
+    sentence end. It adds nothing: every sentence is the filing's, and the
+    citation is the one that source already carries.
+    """
+
+    lines = [
+        line.strip()
+        for line in str(source.get("fact_text") or "").splitlines()
+        if line.strip()
+        and not _TABLE_LINE.match(line)
+        and not _PREFIX_LINE.match(line)
+    ]
+    prose = " ".join(lines).strip()
+    if len(prose) < 20:
+        return None
+    if len(prose) > MAX_NARRATIVE_ANSWER_CHARS:
+        cut = prose.rfind(". ", 0, MAX_NARRATIVE_ANSWER_CHARS)
+        if cut < 0:
+            cut = prose.rfind("다. ", 0, MAX_NARRATIVE_ANSWER_CHARS)
+        prose = prose[: cut + 1] if cut > 0 else prose[:MAX_NARRATIVE_ANSWER_CHARS]
+
+    # Which company, which period, which filing. The metric answer states these
+    # in its sentence, and a narrative answer needs them just as much: without
+    # them the prose is true of some year of some issuer and the reader cannot
+    # tell which.
+    period = source.get("reporting_period")
+    context = " ".join(
+        part
+        for part in (
+            _text(fact.get("corp_name")),
+            _period_label(period if isinstance(period, Mapping) else {}),
+            _text(source.get("report_name")),
+        )
+        if part
+    )
+    prose = prose.strip()
+    return f"{context} 기준: {prose} {marker}" if context else f"{prose} {marker}"
 
 
 def _topic_particle(word: str) -> str:
@@ -1413,7 +1506,12 @@ def validate_periodic_citation_scope(
     warnings: list[str] = []
     valid = True
     for section_index, section in enumerate(sections, start=1):
-        if not section.citations:
+        # The answer sentence is composed, not copied. This check asks whether a
+        # rendered line reproduces its cited source verbatim, which is the right
+        # question for an evidence block and the wrong one here: the figures in
+        # the sentence come from the projected metric row this same pass already
+        # cleared, and the wording around them is ours by design.
+        if not section.citations or section.title == DIRECT_ANSWER_TITLE:
             output.append(section)
             continue
         kept_lines = []

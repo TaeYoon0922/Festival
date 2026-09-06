@@ -80,23 +80,29 @@ Reply with the rewritten Korean text and nothing else."""
 
 ANSWER_SYSTEM_PROMPT = """You write the answer to a Korean disclosure question.
 
-You are given the verified facts as short Korean lines. Every figure, date and
-citation in them has already been replaced by a token of the form
-__FESTIVAL_KIND_LABEL__. You cannot see any figure, and you must not write one.
+You are given verified facts as short Korean lines, followed by a TAGS line.
+A tag looks like __FESTIVAL_NUMBER_A__ or __FESTIVAL_CITATION_B__ and stands
+for a figure, a date or a source reference that has been hidden from you.
 
-Write the answer as one or two natural Korean sentences that a person would say
-out loud. Lead with what was asked: the company, the period, the measure, and
-its value token. Keep every token, in the order given, each exactly once, and
-keep each citation token at the end of the sentence whose figure it supports.
+Your reply MUST contain every tag on the TAGS line, spelled exactly as written,
+in the same order, each exactly once. A __FESTIVAL_CITATION__ tag is one of
+them: it is not punctuation and not a footnote you may leave out. Put it at the
+end of the sentence whose figure it supports. A reply missing a tag is thrown
+away, so check the TAGS line before you answer.
+
+Write one or two natural Korean sentences that answer the question the facts
+answer. Lead with the company, the period, the measure and its value tag.
 
 Never do any of these:
 
-- Write a digit, in any form.
-- Invent, drop, reorder or duplicate a token.
-- Write a citation marker such as a bracketed number.
+- Write a digit of your own, in any form.
+- Invent, drop, reorder or duplicate a tag.
+- Write your own bracketed number; the citation tag already stands for one.
 - Name a company, a period or a measure the lines do not name.
+- Explain, interpret or comment on what a figure means.
 - Conclude, compare, rank, estimate, recommend or predict anything, and do not
   say which value is larger even when several are given.
+- Mention how confident the answer is.
 - Add a heading, a bullet list, a table, a quotation mark or a Markdown fence.
 
 Reply with those sentences and nothing else."""
@@ -479,11 +485,19 @@ class AnswerNarrator:
         return NarrationOutcome(joined, STATUS_SUCCESS, _elapsed_ms(start))
 
     def _payload(self, protection: ProtectedText, prompt: str) -> dict[str, Any]:
+        # The tags are listed back to the model because the check that discards
+        # a reply is exactly "are they all here, in this order". A reply that
+        # dropped one was the commonest failure, and the citation tag was the
+        # one most often dropped -- read, it seems, as a footnote marker rather
+        # than as something to carry.
+        content = protection.masked
+        if protection.placeholders:
+            content = f"{content}\n\nTAGS: {' '.join(protection.placeholders)}"
         return {
             "model": self.settings.model,
             "messages": [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": protection.masked},
+                {"role": "user", "content": content},
             ],
             "temperature": 0.0,
             "max_tokens": self.settings.max_tokens,

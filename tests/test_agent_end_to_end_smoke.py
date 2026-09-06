@@ -235,7 +235,13 @@ class AgentEndToEndSmokeTests(unittest.TestCase):
 
         row = _run_full_pipeline(plan.raw_query, plan, execution)
 
-        content = row["generated_answer"]["sections"][0]["content"]
+        # Section 0 is the answer sentence now. The citation scope this checks
+        # is the evidence block's, so read that one.
+        content = next(
+            section["content"]
+            for section in row["generated_answer"]["sections"]
+            if section["title"] != "답변"
+        )
         numeric_line = next(
             line for line in content.splitlines() if "100,000" in line
         )

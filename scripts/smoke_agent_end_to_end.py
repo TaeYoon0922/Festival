@@ -364,7 +364,18 @@ def _no_latest_selection(agent_result: Any, generated: Any) -> bool:
     ):
         return False
     visible_values = _values_requiring_preservation(agent_result.answer_draft)
-    return all(value in generated.answer_text for value in visible_values)
+    # Read the rendered sections, not the answer text. Since the answer states
+    # its conclusion first and leaves the evidence blocks to retrieved_context,
+    # answer_text is the reader-facing subset while sections is still the full
+    # render -- and what this invariant asks is whether the generator dropped a
+    # period or a value, not which of them the reader is shown first.
+    rendered = "\n".join(
+        [
+            *(section.content for section in generated.sections),
+            *(row for section in generated.sections for row in section.metadata),
+        ]
+    )
+    return all(value in rendered for value in visible_values)
 
 
 def _values_requiring_preservation(draft: Any) -> tuple[str, ...]:

@@ -225,7 +225,11 @@ class AgentOrchestratorTests(unittest.TestCase):
             ),
         )
         generated = generate_answer(result.answer_draft)
-        fact_section = generated.sections[0]
+        # The answer sentence is section 0 now; the fact block is the one after
+        # it that carries the rendered evidence.
+        fact_section = next(
+            section for section in generated.sections if section.title != "답변"
+        )
         self.assertTrue(generated.answerable)
         self.assertIn("연료전지 주기기 매출액 23,848백만원 [1]", fact_section.content)
         self.assertNotIn("재고자산", generated.answer_text)

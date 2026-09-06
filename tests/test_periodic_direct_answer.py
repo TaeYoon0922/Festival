@@ -146,10 +146,21 @@ class StatedSectionsTests(unittest.TestCase):
 
     def test_evidence_blocks_go_once_the_answer_is_stated(self) -> None:
         kept = _stated_sections(
-            self._sections("답변", "Periodic fact 1", "Periodic fact 2", "신뢰도")
+            self._sections("답변", "Periodic fact 1", "Periodic fact 2", "주의")
         )
 
-        self.assertEqual([section.title for section in kept], ["답변", "신뢰도"])
+        self.assertEqual([section.title for section in kept], ["답변", "주의"])
+
+    def test_the_confidence_line_never_reaches_the_answer(self) -> None:
+        """It answers nothing, and it is the generator grading itself."""
+
+        for sections in (
+            self._sections("답변", "신뢰도"),
+            self._sections("General evidence", "신뢰도"),
+        ):
+            with self.subTest(titles=[s.title for s in sections]):
+                kept = _stated_sections(sections)
+                self.assertNotIn("신뢰도", [s.title for s in kept])
 
     def test_general_and_holding_blocks_go_too(self) -> None:
         kept = _stated_sections(
@@ -169,8 +180,8 @@ class StatedSectionsTests(unittest.TestCase):
             [section.title for section in kept], ["답변", "주의", "확인 필요"]
         )
 
-    def test_nothing_is_removed_without_an_answer(self) -> None:
-        titles = ("Periodic fact 1", "General evidence", "신뢰도")
+    def test_evidence_stays_without_an_answer(self) -> None:
+        titles = ("Periodic fact 1", "General evidence", "주의")
 
         kept = _stated_sections(self._sections(*titles))
 

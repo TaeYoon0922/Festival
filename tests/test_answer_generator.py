@@ -429,9 +429,12 @@ class AnswerGeneratorTests(unittest.TestCase):
             replace(draft, confidence={"level": "low"}, answerable=False)
         )
 
-        self.assertIn("답변 신뢰도: 높음", high.answer_text)
-        self.assertIn("답변 신뢰도: 중간", medium.answer_text)
-        self.assertIn("추가 확인이 필요합니다", low.answer_text)
+        # Kept on the result, deliberately absent from the answer: the model's
+        # own assessment of itself answers nothing the question asked.
+        self.assertEqual(high.confidence["display_text"], "답변 신뢰도: 높음")
+        self.assertEqual(medium.confidence["display_text"], "답변 신뢰도: 중간")
+        self.assertNotIn("신뢰도", high.answer_text)
+        self.assertIn("추가 확인이 필요합니다", low.confidence["display_text"])
 
     def test_periodic_renderer_keeps_named_metric_row_and_basis(self):
         table = (
