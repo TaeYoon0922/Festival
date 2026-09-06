@@ -81,7 +81,10 @@ def create_app(
         return AnswerResponse.model_validate(payload)
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
+    async def healthz() -> dict[str, str]:
+        # Async on purpose. A def endpoint runs in the threadpool that /answer
+        # occupies, so a queue of slow answers made the health check wait behind
+        # them -- reporting the service down at the moment it was busiest.
         return {"status": "ok"}
 
     @app.exception_handler(AnswerPipelineError)

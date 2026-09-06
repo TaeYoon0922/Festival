@@ -73,7 +73,12 @@ from app.reasoning.holding_company_role_resolution import (
     HoldingCompanyRoleResolver,
 )
 from app.reasoning.input_guard import guard_message, inspect_question
+from app.reasoning.query_understanding import (
+    ACTOR_SOURCE_DIRECTED_HOLDER,
+    HOLDING_ACTOR_CANDIDATE_KEY,
+)
 from app.reasoning.comparison_evidence import (
+    EvidenceComparison,
     evidence_comparison,
     execute_per_company,
     merge_executions,
@@ -324,6 +329,10 @@ class AnswerPipeline:
             return self._sensitive_input_response(question_id, question, guard)
         validation: QueryValidationResult | None = None
         clarification_decision: ClarificationDecision | None = None
+        # Bound before the branch: only the validated path can engage the
+        # per-company fan-out, but the public slice below is shared and reads
+        # this on every path.
+        comparison_evidence: EvidenceComparison | None = None
         if self.query_validator is None:
             plan, execution = self._retrieve(question)
         else:
@@ -333,7 +342,6 @@ class AnswerPipeline:
             # asks which company was meant -- of an asker who named two. Before
             # treating that as an unanswered question, check whether it is a
             # comparison this pipeline can retrieve company by company.
-            comparison_evidence = None
             if not validation.retrieval_allowed:
                 candidate = evidence_comparison(validation.plan)
                 comparison_evidence = candidate if candidate.applied else None
@@ -373,6 +381,18 @@ class AnswerPipeline:
                         )
                 if not validation.retrieval_allowed:
                     return self._blocked_response(question_id, question, validation)
+            # A directed acquisition names its acquirer, and validation binds
+            # that name to one of this issuer's own filers when the corpus has
+            # it. When it does not, the plan simply keeps no holder -- and an
+            # unscoped holding search then answers from whichever holder ranked,
+            # attributing one company's position to the company the question
+            # actually named. Nothing downstream can tell that apart, because by
+            # then the question looks like one that named no holder at all.
+            unconfirmed = _unconfirmed_acquirer(validation.plan)
+            if unconfirmed:
+                return self._unconfirmed_acquirer_response(
+                    question_id, question, unconfirmed
+                )
             try:
                 if comparison_evidence is not None:
                     # Each company retrieved on its own plan, then interleaved,
@@ -482,7 +502,8 @@ class AnswerPipeline:
             evidence,
             self.settings.top_k
             + _expanded_count(execution)
-            + _multi_document_count(multi),
+            + _multi_document_count(multi)
+            + _comparison_count(comparison_evidence, execution, self.settings.top_k),
         )
         public_answer, citation_alignment = align_public_citations(
             _non_empty(outcome.text, generated.answer_text),
@@ -712,6 +733,37 @@ class AnswerPipeline:
                 "hcx_status": "skipped_input_guard",
             },
             "answer": guard_message(),
+        }
+
+    def _unconfirmed_acquirer_response(
+        self, question_id: str, question: str, surface: str
+    ) -> dict[str, Any]:
+        """Say the acquirer was not confirmed, rather than answer about another.
+
+        ``retrieved_context`` is empty because a search not scoped to the named
+        acquirer would return another holder's filings, and showing those as
+        this question's evidence is the mistake being avoided.
+        """
+
+        self._query_metrics["unsupported_count"] += 1
+        return {
+            "question_id": question_id,
+            "question": question,
+            "retrieved_context": [],
+            "think_trace": {
+                "task_type": "holding_event",
+                "route": "unconfirmed_acquirer",
+                "stages": ["query_understanding", "query_validation"],
+                "retrieval_count": 0,
+                "selected_evidence_count": 0,
+                "answerable": False,
+                "warnings": ["unconfirmed_acquirer"],
+                "hcx_status": "skipped_query_not_resolved",
+            },
+            "answer": (
+                f"질문이 지목한 취득자 '{surface}'를 해당 발행회사의 보고자 중에서 "
+                "확인하지 못했습니다. 다른 보유자의 공시로 답변하지 않습니다."
+            ),
         }
 
     def _validated_understanding(
@@ -997,6 +1049,43 @@ def _preserve_multi_document_semantics(
         "fallback_semantic_guard",
         verdict.reason,
     )
+
+
+def _unconfirmed_acquirer(plan: Any) -> str:
+    """The acquirer a directed question named that the corpus could not confirm.
+
+    Reads what understanding recorded and what validation did with it, and
+    changes neither: the surface is present because the question named an
+    acquirer, and ``reporter`` is empty because no filer of this issuer answered
+    to it. Both halves are needed -- a bound reporter means the question is
+    scoped to the holder it named, and no surface means it named none.
+    """
+
+    candidate = dict(getattr(plan, "evidence", {}) or {}).get(
+        HOLDING_ACTOR_CANDIDATE_KEY
+    )
+    if not isinstance(candidate, Mapping):
+        return ""
+    if candidate.get("source") != ACTOR_SOURCE_DIRECTED_HOLDER:
+        return ""
+    if str(getattr(plan, "reporter", "") or "").strip():
+        return ""
+    return str(candidate.get("surface") or "").strip()
+
+
+def _comparison_count(comparison: Any, execution: Any, top_k: int) -> int:
+    """How many rows the per-company fan-out added beyond one company's Top-K.
+
+    A comparison retrieves each company on its own plan and interleaves the
+    results, so the served evidence is a multiple of the ordinary slice. The
+    public slice was still one Top-K, which cut the later companies off: the
+    answer cited a row the caller was never shown, and a citation nobody can
+    resolve is worse than one that was never made.
+    """
+
+    if comparison is None or not getattr(comparison, "applied", False):
+        return 0
+    return max(0, len(list(getattr(execution, "results", ()) or ())) - top_k)
 
 
 def _expanded_count(execution: Any) -> int:
