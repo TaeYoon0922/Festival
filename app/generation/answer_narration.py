@@ -123,7 +123,18 @@ MAX_NARRATION_CHARS = 6000
 
 #: Prose that restates cannot grow much. A reply well past its input has started
 #: adding, and what it added is not in the evidence.
-MAX_GROWTH_RATIO = 1.6
+#:
+#: Measured on the text with its placeholders removed, because a placeholder is
+#: twenty-odd characters standing in for four and swamps the comparison: the
+#: masked form of a one-sentence answer is long enough that a reply which
+#: doubled its prose still looked like a modest rewrite. It was
+#: "삼성전자의 매출액은 X원으로, 이는 회사의 재무 상태와 시장에서의 경쟁력을
+#: 나타내는 중요한 지표 중 하나입니다" -- a judgement about a figure the model
+#: could not see, served as though the filing had said it.
+MAX_GROWTH_RATIO = 1.4
+
+#: Rewording needs a little room even when the input is one short line.
+GROWTH_ALLOWANCE_CHARS = 24
 
 STATUS_SUCCESS = "success"
 STATUS_DISABLED = "disabled"
@@ -160,6 +171,22 @@ _BANNED = (
     "부정적",
     "목표주가",
     "결론적으로",
+    # Commentary. A model with no figure in front of it explaining what a figure
+    # means is writing about the company, not restating the filing.
+    "나타내",
+    "의미합니다",
+    "의미하는",
+    "중요한",
+    "볼 수 있",
+    "판단됩니다",
+    "평가됩니다",
+    "반영합니다",
+    "반영한",
+    "시사",
+    "해석",
+    "경쟁력",
+    "수익성이",
+    "성과를",
 )
 
 _CITATION_MARKER = re.compile(r"\[\d+\]")
@@ -319,9 +346,6 @@ def accept_narration(
         raise NarrationRejected("empty")
     if _FENCE.search(text):
         raise NarrationRejected("markdown_fence")
-    limit = max(MIN_NARRATION_CHARS, int(len(protection.masked) * MAX_GROWTH_RATIO))
-    if len(text) > limit:
-        raise NarrationRejected("expanded")
     if _CITATION_MARKER.search(text):
         raise NarrationRejected("citation_marker")
 
@@ -329,15 +353,27 @@ def accept_narration(
     if not integrity.valid:
         raise NarrationRejected(str(integrity.reason))
 
+    written = PLACEHOLDER_PATTERN.sub("", text)
+    given = PLACEHOLDER_PATTERN.sub("", protection.masked)
+    if len(written) > max(
+        len(given) + GROWTH_ALLOWANCE_CHARS, int(len(given) * MAX_GROWTH_RATIO)
+    ):
+        raise NarrationRejected("expanded")
+
     # Checked before restoration: afterwards the restored figures are digits
     # that belong, and the rule "no digit" would no longer be decidable.
-    if _DIGIT.search(PLACEHOLDER_PATTERN.sub("", text)):
+    if _DIGIT.search(written):
         raise NarrationRejected("digit")
+
+    # Source-relative on purpose. A filing that itself says 예상 or 경쟁력 may be
+    # restated saying it; the rule is about what the model added, not about
+    # which words exist.
+    source = protection.original
     for word in _BANNED:
-        if word in text:
+        if word in text and word not in source:
             raise NarrationRejected("evaluative_wording")
 
-    _refuse_unsupplied_companies(text, protection.original, corpus_companies)
+    _refuse_unsupplied_companies(text, source, corpus_companies)
     return restore_literals(text, protection)
 
 

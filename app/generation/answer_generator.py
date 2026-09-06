@@ -1060,11 +1060,19 @@ def _periodic_source_lines(
     return [f"내용: {display} {marker}"]
 
 
-#: The unit a filing states for a table, either as the chunker's retrieval tag
-#: or as the caption the table itself carries.
-_STATED_UNIT = re.compile(
-    r"\[단위\]\s*([^\n]{1,40})|단위\s*[:：]\s*([^)\n|\]]{1,40})"
-)
+#: The unit a filing states for a whole table, as the chunker's retrieval tag.
+#: Only this tag: it is extracted from the table's own caption, so it qualifies
+#: every row.
+#:
+#: A bare "단위 : X" found anywhere in the chunk does not. A 손익계산서 writes
+#: "기본주당이익 (단위 : 원)" on the EPS row while the statement above it is in
+#: 백만원, so scanning the chunk for the first 단위 attached 원 to 매출액 and
+#: reported a figure a million times too small. A row's unit belongs to that
+#: row, and is read from the row itself below.
+_STATED_UNIT = re.compile(r"\[단위\]\s*([^\n]{1,40})")
+
+#: The unit a filing writes onto one row's label, which qualifies that row only.
+_ROW_UNIT = re.compile(r"\(\s*단위\s*[:：]\s*([^)\n|]{1,20})\)")
 
 #: A grouped figure -- "333,605,938".  A number written like this is an amount,
 #: and an amount without a unit is a number the reader cannot check.
@@ -1079,12 +1087,10 @@ def _source_text(source: Mapping[str, Any]) -> str:
 
 
 def _stated_unit(source: Mapping[str, Any]) -> str | None:
-    """The unit the filing states, or ``None`` when it states none."""
+    """The table-level unit the filing states, or ``None`` when it states none."""
 
     match = _STATED_UNIT.search(_source_text(source))
-    if match is None:
-        return None
-    return _text(match.group(1) or match.group(2))
+    return _text(match.group(1)) if match is not None else None
 
 
 def _periodic_unit_metadata(
@@ -1129,7 +1135,7 @@ def _table_cells(row: str) -> list[str]:
     return [cell.strip() for cell in str(row).strip().strip("|").split("|")]
 
 
-def _single_metric_cell(display: str) -> tuple[str, str] | None:
+def _single_metric_cell(display: str) -> tuple[str, str, str | None] | None:
     """The one label and the one figure a projected table states, or ``None``.
 
     Returns a value only when the projection left exactly one metric row and
@@ -1151,8 +1157,12 @@ def _single_metric_cell(display: str) -> tuple[str, str] | None:
     label, value = data[0], data[1]
     if not label or not _METRIC_VALUE.match(value):
         return None
+    row_unit = _ROW_UNIT.search(label)
+    label = _ROW_UNIT.sub("", label)
     label = _ROW_NUMBERING.sub("", _ROW_FOOTNOTE.sub("", label)).strip()
-    return (label, value) if label else None
+    if not label:
+        return None
+    return label, value, (_text(row_unit.group(1)) if row_unit else None)
 
 
 def _direct_answer_line(
@@ -1187,13 +1197,16 @@ def _direct_answer_line(
     cell = _single_metric_cell(display)
     if cell is None:
         return None
-    label, value = cell
+    label, value, row_unit = cell
 
     company = _text(fact.get("corp_name"))
     period = source.get("reporting_period")
     period_label = _period_label(period if isinstance(period, Mapping) else {})
     basis = _basis_label(request, source)
-    unit = _stated_unit(source)
+    # A unit written on the row wins: it was put there because the row differs
+    # from the table around it, which is exactly the case that misreported a
+    # figure when the table's unit was assumed to cover every row.
+    unit = row_unit or _stated_unit(source)
 
     subject = "".join(
         part

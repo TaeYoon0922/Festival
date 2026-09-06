@@ -204,6 +204,63 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(self._reject(reply), "expanded")
 
+    def test_wording_the_source_itself_uses_is_allowed(self) -> None:
+        """A filing that says 예상 may be restated saying it."""
+
+        protection, _ = _protection(
+            "당사는 2025년 중 총 1,000억원을 사용할 것으로 예상됩니다. " * 2
+        )
+        reply = " ".join(f"예상되는 금액은 {token}입니다." for token in protection.placeholders)
+
+        self.assertIn("예상", accept_narration(reply, protection))
+
+
+class CommentaryTests(unittest.TestCase):
+    """A judgement about a figure the model cannot see is not an answer.
+
+    The live server returned "매출액은 X원으로, 이는 회사의 재무 상태와 시장에서의
+    경쟁력을 나타내는 중요한 지표 중 하나입니다" -- the model explaining a figure
+    it was never shown, served as though the filing had said it.
+    """
+
+    def setUp(self) -> None:
+        body, _ = split_citation_block(ANSWERED)
+        self.protection = protect_literals(split_answer_section(body)[1])
+        self.tokens = self.protection.placeholders
+
+    def _reply(self, tail: str) -> str:
+        return (
+            f"삼성전자의 {self.tokens[0]}년 연결기준 매출액은 "
+            f"{self.tokens[1]}백만원{tail} {self.tokens[2]}"
+        )
+
+    def test_the_commentary_the_server_returned_is_refused(self) -> None:
+        reply = self._reply(
+            "으로, 이는 회사의 재무 상태와 시장에서의 경쟁력을 "
+            "나타내는 중요한 지표 중 하나입니다."
+        )
+
+        with self.assertRaises(NarrationRejected) as raised:
+            accept_narration(reply, self.protection)
+        self.assertIn(raised.exception.reason, ("expanded", "evaluative_wording"))
+
+    def test_a_plain_restatement_is_kept(self) -> None:
+        restored = accept_narration(self._reply("으로 확인됩니다."), self.protection)
+
+        self.assertIn("333,605,938", restored)
+        self.assertIn("[1]", restored)
+
+    def test_growth_is_measured_without_the_placeholders(self) -> None:
+        """A token is twenty-odd characters standing in for four.
+
+        Measuring the masked text let a reply that doubled its prose look like
+        a modest rewrite, which is how the commentary got through.
+        """
+
+        written = len(self._reply("으로, 이는 회사의 재무 상태를 설명합니다."))
+
+        self.assertLess(len(self.protection.masked), written * 2)
+
 
 ANSWERED = """답변
 삼성전자의 2025년 연결기준 매출액은 333,605,938백만원입니다. [1]
