@@ -83,8 +83,7 @@ class StatedUnitTests(unittest.TestCase):
 
     def test_a_chunk_without_the_field_falls_back_to_the_tag(self) -> None:
         source = {
-            "fact_text": "[단위] 억원
-| 당기순이익 | 5,028,606 |",
+            "fact_text": "[단위] 억원\n| 당기순이익 | 5,028,606 |",
             "provenance": {"source_chunk": {}},
         }
 
