@@ -31,7 +31,6 @@ from time import perf_counter
 from typing import Any, Mapping, Sequence
 
 from app.generation.answer_generator import UNIT_ABSENT_NOTICE
-from app.generation.answer_lead import _looks_like_a_company
 from app.generation.hcx_verbalizer import HcxSettings, _response_content
 from app.retrieval.embeddings import (
     EmbeddingHttpError,
@@ -91,8 +90,12 @@ STATUS_ERROR = "synthesis_error"
 STATUS_EMPTY = "empty_reply"
 STATUS_REJECTED = "rejected"
 
-#: Judgement, advice and forecasting. The task forbids all three, and none of
-#: them is something a filing says about itself.
+#: Advice and forecasting, which the task forbids outright.
+#:
+#: Words that merely describe -- 우수한, 부진한, 긍정적 -- came out. A question
+#: that asks "어느 게임사가 더 수익성이 좋아" is asking for exactly that word,
+#: and the figures behind it are checked separately; refusing the answer for
+#: using it refused the answer for answering.
 _BANNED = (
     "매수",
     "매도",
@@ -105,10 +108,6 @@ _BANNED = (
     "예측됩니다",
     "예상됩니다만",
     "기대됩니다",
-    "긍정적",
-    "부정적",
-    "우수한",
-    "부진한",
     "저평가",
     "고평가",
     "매력적",
@@ -271,8 +270,25 @@ def citation_block(
     return "\n".join(lines)
 
 
-#: Enough figures to cover a statement without turning the pair scan into work.
-MAX_DERIVATION_OPERANDS = 120
+#: A figure with the scale word an answer may have written beside it.
+_SCALED_NUMBER = re.compile(
+    r"(?P<number>\d[\d,.]*)\s*(?P<scale>조|억|만|십억|백만|천)?"
+)
+
+#: What each scale multiplies by. An answer writes a 758,900,000,000 total as
+#: 7,589억, and refusing that would refuse the arithmetic the question asked for.
+_SCALES = {
+    "조": Decimal(10) ** 12,
+    "십억": Decimal(10) ** 9,
+    "억": Decimal(10) ** 8,
+    "백만": Decimal(10) ** 6,
+    "만": Decimal(10) ** 4,
+    "천": Decimal(10) ** 3,
+}
+
+#: Ratios are checked pairwise, which is quadratic, so only this many operands
+#: take part. Sums and differences are searched with a set and use them all.
+MAX_RATIO_OPERANDS = 80
 
 
 def _amount(value: str) -> Decimal | None:
@@ -286,44 +302,66 @@ def _amount(value: str) -> Decimal | None:
 
 
 def _evidence_amounts(evidence: str) -> list[Decimal]:
+    """Every distinct figure the filings state.
+
+    All of them, not a prefix: an earlier cap of 120 read only the first table
+    and then refused differences whose second operand sat in the next extract.
+    """
+
     seen: dict[Decimal, None] = {}
     for match in _NUMBER.findall(evidence):
         amount = _amount(match)
         if amount is not None:
             seen.setdefault(amount, None)
-        if len(seen) >= MAX_DERIVATION_OPERANDS:
-            break
     return list(seen)
 
 
-def _derivable_amounts(evidence: str) -> set[Decimal]:
-    """Figures a reader could work out from the filings, exactly.
+def _accounted_for(
+    written: str, scale: str | None, operands: Sequence[Decimal]
+) -> bool:
+    """Whether the figure is arithmetic on figures the filings state.
 
-    A comparison answer states a gap, a total or a rate of change, and none of
-    those is written in any filing -- so a check that only looks for the number
-    would refuse the answer the question asked for. Each of these is arithmetic
-    on two figures that *are* in the filings, so it can be verified rather than
-    trusted, which is the same standard everything else here is held to.
-
-    Rates are matched to one and two decimal places because that is how an
-    answer writes them; nothing else about a rounded value is accepted.
+    Sums and differences are searched against a set rather than precomputed
+    pairwise, so every operand takes part however many the filings printed:
+    ``a - b == x`` holds when ``a - x`` is itself an operand, and ``a + b == x``
+    when ``x - a`` is. Ratios stay pairwise and bounded, because they are rarer
+    and cost more.
     """
 
-    amounts = _evidence_amounts(evidence)
-    derived: set[Decimal] = set()
-    for index, first in enumerate(amounts):
-        for second in amounts[index + 1 :]:
-            derived.add(abs(first - second))
-            derived.add(first + second)
-            for numerator, denominator in ((first, second), (second, first)):
+    candidates = [amount for amount in (_amount(written),) if amount is not None]
+    if scale and candidates:
+        candidates.append(candidates[0] * _SCALES[scale])
+    if not candidates:
+        return False
+
+    available = set(operands)
+    for value in candidates:
+        for operand in operands:
+            if operand - value in available or value - operand in available:
+                return True
+    for value in candidates:
+        for numerator in operands[:MAX_RATIO_OPERANDS]:
+            for denominator in operands[:MAX_RATIO_OPERANDS]:
                 if denominator == 0:
                     continue
-                for scale in (Decimal("0.1"), Decimal("0.01")):
+                for places in (Decimal("0.1"), Decimal("0.01")):
                     ratio = numerator / denominator * 100
                     change = (numerator - denominator) / denominator * 100
-                    derived.add(ratio.quantize(scale, rounding=ROUND_HALF_UP))
-                    derived.add(change.quantize(scale, rounding=ROUND_HALF_UP))
-    return derived
+                    if value in (
+                        ratio.quantize(places, rounding=ROUND_HALF_UP),
+                        change.quantize(places, rounding=ROUND_HALF_UP),
+                    ):
+                        return True
+    return False
+
+
+def _digit_scales(compact: str) -> set[str]:
+    """``digits + scale`` for every scaled figure the filings write."""
+
+    return {
+        f"{_digits(match.group(1))}{match.group(2)}"
+        for match in re.finditer(r"(\d[\d,.]*)(조|십억|억|백만|만|천)", compact)
+    }
 
 
 #: A unit written straight after a figure. The scale is the whole meaning of a
@@ -337,6 +375,39 @@ _UNIT_AFTER_NUMBER = re.compile(
 #: ``%`` and ``배`` are not scale claims about a filing's figures -- they are
 #: what a computed share or ratio is written in, and the arithmetic behind it
 #: is checked separately. Only the monetary and count scales are guarded here.
+_UNIT_WORDS = (
+    "십억원", "백만원", "천원", "억원", "조원", "만원", "원",
+    "십억", "백만", "천", "억", "조", "주",
+)
+
+
+def _units_after_numbers(text: str, evidence_digits: str) -> set[str]:
+    """Units the reply put after a figure the filings themselves print.
+
+    A derived figure is left alone. Its scale is not a guess about a printed
+    number, it is part of the arithmetic already verified: strip the 억 off a
+    computed 7,589억 total and what is served is 7,589, a hundred-millionth of
+    the answer.
+    """
+
+    found: set[str] = set()
+    for match in _UNIT_AFTER_NUMBER.finditer(text):
+        digits = _digits(match.group(0))
+        if digits and digits in evidence_digits:
+            found.add(re.sub(r"\s+", "", match.group(1)))
+    return found
+
+
+def _unit_words(evidence: str) -> set[str]:
+    """Units the filings themselves wrote, in any position.
+
+    Read from the whole extract rather than only from beside a figure: a table
+    states its unit in a caption or a header, and a reply is entitled to use
+    the unit its source printed there.
+    """
+
+    compact = re.sub(r"\s+", "", evidence)
+    return {unit for unit in _UNIT_WORDS if unit in compact}
 
 
 def _without_units(text: str, invented: set[str]) -> str:
@@ -353,40 +424,15 @@ def _without_units(text: str, invented: set[str]) -> str:
     return text
 
 
-def _units_after_numbers(text: str) -> set[str]:
-    return {
-        re.sub(r"\s+", "", match) for match in _UNIT_AFTER_NUMBER.findall(text)
-    }
-
-
-def _unit_words(evidence: str) -> set[str]:
-    """Units the filings themselves wrote, in any position.
-
-    Read from the whole extract rather than only from beside a figure: a table
-    states its unit in a caption or a header, and a reply is entitled to use
-    the unit its source printed there.
-    """
-
-    compact = re.sub(r"\s+", "", evidence)
-    return {
-        unit
-        for unit in (
-            "십억원", "백만원", "천원", "억원", "조원", "만원", "원",
-            "십억", "백만", "천", "억", "조", "주",
-        )
-        if unit in compact
-    }
-
-
 def _attributed(text: str, extracts: Sequence[Mapping[str, Any]]) -> str:
     """Append the markers of the extracts the answer's figures came from.
 
     Every grouped figure in the reply is looked up in each extract, and an
-    extract that contains it is a source for it. This is the same lookup the
+    extract containing it is a source for it. This is the same lookup the
     number check already does, read for where rather than for whether, so it
-    adds no claim the check has not already made.
+    adds no claim that check has not already made.
 
-    An answer with no figure to trace gets nothing, and is refused above: an
+    An answer with no figure to trace gets nothing and is refused: an
     unattributed statement about a filing is not something to serve.
     """
 
@@ -415,7 +461,7 @@ def _plain_sentences(text: str) -> str:
     without = re.sub(r"\*\*", "", without)
     without = re.sub(r"(?m)^\s*[-*+]\s+", "", without)
     without = re.sub(r"(?m)^\s*#{1,6}\s+", "", without)
-    return re.sub(r"\n{3,}", "\n" + "\n", without).strip()
+    return re.sub(r"\n{3,}", "\n\n", without).strip()
 
 
 def _evidence_text(extracts: Sequence[Mapping[str, Any]]) -> str:
@@ -494,31 +540,40 @@ def accept_synthesis(
     # markers are stripped first: they are the answer's own numbering, not a
     # figure, and they are checked above.
     without_markers = _CITATION.sub(" ", text)
-    derived = _derivable_amounts(evidence)
-    for match in _NUMBER.findall(without_markers):
-        digits = _digits(match)
+    operands = _evidence_amounts(evidence)
+    compact_evidence = re.sub(r"\s+", "", evidence)
+    for match in _SCALED_NUMBER.finditer(without_markers):
+        written, scale = match.group("number"), match.group("scale")
+        digits = _digits(written)
         if len(digits) < 2:
             continue
         if digits in evidence_digits:
+            # The figure is one the filings print. A scale word beside it is
+            # then a claim about that same figure, so the filings have to write
+            # it that way too: 333,605,938 백만원 restated as 333조 is a
+            # different number wearing the same digits.
+            if scale and f"{digits}{scale}" not in _digit_scales(compact_evidence):
+                raise SynthesisRejected(f"rescaled_number:{written}{scale}")
             continue
         # A comparison question asks for the gap, and the gap is in no filing.
         # It is still checkable: it has to be the difference between two figures
-        # that are, and so does a total, a share and a rate of change. Arithmetic
-        # on cited numbers is not invention -- an unaccounted-for number is.
-        if _amount(match) in derived:
+        # that are, and so does a total, a share and a rate of change.
+        # Arithmetic on cited numbers is not invention -- an unaccounted-for
+        # number is. The scale word counts too, because an answer writes a
+        # 758,900,000,000 total as 7,589억.
+        if _accounted_for(written, scale, operands):
             continue
-        raise SynthesisRejected(f"unsupported_number:{match}")
-
-    rescaled = _scaled_forms(without_markers) - _scaled_forms(evidence)
-    if rescaled:
-        raise SynthesisRejected(f"rescaled_number:{sorted(rescaled)[0]}")
+        raise SynthesisRejected(f"unsupported_number:{written}")
 
     # A unit the filings never printed is removed rather than fatal. The model
     # guesses the scale -- it wrote 십억 원 over figures whose filings state no
     # unit at all -- and the honest form of that answer is the figure with the
     # notice the deterministic path already uses. Discarding the whole reply
     # threw away the sentences too.
-    invented = _units_after_numbers(without_markers) - _unit_words(evidence)
+    invented = (
+        _units_after_numbers(without_markers, evidence_digits)
+        - _unit_words(evidence)
+    )
     if invented:
         text = _without_units(text, invented)
         without_markers = _CITATION.sub(" ", text)
@@ -547,9 +602,11 @@ def _refuse_unsupplied_companies(
         if name in residue and name not in evidence:
             raise SynthesisRejected("unsupplied_company")
         residue = residue.replace(name, " ")
-    for token in _WORD.findall(residue):
-        if token not in evidence and _looks_like_a_company(token):
-            raise SynthesisRejected("unsupplied_company")
+    # The corpus is a closed set of seventy issuers and every one of them is
+    # checked above, which is exact. The old backstop guessed from spelling and
+    # refused an answer for writing SKT beside an extract headed SK텔레콤, or
+    # KT beside 케이티 -- an abbreviation of a company the filings do name is
+    # not another company.
 
 
 class AnswerSynthesizer:

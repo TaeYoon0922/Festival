@@ -210,6 +210,52 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(self._reject(reply), "unsupported_number")
 
+    def test_a_total_written_at_a_scale_is_allowed(self) -> None:
+        """A 758,900,000,000 total is written 7,589억, and that is the answer.
+
+        The operand cap used to stop at the first extract, so a sum whose
+        second figure sat in the next one was refused, and the scale word made
+        the digits look like a different number again.
+        """
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "LG이노텍",
+                 "report_nm": "신규시설투자등", "rcept_dt": "2024-11-21",
+                 "section_path": [],
+                 "content": "| 투자금액(원) | 375,900,000,000 |"},
+                {"chunk_id": "b", "doc_id": "b", "corp_name": "LG이노텍",
+                 "report_nm": "신규시설투자등", "rcept_dt": "2024-02-20",
+                 "section_path": [],
+                 "content": "| 투자금액(원) | 383,000,000,000 |"},
+            ]
+        )
+        reply = "LG이노텍의 2024년 시설투자 합계는 7,589억원입니다. [1] [2]"
+
+        self.assertIn("7,589억", accept_synthesis(reply, extracts))
+
+    def test_an_abbreviation_of_a_named_issuer_is_allowed(self) -> None:
+        """SKT beside an extract headed SK텔레콤 is not another company."""
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "SK텔레콤",
+                 "report_nm": "사업보고서 (2024.12)", "rcept_dt": "2025-03-11",
+                 "section_path": [],
+                 "content": "| 매출액 | 17,940,860 |"},
+            ]
+        )
+        reply = "SKT의 2024년 매출액은 17,940,860입니다. [1]"
+
+        self.assertIn("SKT", accept_synthesis(reply, extracts, corpus_companies=CORPUS))
+
+    def test_describing_which_is_stronger_is_allowed(self) -> None:
+        """"어느 게임사가 더 수익성이 좋아" asks for exactly that word."""
+
+        reply = "삼성전자의 매출액 333,605,938이 더 우수한 수준입니다. [1]"
+
+        self.assertIn("우수한", self._accept(reply))
+
     def test_a_share_worked_out_from_the_figures_is_allowed(self) -> None:
         reply = "SK하이닉스 매출액은 삼성전자의 19.8% 수준입니다. [1] [2]"
 
