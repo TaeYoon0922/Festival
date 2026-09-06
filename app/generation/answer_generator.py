@@ -14,7 +14,10 @@ from app.reasoning.correction_pair_roles import (
     CORRECTION_ROLE_LABELS,
     ROLE_FIELD_LABELS,
 )
-from app.reasoning.periodic_metric_view import project_periodic_metric_table
+from app.reasoning.periodic_metric_view import (
+    project_periodic_metric_table,
+    source_chunk_view,
+)
 from app.reasoning.periodic_metric_change import periodic_metric_change_claims
 
 
@@ -1221,8 +1224,20 @@ def _source_text(source: Mapping[str, Any]) -> str:
 
 
 def _stated_unit(source: Mapping[str, Any]) -> str | None:
-    """The table-level unit the filing states, or ``None`` when it states none."""
+    """The table-level unit the filing states, or ``None`` when it states none.
 
+    The chunker reads the unit off the table's own caption and keeps it on the
+    chunk, which is the only place it survives: the caption itself often sits
+    in a different chunk from the row that was cited, so searching the served
+    text for it finds nothing. Reading the chunk's own field is what lets two
+    companies' figures be compared at all -- without it every comparison
+    declined for want of a scale.
+    """
+
+    chunk = source_chunk_view(source)
+    tagged = _text(chunk.get("unit"))
+    if tagged:
+        return tagged
     match = _STATED_UNIT.search(_source_text(source))
     return _text(match.group(1)) if match is not None else None
 

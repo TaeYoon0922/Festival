@@ -66,6 +66,30 @@ def _line(fact_text: str, metric: str = "매출액") -> str | None:
 
 
 class StatedUnitTests(unittest.TestCase):
+    def test_the_chunk_carries_the_unit_the_caption_stated(self) -> None:
+        """The caption often sits in a different chunk from the cited row.
+
+        The chunker reads it off the table and keeps it on the chunk, and that
+        field is the only place it survives to serving time. Without it every
+        two-company comparison declined for want of a scale.
+        """
+
+        source = {
+            "fact_text": "| 당기순이익 | 5,028,606 |",
+            "provenance": {"source_chunk": {"unit": "백만원"}},
+        }
+
+        self.assertEqual(_stated_unit(source), "백만원")
+
+    def test_a_chunk_without_the_field_falls_back_to_the_tag(self) -> None:
+        source = {
+            "fact_text": "[단위] 억원
+| 당기순이익 | 5,028,606 |",
+            "provenance": {"source_chunk": {}},
+        }
+
+        self.assertEqual(_stated_unit(source), "억원")
+
     def test_only_the_table_tag_is_a_table_unit(self) -> None:
         self.assertEqual(_stated_unit(_source(TAGGED)), "백만원")
 
