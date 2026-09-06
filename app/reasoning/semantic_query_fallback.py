@@ -146,17 +146,42 @@ class HcxSemanticQueryFallback:
         self.transport = transport or UrllibJsonTransport()
         self.call_count = 0
 
+    def verify(
+        self,
+        question: str,
+        validation: QueryValidationResult,
+    ) -> SemanticFallbackOutcome:
+        """Read the question with HyperCLOVA X whether or not it is needed.
+
+        The deterministic reading is authoritative and this never replaces it.
+        It runs so that every served question has passed through the model that
+        this competition requires the agent's workflow to use, and so the trace
+        says what the model made of a question rather than only what the rules
+        did.
+        """
+
+        return self._call(question, validation, required=True)
+
     def interpret(
         self,
         question: str,
         validation: QueryValidationResult,
+    ) -> SemanticFallbackOutcome:
+        return self._call(question, validation, required=False)
+
+    def _call(
+        self,
+        question: str,
+        validation: QueryValidationResult,
+        *,
+        required: bool,
     ) -> SemanticFallbackOutcome:
         start = perf_counter()
         if not self.settings.enabled:
             return SemanticFallbackOutcome(None, "disabled", _elapsed_ms(start))
         if not self.settings.configured:
             return SemanticFallbackOutcome(None, "not_configured", _elapsed_ms(start))
-        if not validation.fallback_recommended:
+        if not required and not validation.fallback_recommended:
             return SemanticFallbackOutcome(None, "not_needed", _elapsed_ms(start))
 
         payload = {

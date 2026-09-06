@@ -512,7 +512,16 @@ class RetrievalFirewallTests(unittest.TestCase):
 
 
 class ResolvedPipelineTests(unittest.TestCase):
-    def test_clear_query_skips_semantic_hcx_and_reports_answerability(self) -> None:
+    def test_a_clear_query_still_passes_through_hcx_and_keeps_its_plan(self) -> None:
+        """The model reads every question; a resolved plan is still the plan.
+
+        This used to assert the opposite -- that a question the rules settled
+        never reached HyperCLOVA X. The competition requires the agent's
+        workflow to run on that model, so it now reads every question, and what
+        it makes of one is recorded rather than acted on: the deterministic
+        plan is served unchanged.
+        """
+
         question = "효성중공업 국민연금기금 변동일 변동후 주식수"
         plan = QueryPlan(
             query=question,
@@ -559,8 +568,8 @@ class ResolvedPipelineTests(unittest.TestCase):
         payload = pipeline.answer("P0D-CLEAR", question)
 
         self.assertEqual(len(executor.calls), 1)
-        self.assertEqual(semantic_transport.calls, 0)
-        self.assertEqual(semantic.call_count, 0)
+        self.assertEqual(semantic_transport.calls, 1)
+        self.assertEqual(semantic.call_count, 1)
         self.assertEqual(
             payload["think_trace"]["query_understanding"]["status"], "resolved"
         )

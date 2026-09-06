@@ -140,7 +140,7 @@ SYNTHESIS_ENV_FLAG = "FESTIVAL_HCX_SYNTHESIS_ENABLED"
 
 def _synthesis_enabled(environment: Mapping[str, str] | None = None) -> bool:
     values = os.environ if environment is None else environment
-    return str(values.get(SYNTHESIS_ENV_FLAG, "true")).strip().lower() not in (
+    return str(values.get(SYNTHESIS_ENV_FLAG, "false")).strip().lower() not in (
         "0",
         "false",
         "no",

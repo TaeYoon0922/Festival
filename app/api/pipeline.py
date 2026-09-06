@@ -850,6 +850,21 @@ class AnswerPipeline:
 
         if validation.state is QueryState.RESOLVED:
             self._query_metrics["deterministic_resolved_count"] += 1
+            # HyperCLOVA X reads every question, including the ones the rules
+            # already settled. It does not get to change the plan -- a
+            # deterministic reading that resolved is the one that is served --
+            # but the model this agent is required to run on has now seen the
+            # question, and the trace says what it made of it.
+            if self.semantic_fallback is not None:
+                outcome = self.semantic_fallback.verify(question, validation)
+                if outcome.status not in {"disabled", "not_configured"}:
+                    self._query_metrics["hcx_fallback_count"] += 1
+                validation = validation.with_hcx_outcome(
+                    outcome.status,
+                    elapsed_ms=outcome.elapsed_ms,
+                    used=outcome.status not in {"disabled", "not_configured"},
+                    diagnostic=outcome.diagnostic(),
+                )
             return validation.plan, validation
 
         if validation.fallback_recommended and self.semantic_fallback is not None:

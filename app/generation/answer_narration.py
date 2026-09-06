@@ -216,7 +216,7 @@ NARRATION_ENV_FLAG = "FESTIVAL_HCX_NARRATION_ENABLED"
 
 def _narration_enabled(environment: Mapping[str, str] | None = None) -> bool:
     values = os.environ if environment is None else environment
-    return str(values.get(NARRATION_ENV_FLAG, "true")).strip().lower() not in (
+    return str(values.get(NARRATION_ENV_FLAG, "false")).strip().lower() not in (
         "0",
         "false",
         "no",

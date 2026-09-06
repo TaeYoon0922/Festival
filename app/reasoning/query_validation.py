@@ -498,6 +498,29 @@ class QueryValidationResult:
             semantic.intersection({*self.missing_slots, *self.ambiguous_slots})
         )
 
+    def with_hcx_outcome(
+        self,
+        status: str,
+        *,
+        elapsed_ms: float | None = None,
+        used: bool = True,
+        diagnostic: Mapping[str, Any] | None = None,
+    ) -> "QueryValidationResult":
+        """Record what HyperCLOVA X said about this question, and nothing else.
+
+        The plan, the state and the slots are untouched. A deterministic
+        reading that already resolved stays authoritative; this only makes the
+        model's pass over the same question visible in the trace.
+        """
+
+        return replace(
+            self,
+            fallback_used=used,
+            fallback_status=status,
+            hcx_elapsed_ms=elapsed_ms,
+            hcx_diagnostic=dict(diagnostic or {}),
+        )
+
     def with_fallback_failure(
         self,
         status: str,
@@ -506,12 +529,8 @@ class QueryValidationResult:
         used: bool = True,
         diagnostic: Mapping[str, Any] | None = None,
     ) -> "QueryValidationResult":
-        return replace(
-            self,
-            fallback_used=used,
-            fallback_status=status,
-            hcx_elapsed_ms=elapsed_ms,
-            hcx_diagnostic=dict(diagnostic or {}),
+        return self.with_hcx_outcome(
+            status, elapsed_ms=elapsed_ms, used=used, diagnostic=diagnostic
         )
 
     def to_public_dict(self) -> dict[str, Any]:

@@ -313,7 +313,7 @@ class CitationBlockTests(unittest.TestCase):
 class SynthesizerTests(unittest.TestCase):
     def test_a_verdict_is_discarded_without_retrying(self) -> None:
         transport = _StubTransport(f"{GOOD} SK하이닉스가 더 큽니다. [2]")
-        synthesizer = AnswerSynthesizer(_settings(), transport=transport)
+        synthesizer = AnswerSynthesizer(_settings(), transport=transport, enabled=True)
 
         outcome, citations = synthesizer.synthesize("매출액 비교", ROWS)
 
@@ -328,7 +328,7 @@ class SynthesizerTests(unittest.TestCase):
 
         outcome, citations = AnswerSynthesizer(
             _settings(), transport=transport
-        ).synthesize("매출액 비교", ROWS, corpus_companies=CORPUS)
+        , enabled=True).synthesize("매출액 비교", ROWS, corpus_companies=CORPUS)
 
         self.assertEqual(outcome.status, STATUS_SUCCESS)
         self.assertEqual(outcome.text, GOOD)
@@ -339,7 +339,7 @@ class SynthesizerTests(unittest.TestCase):
 
         outcome, citations = AnswerSynthesizer(
             _settings(), transport=transport
-        ).synthesize("매출액", ROWS, corpus_companies=CORPUS)
+        , enabled=True).synthesize("매출액", ROWS, corpus_companies=CORPUS)
 
         self.assertTrue(outcome.status.startswith("rejected:"))
         self.assertIsNone(outcome.text)
@@ -352,14 +352,14 @@ class SynthesizerTests(unittest.TestCase):
 
         outcome, _ = AnswerSynthesizer(
             _settings(), transport=transport
-        ).synthesize("매출액", ROWS)
+        , enabled=True).synthesize("매출액", ROWS)
 
         self.assertEqual(outcome.status, "transport_failure")
 
     def test_no_evidence_is_not_eligible(self) -> None:
         transport = _StubTransport(GOOD)
 
-        outcome, _ = AnswerSynthesizer(_settings(), transport=transport).synthesize(
+        outcome, _ = AnswerSynthesizer(_settings(), transport=transport, enabled=True).synthesize(
             "매출액", []
         )
 
@@ -391,7 +391,7 @@ class SynthesizerTests(unittest.TestCase):
 
         outcome, _ = AnswerSynthesizer(
             _settings(api_key=None), transport=transport
-        ).synthesize("매출액", ROWS)
+        , enabled=True).synthesize("매출액", ROWS)
 
         self.assertEqual(outcome.status, STATUS_NOT_CONFIGURED)
         self.assertEqual(transport.payloads, [])

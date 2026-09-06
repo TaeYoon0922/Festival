@@ -301,7 +301,7 @@ class AnswerSectionTests(unittest.TestCase):
     def test_only_the_answer_sentence_reaches_the_model(self) -> None:
         transport = _StubTransport(_faithful_reply(self.protection))
 
-        AnswerNarrator(_settings(), transport=transport).narrate(ANSWERED)
+        AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWERED)
 
         sent = transport.payloads[0]["messages"][-1]["content"]
         self.assertNotIn("정기공시 근거", sent)
@@ -317,7 +317,7 @@ class AnswerSectionTests(unittest.TestCase):
     def test_the_evidence_below_survives_untouched(self) -> None:
         transport = _StubTransport(_faithful_reply(self.protection))
 
-        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWERED)
+        outcome = AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWERED)
 
         self.assertEqual(outcome.status, STATUS_SUCCESS)
         self.assertIn("정기공시 근거 1", outcome.text)
@@ -327,7 +327,7 @@ class AnswerSectionTests(unittest.TestCase):
     def test_a_refused_sentence_keeps_the_deterministic_answer(self) -> None:
         transport = _StubTransport("매출액은 999,999백만원입니다.")
 
-        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWERED)
+        outcome = AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWERED)
 
         self.assertFalse(outcome.succeeded)
         self.assertIsNone(outcome.text)
@@ -387,7 +387,7 @@ class NarratorTests(unittest.TestCase):
         protection, citations = _protection()
         transport = _StubTransport(_faithful_reply(protection))
 
-        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWER)
+        outcome = AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWER)
 
         self.assertEqual(outcome.status, STATUS_SUCCESS)
         self.assertTrue(outcome.succeeded)
@@ -398,7 +398,7 @@ class NarratorTests(unittest.TestCase):
         protection, _ = _protection()
         transport = _StubTransport(_faithful_reply(protection))
 
-        AnswerNarrator(_settings(), transport=transport).narrate(ANSWER)
+        AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWER)
 
         sent = transport.payloads[0]["messages"][-1]["content"]
         self.assertNotIn("333,605,938", sent)
@@ -409,7 +409,7 @@ class NarratorTests(unittest.TestCase):
         protection, _ = _protection()
         transport = _StubTransport(_faithful_reply(protection))
 
-        AnswerNarrator(_settings(), transport=transport).narrate(ANSWER)
+        AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWER)
 
         sent = transport.payloads[0]["messages"][-1]["content"]
         self.assertNotIn("doc_id", sent)
@@ -418,7 +418,7 @@ class NarratorTests(unittest.TestCase):
     def test_a_refused_reply_returns_no_narration(self) -> None:
         transport = _StubTransport("매출액은 999,999입니다.")
 
-        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWER)
+        outcome = AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWER)
 
         self.assertFalse(outcome.succeeded)
         self.assertTrue(outcome.status.startswith("rejected:"))
@@ -429,13 +429,13 @@ class NarratorTests(unittest.TestCase):
             error=EmbeddingHttpError("boom", status_code=503, transient=True)
         )
 
-        outcome = AnswerNarrator(_settings(), transport=transport).narrate(ANSWER)
+        outcome = AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(ANSWER)
 
         self.assertEqual(outcome.status, "transport_failure")
         self.assertIsNone(outcome.text)
 
     def test_a_short_answer_is_not_eligible(self) -> None:
-        outcome = AnswerNarrator(_settings(), transport=_StubTransport("x")).narrate(
+        outcome = AnswerNarrator(_settings(), transport=_StubTransport("x"), enabled=True).narrate(
             "확인할 수 없습니다."
         )
 
@@ -444,7 +444,7 @@ class NarratorTests(unittest.TestCase):
     def test_a_long_answer_is_skipped(self) -> None:
         transport = _StubTransport("x")
 
-        outcome = AnswerNarrator(_settings(), transport=transport).narrate(
+        outcome = AnswerNarrator(_settings(), transport=transport, enabled=True).narrate(
             "가" * 7000
         )
 
@@ -466,7 +466,7 @@ class NarratorTests(unittest.TestCase):
 
         outcome = AnswerNarrator(
             _settings(api_key=None), transport=transport
-        ).narrate(ANSWER)
+        , enabled=True).narrate(ANSWER)
 
         self.assertEqual(outcome.status, STATUS_NOT_CONFIGURED)
         self.assertEqual(transport.payloads, [])
