@@ -200,7 +200,7 @@ class AcceptanceTests(unittest.TestCase):
 
         reply = (
             "삼성전자 333,605,938, SK하이닉스 66,192,960으로 "
-            "삼성전자가 267,412,978 더 큽니다. [1] [2]"
+            "두 수치의 차이는 267,412,978입니다. [1] [2]"
         )
 
         self.assertIn("267,412,978", self._accept(reply))
@@ -210,18 +210,86 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(self._reject(reply), "unsupported_number")
 
+    def test_a_total_written_at_a_scale_is_allowed(self) -> None:
+        """A 758,900,000,000 total is written 7,589억, and that is the answer.
+
+        The operand cap used to stop at the first extract, so a sum whose
+        second figure sat in the next one was refused, and the scale word made
+        the digits look like a different number again.
+        """
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "LG이노텍",
+                 "report_nm": "신규시설투자등", "rcept_dt": "2024-11-21",
+                 "section_path": [],
+                 "content": "| 투자금액(원) | 375,900,000,000 |"},
+                {"chunk_id": "b", "doc_id": "b", "corp_name": "LG이노텍",
+                 "report_nm": "신규시설투자등", "rcept_dt": "2024-02-20",
+                 "section_path": [],
+                 "content": "| 투자금액(원) | 383,000,000,000 |"},
+            ]
+        )
+        reply = "LG이노텍의 2024년 시설투자 합계는 7,589억원입니다. [1] [2]"
+
+        self.assertIn("7,589억", accept_synthesis(reply, extracts))
+
+    def test_an_abbreviation_of_a_named_issuer_is_allowed(self) -> None:
+        """SKT beside an extract headed SK텔레콤 is not another company."""
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "SK텔레콤",
+                 "report_nm": "사업보고서 (2024.12)", "rcept_dt": "2025-03-11",
+                 "section_path": [],
+                 "content": "| 매출액 | 17,940,860 |"},
+            ]
+        )
+        reply = "SKT의 2024년 매출액은 17,940,860입니다. [1]"
+
+        self.assertIn("SKT", accept_synthesis(reply, extracts, corpus_companies=CORPUS))
+
+    def test_describing_which_is_stronger_is_allowed(self) -> None:
+        """"어느 게임사가 더 수익성이 좋아" asks for exactly that word."""
+
+        reply = "삼성전자의 매출액 333,605,938이 더 우수한 수준입니다. [1]"
+
+        self.assertIn("우수한", self._accept(reply))
+
     def test_a_share_worked_out_from_the_figures_is_allowed(self) -> None:
         reply = "SK하이닉스 매출액은 삼성전자의 19.8% 수준입니다. [1] [2]"
 
         self.assertIn("19.8%", self._accept(reply))
 
-    def test_a_comparison_the_figures_support_is_allowed(self) -> None:
+    def test_a_comparison_the_figures_support_is_still_refused(self) -> None:
         reply = (
             "삼성전자 333,605,938, SK하이닉스 66,192,960으로 "
             "삼성전자가 더 큽니다. [1] [2]"
         )
 
-        self.assertIn("더 큽니다", self._accept(reply))
+        self.assertEqual(self._reject(reply), "comparison_verdict")
+
+    def test_verdicts_are_refused_even_when_the_filing_uses_them(self) -> None:
+        verdicts = (
+            ("더 크다", "더 크"), ("더 큰 쪽입니다", "더 큰"),
+            ("더 큽니다", "더 큽"), ("더 커요", "더 커"),
+            ("더 높습니다", "더 높"), ("더 많습니다", "더 많"),
+            ("더 적습니다", "더 적"), ("더 낮습니다", "더 낮"),
+            ("가장 크다", "가장 크"), ("가장 큰 쪽입니다", "가장 큰"),
+            ("가장 큽니다", "가장 큽"), ("가장 커요", "가장 커"),
+            ("가장 높습니다", "가장 높"), ("증가했습니다", "증가했"),
+            ("감소했습니다", "감소했"), ("상회합니다", "상회"),
+            ("하회합니다", "하회"),
+        )
+        for phrase, reason in verdicts:
+            for source_contains_verdict in (False, True):
+                with self.subTest(phrase=phrase, in_source=source_contains_verdict):
+                    extracts = evidence_extracts(ROWS)
+                    if source_contains_verdict:
+                        extracts[0]["content"] += f" {phrase}."
+                    with self.assertRaises(SynthesisRejected) as raised:
+                        accept_synthesis(f"{GOOD} {phrase}.", extracts)
+                    self.assertEqual(raised.exception.reason, f"comparison_verdict:{reason}")
 
     def test_a_citation_number_is_not_read_as_a_figure(self) -> None:
         """[2] is the answer's own numbering, not a claim that 2 was filed."""
@@ -243,6 +311,18 @@ class CitationBlockTests(unittest.TestCase):
 
 
 class SynthesizerTests(unittest.TestCase):
+    def test_a_verdict_is_discarded_without_retrying(self) -> None:
+        transport = _StubTransport(f"{GOOD} SK하이닉스가 더 큽니다. [2]")
+        synthesizer = AnswerSynthesizer(_settings(), transport=transport)
+
+        outcome, citations = synthesizer.synthesize("매출액 비교", ROWS)
+
+        self.assertEqual(outcome.status, "rejected:comparison_verdict:더 큽")
+        self.assertIsNone(outcome.text)
+        self.assertEqual(citations, "")
+        self.assertEqual(len(transport.payloads), 1)
+        self.assertEqual(synthesizer.call_count, 1)
+
     def test_an_accepted_answer_comes_back_with_its_citations(self) -> None:
         transport = _StubTransport(GOOD)
 

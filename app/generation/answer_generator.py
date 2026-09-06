@@ -146,6 +146,24 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
 #: The section the direct answer is written into.
 DIRECT_ANSWER_TITLE = "답변"
 
+
+def comparison_sentence(generated: GeneratedAnswer) -> str | None:
+    """Return the verdict or unit notice already written by ``_comparison_line``."""
+
+    for section in generated.sections:
+        if section.title != DIRECT_ANSWER_TITLE:
+            continue
+        for line in section.content.splitlines():
+            if (
+                " 기준으로는 " in line and "보다 " in line and " 더 큽니다." in line
+                or line.startswith("두 회사의 ") and " 같습니다." in line
+                or "공시 원문에 단위 표기가 없어 " in line
+                and "어느 쪽이 큰지 직접 비교하지 않았습니다." in line
+            ):
+                return line
+    return None
+
+
 #: Turns off the answer-shape work in one place: the 답변 section, the removal
 #: of the evidence blocks from the answer text, and the dropped confidence line.
 #: It exists so the shape can be attributed. A Gold60 run with it off and one

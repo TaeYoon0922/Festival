@@ -30,12 +30,13 @@ from app.generation.answer_lead import (
     with_lead,
 )
 from app.generation.answer_narration import AnswerNarrator
-from app.generation.answer_synthesis import AnswerSynthesizer
+from app.generation.answer_synthesis import AnswerSynthesizer, citation_block
 from app.generation.answer_presentation import annotate_citations, readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
     GeneratedCitation,
+    comparison_sentence,
 )
 from app.generation.hcx_verbalizer import (
     SKIPPED_MULTI_EVENT_CLAIM,
@@ -563,6 +564,17 @@ class AnswerPipeline:
             stages = list(trace.get("stages") or ())
             trace["stages"] = [*stages, "answer_synthesis"]
             answer = synthesis.text
+            verdict = comparison_sentence(generated)
+            if verdict is not None:
+                # Generated ordinals must name the served rows, just as the
+                # deterministic answer's citations do above.
+                verdict, _ = align_public_citations(
+                    verdict, generated.citations, public_context
+                )
+                answer = f"{answer}\n\n{verdict}"
+                synthesis_citations = citation_block(
+                    answer, [{**row, "marker": row["rank"]} for row in public_context]
+                )
             if synthesis_citations:
                 answer = f"{answer}\n\n{synthesis_citations}"
             return {

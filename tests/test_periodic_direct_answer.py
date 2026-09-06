@@ -14,8 +14,11 @@ import unittest
 from decimal import Decimal
 
 from app.generation.answer_generator import (
+    DIRECT_ANSWER_TITLE,
+    GeneratedAnswer,
     GeneratedSection,
     StatedFigure,
+    comparison_sentence,
     _comparison_line,
     _decimal_amount,
     _single_metric_cell,
@@ -303,6 +306,48 @@ class ComparisonTests(unittest.TestCase):
         )
 
         self.assertIn("200백만원 더 큽니다", line)
+
+
+class ComparisonSentenceTests(unittest.TestCase):
+    @staticmethod
+    def _generated(*sections: GeneratedSection) -> GeneratedAnswer:
+        return GeneratedAnswer(
+            question="두 회사 비교", answer_text="", citations=(),
+            sections=sections, warnings=(), confidence={}, answerable=True,
+        )
+
+    def test_each_comparison_form_is_preserved_with_its_citations(self) -> None:
+        for left, right, unit in (("300", "100", "백만원"), ("100", "100", "원"),
+                                  ("300", "100", None)):
+            with self.subTest(left=left, right=right, unit=unit):
+                figures = [
+                    _figure("A전자", left, unit=unit),
+                    _figure("B전자", right, unit=unit, marker="[2]"),
+                ]
+                verdict = _comparison_line(figures)
+                generated = self._generated(GeneratedSection(
+                    title=DIRECT_ANSWER_TITLE,
+                    content="\n".join([*(f.sentence for f in figures), verdict]),
+                    citations=("[1]", "[2]"),
+                ))
+
+                self.assertEqual(comparison_sentence(generated), verdict)
+
+    def test_source_prose_outside_the_direct_answer_is_not_a_verdict(self) -> None:
+        generated = self._generated(GeneratedSection(
+            title="정기공시 근거", content="두 회사의 매출액은 같습니다. [1] [2]",
+            citations=("[1]", "[2]"),
+        ))
+
+        self.assertIsNone(comparison_sentence(generated))
+
+    def test_facts_without_a_comparison_return_none(self) -> None:
+        for sections in ((), (GeneratedSection(
+            title=DIRECT_ANSWER_TITLE, content=_figure("A전자", "100").sentence,
+            citations=("[1]",),
+        ),)):
+            with self.subTest(sections=sections):
+                self.assertIsNone(comparison_sentence(self._generated(*sections)))
 
 
 class SubjectParticleTests(unittest.TestCase):
