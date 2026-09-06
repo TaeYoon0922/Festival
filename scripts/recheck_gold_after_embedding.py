@@ -17,6 +17,7 @@ retrieved, at what rank, and whether the answer came back supported.
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import sys
 import time
@@ -45,8 +46,38 @@ def _ask(base: str, question_id: str, query: str) -> Mapping[str, Any]:
         return json.load(response)
 
 
+#: The response contract makes every field a string, so the served ranking and
+#: the trace arrive as text. Both forms are read: an older server, and the
+#: saved payloads from one, still parse.
+_TRACE_LINE = re.compile(r"^([a-z_]+):\s*(.*)$")
+_CONTEXT_HEAD = re.compile(r"^\[(\d+)\]")
+
+
+def _trace_value(trace: Any, key: str) -> str:
+    if isinstance(trace, Mapping):
+        value = trace.get(key)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return "" if value is None else str(value)
+    for line in str(trace or "").split("\n"):
+        match = _TRACE_LINE.match(line)
+        if match is not None and match.group(1) == key:
+            return match.group(2)
+    return ""
+
+
 def _gold_rank(payload: Mapping[str, Any], doc_id: str) -> int | None:
-    for row in payload.get("retrieved_context") or ():
+    context = payload.get("retrieved_context")
+    if isinstance(context, str):
+        rank = None
+        for line in context.split("\n"):
+            head = _CONTEXT_HEAD.match(line)
+            if head is not None:
+                rank = int(head.group(1))
+            elif line.startswith("doc_id: ") and line[len("doc_id: "):] == doc_id:
+                return rank
+        return None
+    for row in context or ():
         if str(row.get("doc_id")) == doc_id:
             return int(row.get("rank"))
     return None
@@ -77,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{question_id:6} {'':9} {'':>5} {'ERROR':>10}  {type(error).__name__}")
             rows.append({"question_id": question_id, "error": type(error).__name__})
             continue
-        trace = payload.get("think_trace") or {}
+        trace = payload.get("think_trace")
         rank = _gold_rank(payload, str(question.get("doc_id")))
         row = {
             "question_id": question_id,
@@ -85,11 +116,12 @@ def main(argv: list[str] | None = None) -> int:
             "query": question.get("query"),
             "gold_doc_id": question.get("doc_id"),
             "gold_rank": rank,
-            "answerable": bool(trace.get("answerable")),
-            "route": trace.get("route"),
-            "task_type": trace.get("task_type"),
-            "hcx_status": trace.get("hcx_status"),
-            "retrieval_count": trace.get("retrieval_count"),
+            "answerable": _trace_value(trace, "answerable") == "true",
+            "route": _trace_value(trace, "route"),
+            "task_type": _trace_value(trace, "task_type"),
+            "hcx_status": _trace_value(trace, "hcx_status"),
+            "narration": _trace_value(trace, "answer_narration"),
+            "retrieval_count": _trace_value(trace, "retrieval_count"),
         }
         rows.append(row)
         print(

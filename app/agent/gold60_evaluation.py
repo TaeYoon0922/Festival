@@ -309,7 +309,7 @@ def _answer_gold_comparison(
         )
     ]
     term_rows = _evidence_term_comparison(
-        question.get("evidence_terms") or [], generated.answer_text
+        question.get("evidence_terms") or [], _rendered_answer(generated)
     )
     return {
         "gold_doc_id": gold_doc_id,
@@ -340,6 +340,31 @@ def _empty_answer_comparison(question: Mapping[str, Any]) -> dict[str, Any]:
         "missing_evidence_terms": terms,
         "all_evidence_terms_present": False,
     }
+
+
+def _rendered_answer(generated: Any) -> str:
+    """Everything the generator rendered, not only what the reader sees first.
+
+    ``answer_text`` used to be the whole render. It is now the reader-facing
+    part: the answer states its conclusion and leaves the evidence blocks to
+    ``retrieved_context``, which is where the criteria look for 근거 완전성.
+    This metric asks whether the pipeline surfaced the gold evidence terms at
+    all, so it reads the full render -- the sections and their metadata -- and
+    not the trimmed opening.
+    """
+
+    sections = getattr(generated, "sections", ()) or ()
+    return "\n".join(
+        [
+            str(getattr(generated, "answer_text", "") or ""),
+            *(str(section.content or "") for section in sections),
+            *(
+                str(row)
+                for section in sections
+                for row in (section.metadata or ())
+            ),
+        ]
+    )
 
 
 def _evidence_term_comparison(
