@@ -891,6 +891,7 @@ def _periodic_sections(
 ) -> tuple[list[GeneratedSection], list[str], bool]:
     output: list[GeneratedSection] = []
     warnings: list[str] = []
+    direct_answers: list[str] = []
     facts_seen = 0
     calculations_seen = 0
     supported = True
@@ -950,6 +951,9 @@ def _periodic_sections(
                     supported = False
                     continue
                 marker = " ".join(source_ids)
+                direct = _direct_answer_line(fact, source, marker, request=request)
+                if direct is not None and direct not in direct_answers:
+                    direct_answers.append(direct)
                 source_lines = _periodic_source_lines(source, marker, request=request)
                 if not source_lines:
                     lines.append("확인되지 않은 정보가 있습니다.")
@@ -1015,6 +1019,19 @@ def _periodic_sections(
                 content="여러 기간 또는 사실 후보를 자동으로 선택하지 않았습니다.",
                 citations=(),
             )
+        )
+    if direct_answers:
+        # First, because it is the answer. Everything below it is the evidence
+        # for it, and a reader who stops after one sentence has still been told
+        # what was asked. Each line was built only from a figure this answer
+        # already cites, so nothing here outruns the evidence under it.
+        output.insert(
+            0,
+            GeneratedSection(
+                title="답변",
+                content="\n".join(direct_answers[:MAX_DIRECT_ANSWERS]),
+                citations=(),
+            ),
         )
     return output, warnings, bool(facts_seen or calculations_seen) and supported
 
@@ -1091,6 +1108,121 @@ def _periodic_unit_metadata(
             "공시 원문의 수치를 그대로 표시했습니다."
         ]
     return []
+
+
+#: A cell that states an amount. Parentheses are how a filing writes a negative,
+#: and a trailing % is how it writes a ratio; anything else in the value column
+#: is prose, and prose is not a figure this may state as one.
+_METRIC_VALUE = re.compile(r"^\(?-?\d[\d,]*(?:\.\d+)?\)?%?$")
+
+#: Footnote references and statement numbering the filing puts on a row label.
+#: "매출액 (주30)" and "Ⅵ.당기순이익" name the same thing as "매출액" and
+#: "당기순이익", and the reader is asking about the thing.
+_ROW_FOOTNOTE = re.compile(r"\s*\(\s*주[^)]*\)")
+_ROW_NUMBERING = re.compile(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX0-9]+\s*[.．)]\s*")
+
+#: More than this and the opening stops being an answer and becomes a list.
+MAX_DIRECT_ANSWERS = 4
+
+
+def _table_cells(row: str) -> list[str]:
+    return [cell.strip() for cell in str(row).strip().strip("|").split("|")]
+
+
+def _single_metric_cell(display: str) -> tuple[str, str] | None:
+    """The one label and the one figure a projected table states, or ``None``.
+
+    Returns a value only when the projection left exactly one metric row and
+    exactly one period column. Two columns mean the filing offered 3개월 and
+    누적, or two fiscal years, and picking one of them would be this function
+    deciding what the question asked -- which it cannot know.
+    """
+
+    rows = [
+        row
+        for row in str(display or "").splitlines()
+        if row.strip().startswith("|") and not set(row.strip()) <= set("|-: ")
+    ]
+    if len(rows) != 2:
+        return None
+    header, data = _table_cells(rows[0]), _table_cells(rows[1])
+    if len(header) != 2 or len(data) != 2:
+        return None
+    label, value = data[0], data[1]
+    if not label or not _METRIC_VALUE.match(value):
+        return None
+    label = _ROW_NUMBERING.sub("", _ROW_FOOTNOTE.sub("", label)).strip()
+    return (label, value) if label else None
+
+
+def _direct_answer_line(
+    fact: Mapping[str, Any],
+    source: Mapping[str, Any],
+    marker: str,
+    *,
+    request: Mapping[str, Any] | None = None,
+) -> str | None:
+    """One sentence stating what was asked, before any evidence is shown.
+
+    The evaluation asks for a 자연어 답변, and an answer that opens with a
+    markdown table has not given one: the reader has to find the figure and
+    work out which column it sits in. Every part of this sentence is already
+    verified -- the company from the resolved fact, the period and basis from
+    the metadata this same answer prints, the label and figure from the
+    projected row -- so it states nothing the evidence below does not.
+
+    ``None`` whenever any part is missing or ambiguous, and then the answer is
+    exactly what it was.
+    """
+
+    display = project_periodic_metric_table(
+        _text(source.get("fact_text")) or "",
+        metric=_text((request or {}).get("metric")),
+        period=(request or {}).get("period"),
+        comparison=(request or {}).get("comparison"),
+        raw_query=_text((request or {}).get("raw_query")),
+    )
+    if not display:
+        return None
+    cell = _single_metric_cell(display)
+    if cell is None:
+        return None
+    label, value = cell
+
+    company = _text(fact.get("corp_name"))
+    period = source.get("reporting_period")
+    period_label = _period_label(period if isinstance(period, Mapping) else {})
+    basis = _basis_label(request, source)
+    unit = _stated_unit(source)
+
+    subject = "".join(
+        part
+        for part in (
+            f"{company}의 " if company else "",
+            f"{period_label} " if period_label else "",
+            f"{basis}기준 " if basis else "",
+            label,
+        )
+    )
+    amount = f"{value}{unit}" if unit else value
+    tail = "" if unit else " (공시 원문에 단위 표기 없음)"
+    particle = _topic_particle(label)
+    return f"{subject}{particle} {amount}입니다.{tail} {marker}".replace("  ", " ")
+
+
+def _topic_particle(word: str) -> str:
+    """``은`` after a closed syllable, ``는`` after an open one.
+
+    Korean picks the particle from the preceding sound, so writing "은(는)"
+    reads as a form to be filled in rather than as a sentence. A label ending
+    in something other than Hangul takes 는, which is what a reader says for a
+    Latin word or a digit.
+    """
+
+    last = (str(word or "").strip() or " ")[-1]
+    if "가" <= last <= "힣":
+        return "은" if (ord(last) - 0xAC00) % 28 else "는"
+    return "는"
 
 
 def _periodic_source_metadata(
