@@ -1197,6 +1197,11 @@ _ROW_NUMBERING = re.compile(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX0-9]+\s*[.．)]
 #: More than this and the opening stops being an answer and becomes a list.
 MAX_DIRECT_ANSWERS = 4
 
+#: Said when the filing states no unit for a figure. A bare grouped number is
+#: not checkable -- 333,605,938 is a different answer in 원 than in 백만원 --
+#: so this has to reach the reader whatever else happens to the sentence.
+UNIT_ABSENT_NOTICE = "(공시 원문에 단위 표기 없음)"
+
 #: The citation markers a stated answer carries, read back so its section can
 #: declare them.
 _CITATION_MARKER_IN_LINE = re.compile(r"\[\d+\]")
@@ -1289,7 +1294,7 @@ def _direct_answer_line(
         )
     )
     amount = f"{value}{unit}" if unit else value
-    tail = "" if unit else " (공시 원문에 단위 표기 없음)"
+    tail = "" if unit else f" {UNIT_ABSENT_NOTICE}"
     particle = _topic_particle(label)
     return f"{subject}{particle} {amount}입니다.{tail} {marker}".replace("  ", " ")
 

@@ -333,6 +333,55 @@ class AnswerSectionTests(unittest.TestCase):
         self.assertIsNone(outcome.text)
 
 
+class RequiredNoticeTests(unittest.TestCase):
+    """A rewrite may reword the answer; it may not drop what it declined to say.
+
+    The live reply turned "…은 333,605,938입니다. (공시 원문에 단위 표기 없음)"
+    into "…은 333,605,938이며, 이는 [1]에 따른 것입니다" -- a grouped figure with
+    nothing left saying the filing never stated a unit for it. The notice is
+    prose, not a token, so placeholder integrity did not protect it.
+    """
+
+    SOURCE = (
+        "삼성전자의 2025년 연결기준 매출액은 333,605,938입니다. "
+        "(공시 원문에 단위 표기 없음) [1]"
+    )
+
+    def setUp(self) -> None:
+        self.protection = protect_literals(self.SOURCE)
+        self.tokens = self.protection.placeholders
+
+    def test_a_dropped_unit_notice_comes_back(self) -> None:
+        reply = (
+            f"삼성전자의 {self.tokens[0]}년 연결기준 매출액은 "
+            f"{self.tokens[1]}이며, 이는 {self.tokens[2]}에 따른 것입니다."
+        )
+
+        restored = accept_narration(reply, self.protection)
+
+        self.assertIn("(공시 원문에 단위 표기 없음)", restored)
+        self.assertIn("333,605,938", restored)
+
+    def test_a_notice_the_reply_kept_is_not_doubled(self) -> None:
+        reply = (
+            f"삼성전자의 {self.tokens[0]}년 매출액은 {self.tokens[1]}입니다. "
+            f"(공시 원문에 단위 표기 없음) {self.tokens[2]}"
+        )
+
+        restored = accept_narration(reply, self.protection)
+
+        self.assertEqual(restored.count("(공시 원문에 단위 표기 없음)"), 1)
+
+    def test_an_answer_that_never_had_the_notice_does_not_gain_one(self) -> None:
+        protection = protect_literals(
+            "삼성전자의 2025년 연결기준 매출액은 333,605,938백만원입니다. [1]"
+        )
+        tokens = protection.placeholders
+        reply = f"삼성전자의 {tokens[0]}년 매출액은 {tokens[1]}백만원입니다. {tokens[2]}"
+
+        self.assertNotIn("단위 표기 없음", accept_narration(reply, protection))
+
+
 class NarratorTests(unittest.TestCase):
     def test_a_faithful_reply_is_served_with_its_citations(self) -> None:
         protection, citations = _protection()

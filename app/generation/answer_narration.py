@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
+from app.generation.answer_generator import UNIT_ABSENT_NOTICE
 from app.generation.answer_lead import _looks_like_a_company
 from app.generation.hcx_verbalizer import HcxSettings, _response_content
 from app.generation.protected_literals import (
@@ -86,12 +87,15 @@ for a figure, a date or a source reference that has been hidden from you.
 
 Your reply MUST contain every tag on the TAGS line, spelled exactly as written,
 in the same order, each exactly once. A __FESTIVAL_CITATION__ tag is one of
-them: it is not punctuation and not a footnote you may leave out. Put it at the
-end of the sentence whose figure it supports. A reply missing a tag is thrown
-away, so check the TAGS line before you answer.
+them: it is not punctuation and not a footnote you may leave out. Write it
+after the closing full stop of the sentence whose figure it supports, never
+inside a clause -- "...입니다. __FESTIVAL_CITATION_B__", not "...이는
+__FESTIVAL_CITATION_B__에 따른 것입니다". A reply missing a tag is thrown away,
+so check the TAGS line before you answer.
 
 Write one or two natural Korean sentences that answer the question the facts
-answer. Lead with the company, the period, the measure and its value tag.
+answer. Lead with the company, the period, the measure and its value tag. Keep
+any parenthetical remark the lines make about what the filing does not state.
 
 Never do any of these:
 
@@ -380,7 +384,29 @@ def accept_narration(
             raise NarrationRejected("evaluative_wording")
 
     _refuse_unsupplied_companies(text, source, corpus_companies)
-    return restore_literals(text, protection)
+    return _keep_required_notices(restore_literals(text, protection), source)
+
+
+#: Statements the deterministic answer makes that a rewrite may not lose. They
+#: are prose, not tokens, so placeholder integrity does not protect them, and a
+#: live reply dropped the unit caveat and served a grouped figure with nothing
+#: saying the filing had not stated a unit for it.
+REQUIRED_NOTICES = (UNIT_ABSENT_NOTICE,)
+
+
+def _keep_required_notices(text: str, source: str) -> str:
+    """Put back a notice the rewrite dropped, rather than discarding the rewrite.
+
+    The notice is deterministic text about what the filing does not say, so
+    appending it restores a fact rather than asserting a new one.
+    """
+
+    missing = [
+        notice
+        for notice in REQUIRED_NOTICES
+        if notice in source and notice not in text
+    ]
+    return " ".join([text.rstrip(), *missing]) if missing else text
 
 
 def _refuse_unsupplied_companies(
