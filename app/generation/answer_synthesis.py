@@ -53,10 +53,10 @@ Rules:
   rescale or reformat a number, and do not add a unit an extract does not give.
 - If an extract states a unit for a figure, say the figure with that unit. If
   none of them does, say the figure and add that the filing states no unit.
-- Answer what was asked. If the question compares two companies, give both
-  figures and say which is larger. You may state a difference, a total, a share
-  or a rate of change worked out from figures in the extracts; show the figures
-  it came from. Compare nothing across different units or different periods.
+- If the question compares two companies, give both figures and say nothing
+  about which is larger. That comparison is added after your answer.
+- Leave comparisons, increases or decreases, rankings, and profit or loss
+  verdicts to the deterministic layer. State only the supplied facts.
 - If the extracts do not answer the question, say so plainly and say what is
   missing. Do not fill the gap.
 - No opinion, no interpretation, no advice, no outlook, no evaluation of a
@@ -115,6 +115,14 @@ _BANNED = (
     "판단됩니다",
     "사료됩니다",
     "생각됩니다",
+)
+
+#: 비교·증감 판단은 코드가 정한다. 원문에 있어도 합성 답변에서는 거부한다.
+#: 크다의 활용형(큰/큽니다/커요)은 "크"에 포함되지 않아 별도로 검사한다.
+_VERDICT = (
+    "더 크", "더 큰", "더 큽", "더 커", "더 높", "더 많", "더 적", "더 낮",
+    "가장 크", "가장 큰", "가장 큽", "가장 커", "가장 높",
+    "증가했", "감소했", "상회", "하회",
 )
 
 _CITATION = re.compile(r"\[(\d+)\]")
@@ -583,6 +591,10 @@ def accept_synthesis(
     for word in _BANNED:
         if word in text and word not in evidence:
             raise SynthesisRejected(f"evaluative_wording:{word}")
+
+    for word in _VERDICT:
+        if word in text:
+            raise SynthesisRejected(f"comparison_verdict:{word}")
 
     _refuse_unsupplied_companies(without_markers, evidence, corpus_companies)
     return text

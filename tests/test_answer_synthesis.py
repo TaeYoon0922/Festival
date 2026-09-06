@@ -200,7 +200,7 @@ class AcceptanceTests(unittest.TestCase):
 
         reply = (
             "삼성전자 333,605,938, SK하이닉스 66,192,960으로 "
-            "삼성전자가 267,412,978 더 큽니다. [1] [2]"
+            "두 수치의 차이는 267,412,978입니다. [1] [2]"
         )
 
         self.assertIn("267,412,978", self._accept(reply))
@@ -261,13 +261,35 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertIn("19.8%", self._accept(reply))
 
-    def test_a_comparison_the_figures_support_is_allowed(self) -> None:
+    def test_a_comparison_the_figures_support_is_still_refused(self) -> None:
         reply = (
             "삼성전자 333,605,938, SK하이닉스 66,192,960으로 "
             "삼성전자가 더 큽니다. [1] [2]"
         )
 
-        self.assertIn("더 큽니다", self._accept(reply))
+        self.assertEqual(self._reject(reply), "comparison_verdict")
+
+    def test_verdicts_are_refused_even_when_the_filing_uses_them(self) -> None:
+        verdicts = (
+            ("더 크다", "더 크"), ("더 큰 쪽입니다", "더 큰"),
+            ("더 큽니다", "더 큽"), ("더 커요", "더 커"),
+            ("더 높습니다", "더 높"), ("더 많습니다", "더 많"),
+            ("더 적습니다", "더 적"), ("더 낮습니다", "더 낮"),
+            ("가장 크다", "가장 크"), ("가장 큰 쪽입니다", "가장 큰"),
+            ("가장 큽니다", "가장 큽"), ("가장 커요", "가장 커"),
+            ("가장 높습니다", "가장 높"), ("증가했습니다", "증가했"),
+            ("감소했습니다", "감소했"), ("상회합니다", "상회"),
+            ("하회합니다", "하회"),
+        )
+        for phrase, reason in verdicts:
+            for source_contains_verdict in (False, True):
+                with self.subTest(phrase=phrase, in_source=source_contains_verdict):
+                    extracts = evidence_extracts(ROWS)
+                    if source_contains_verdict:
+                        extracts[0]["content"] += f" {phrase}."
+                    with self.assertRaises(SynthesisRejected) as raised:
+                        accept_synthesis(f"{GOOD} {phrase}.", extracts)
+                    self.assertEqual(raised.exception.reason, f"comparison_verdict:{reason}")
 
     def test_a_citation_number_is_not_read_as_a_figure(self) -> None:
         """[2] is the answer's own numbering, not a claim that 2 was filed."""
@@ -289,6 +311,18 @@ class CitationBlockTests(unittest.TestCase):
 
 
 class SynthesizerTests(unittest.TestCase):
+    def test_a_verdict_is_discarded_without_retrying(self) -> None:
+        transport = _StubTransport(f"{GOOD} SK하이닉스가 더 큽니다. [2]")
+        synthesizer = AnswerSynthesizer(_settings(), transport=transport)
+
+        outcome, citations = synthesizer.synthesize("매출액 비교", ROWS)
+
+        self.assertEqual(outcome.status, "rejected:comparison_verdict:더 큽")
+        self.assertIsNone(outcome.text)
+        self.assertEqual(citations, "")
+        self.assertEqual(len(transport.payloads), 1)
+        self.assertEqual(synthesizer.call_count, 1)
+
     def test_an_accepted_answer_comes_back_with_its_citations(self) -> None:
         transport = _StubTransport(GOOD)
 
