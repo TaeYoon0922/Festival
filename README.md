@@ -2,8 +2,8 @@
 
 미래에셋증권 AI Festival 제출용 프로젝트입니다. DART 전자공시 원문을 구조 보존 방식으로
 파싱·청킹해 PostgreSQL 16 + pgvector에 적재하고, hybrid retrieval과 결정적(deterministic)
-추론으로 근거가 붙은 답변을 생성한 뒤, HyperCLOVA X로 그 답변을 안전하게 자연어로 다듬어
-HTTP API로 제공합니다.
+추론으로 근거가 붙은 답변을 만든 뒤, HyperCLOVA X가 그 근거 위에서 한국어 답변을 쓰고
+사후 검증을 통과한 것만 HTTP API로 제공합니다.
 
 ## 0. 평가용 API End-point
 
@@ -17,13 +17,19 @@ http://101.79.20.171:8000/answer
 |---|---|
 | End-point URL | `http://101.79.20.171:8000/answer` |
 | 헬스체크 | `http://101.79.20.171:8000/healthz` |
+| 표준 포트(80) | `http://101.79.20.171/answer` · `http://101.79.20.171/healthz` — 동일 서비스 |
 | 메서드 · 경로 | `GET /answer` (경로 고정) |
 | 쿼리 파라미터 | `question_id`, `question` |
 | 인증 헤더 | 없음 |
 | 응답 Content-Type | `application/json` |
 | 응답 필드 | `question_id` · `question` · `retrieved_context` · `think_trace` · `answer` (**모두 string**) |
 | 문자 인코딩 | UTF-8 |
+| 접근 제한 | 없음 (전체 개방) |
 | 가동 기간 | 2026-09-07 ~ 2026-09-20 상시 (systemd `Restart=always`) |
+
+80번 포트는 `nat PREROUTING REDIRECT --dport 80 --to-port 8000`으로 8000번에 연결되어 있고,
+그 규칙을 서비스 유닛의 `ExecStartPost`가 매 기동마다 다시 세우므로 재시작·재부팅 후에도
+두 포트가 함께 살아납니다. 8000번은 계속 열려 있으므로 제출한 URL 그대로 사용하면 됩니다.
 
 ```bash
 curl -sG "http://101.79.20.171:8000/answer" \
@@ -44,17 +50,19 @@ curl -sG "http://101.79.20.171:8000/answer" \
 | 저장소 | PostgreSQL 16 + pgvector (HNSW, cosine) |
 | 임베딩 | 로컬 BGE-M3 추론(`bge_m3_local`), `BAAI/bge-m3`, 1024차원 |
 | 검색 | lexical + vector → RRF → deterministic rerank |
-| 생성 | 결정적 answer generator + HyperCLOVA X(HCX-005) verbalizer |
+| 생성 | 결정적 answer generator를 기준선으로, HyperCLOVA X(HCX-005, `temperature=0`)가 작성·재작성 |
 | API | FastAPI + uvicorn, `GET /healthz`, `GET /answer` |
+| 응답 시간 | 중앙 5.2초 · 평균 7.6초 · 최대 22.0초 (제한 300초 대비 7.3%) |
 
 **데이터 제약** — 답변 근거는 **주최 측이 제공한 코퍼스만** 사용합니다. 외부 웹 검색, 외부
-데이터셋, 모델의 사전 지식은 근거로 쓰지 않습니다. 언어 모델에도 검색된 원문을 전달하지 않고
-이미 검증된 사실만 전달하므로([7. HyperCLOVA X Safety Strategy](#7-hyperclova-x-safety-strategy))
-코퍼스 밖 정보가 답변에 유입될 경로가 구조적으로 없습니다.
+데이터셋, 모델의 사전 지식은 근거로 쓰지 않습니다. 언어 모델에게 전달되는 것은 검색된 공시
+발췌뿐이고, 모델이 쓴 문장은 **그 발췌에 실제로 있는 숫자·인용·기업명만 남았는지 사후에
+자리수 단위로 대조**합니다([7. HyperCLOVA X Safety Strategy](#7-hyperclova-x-safety-strategy)).
+대조를 통과하지 못한 응답은 통째로 폐기되므로 코퍼스 밖 정보가 답변에 남을 경로가 없습니다.
 
-핵심 설계 원칙은 **근거가 유창함보다 우선한다**는 것입니다. 사실·수치·인용은 전부 결정적
-파이프라인이 만들고, 언어 모델은 이미 검증된 문장을 다듬는 역할만 맡습니다. 검증에 실패하면
-언제나 결정적 답변이 그대로 나갑니다.
+핵심 설계 원칙은 **근거가 유창함보다 우선한다**는 것입니다. 결정적 파이프라인이 먼저 인용이
+붙은 답변을 완성해 정답의 기준선을 만들고, 언어 모델은 그 위에서만 문장을 씁니다. 검증에
+실패하면 언제나 결정적 답변이 그대로 나갑니다.
 
 ## 2. Key Features
 
@@ -63,11 +71,13 @@ curl -sG "http://101.79.20.171:8000/answer" \
 - **Hybrid retrieval** — 메타데이터로 후보 범위를 좁힌 뒤 lexical Top-N과 vector Top-N을
   RRF로 융합하고, 결정적 rerank로 최종 Top-10을 만듭니다.
 - **공시 유형별 resolver** — holding event / periodic fact를 각각 구조화된 사실로 복원합니다.
-- **인용 강제** — 모든 사실 문장은 chunk와 `source_refs`까지 추적되는 인용을 갖습니다.
-- **HCX 안전 계층** — 인용을 분리하고 검증된 값을 placeholder로 가린 채 호출하며, 통과하지
-  못한 응답은 폐기하고 결정적 답변으로 되돌립니다.
-- **Fail-closed 검증** — placeholder 무결성, 숫자 생성, 단위 중복, 구조화 텍스트 누출,
-  투자 표현, 추론 문장, 인용 재부착까지 모두 실패 시 fallback입니다.
+- **인용 강제** — 모든 사실 문장은 chunk와 `source_refs`까지 추적되는 인용을 갖고, 인용
+  블록에는 `doc_id`·`chunk_id`와 함께 **공시명과 접수일**이 함께 표시됩니다.
+- **HCX 안전 계층 (두 방식)** — 서술형 답변은 모델이 공시 발췌를 읽고 쓴 뒤 사후 대조하고,
+  수치가 확정된 답변은 값을 placeholder로 가린 채 문장만 다듬게 합니다. 확정 수치를 문장으로
+  이미 갖춘 답변은 아예 모델을 거치지 않습니다.
+- **Fail-closed 검증** — 근거에 없는 숫자, 배수가 바뀐 숫자, 없는 인용, 코퍼스 밖 기업명,
+  투자 표현, 비교 단정, placeholder 무결성 위반은 전부 폐기 후 결정적 답변으로 fallback입니다.
 
 ## 3. Architecture
 
@@ -76,7 +86,7 @@ Question
   |
   v
 Query Understanding            company / period / metric / route 해석 → QueryPlan
-  |
+  |                            + HCX 질의 해석 검증 (모든 질의, plan은 불변)
   v
 Planner / Metadata Filter      corp_code · 공시유형 · 기간으로 후보 범위 확정
   |
@@ -96,18 +106,30 @@ Evidence Builder               chunk를 근거 그룹으로 묶고 provenance �
 Deterministic Answer Generator AnswerComposer → CitationAwareAnswerGenerator
                                (인용이 붙은 확정 답변. 여기까지가 정답의 기준선)
   |
-  v
-Safe HyperCLOVA X Verbalizer   단일 이벤트 compact claim만 대상
-                               인용 분리 → 값 placeholder 마스킹 → HCX-005 호출
+  +-- states_figure = true ---> 그대로 서빙. HCX 미호출
+  |                            (확정 수치를 이미 문장으로 갖춘 답변)
+  |
+  +-- states_figure = false --> AnswerSynthesizer (HCX-005)
+                                 공시 발췌를 읽고 답변 작성
+                                 → 사후 대조 실패 시
+                               AnswerNarrator (HCX-005)
+                                 값 마스킹 후 문장만 재작성
+                                 → 실패 시
+                               AnswerLead (HCX-005)
+                                 도입 한 줄만 작성
   |
   v
-Validator / Fallback           placeholder 무결성 · 숫자 · 단위 · 텍스트 누출
-                               · 금지 표현 · 추론 문장 · 인용 재부착 · 최종 검증
-                               실패 시 결정적 답변으로 복귀
+Validator / Fallback           숫자 근거 대조 · 배수 조작 · 인용 유효성
+                               · 미제공 기업명 · 금지 표현 · 비교 단정
+                               · placeholder 무결성 · 인용 재부착
+                               모든 실패는 결정적 답변으로 복귀
+  |
+  v
+Serialization (API 경계)       retrieved_context · think_trace를 문자열로 렌더링
   |
   v
 API Response                   question_id · question · retrieved_context
-                               · think_trace · answer
+                               · think_trace · answer  (5개 필드 모두 string)
 ```
 
 ## 4. Corpus & Structural Chunking
@@ -182,14 +204,70 @@ retrieval 결과의 순서·점수·후보 payload를 변경하지 않는다는 
 
 ## 7. HyperCLOVA X Safety Strategy
 
-HCX는 답을 만들지 않습니다. 이미 검증된 사실을 자연스러운 한국어로 옮기는 변환기입니다.
+이 에이전트가 쓰는 언어 모델은 **HyperCLOVA X(HCX-005) 하나뿐**이며 `temperature=0`으로
+호출합니다. 다른 LLM은 답변 생성 경로 어디에도 없습니다.
+
+HCX가 붙는 위치는 **도움이 되는 곳에 붙이고 해가 되는 곳에서 뺀다**는 한 가지 기준으로
+정해집니다. 판단 기준은 결정적 생성기가 남기는 `states_figure` 한 값입니다.
+
+| 결정적 답변의 성격 | HCX 관여 |
+|---|---|
+| 확정 수치를 이미 문장으로 진술함 (`states_figure=true`) | **호출하지 않음.** 그대로 서빙 |
+| 수치가 없거나 서술이 필요함 (`states_figure=false`) | 7.2 → 7.3 → 7.4 순으로 시도 |
+| 모든 질의 (성격 무관) | 7.1 질의 해석 검증은 항상 수행 |
+
+수치 답변에서 모델을 빼는 이유는 단순합니다. 숫자는 모델이 **조용히** 망칠 수 있는 유일한
+대상이고 — 없던 단위, 큰 쪽과 작은 쪽이 뒤바뀐 비교 — 그 답변은 이미 사람이 읽을 수 있는
+한 문장이라 모델이 더할 것이 없기 때문입니다.
+
+### 7.1 질의 해석 검증 (모든 질의)
+
+`SemanticQueryFallback.verify`(`app/reasoning/semantic_query_fallback.py`)가 결정적 규칙이
+이미 해석에 성공한 질의까지 포함해 **모든 질의를 HCX에 보냅니다.** 다만 모델은 QueryPlan을
+바꿀 수 없습니다. 결정적으로 RESOLVED된 해석이 그대로 실행되고, 모델이 무엇으로 읽었는지는
+`think_trace.query_validation`에만 기록됩니다.
+
+규칙 기반 해석이 실패한 경우에만 `interpret`이 호출되고, 그때는 결과가 재검증을 거쳐
+plan에 반영됩니다.
+
+### 7.2 답변 작성 — 사후 검증 (서술형 질의)
+
+`AnswerSynthesizer`(`app/generation/answer_synthesis.py`)는 일반적인 RAG입니다. 검색된 공시
+발췌를 번호를 붙여 모델에 주고, 모델이 그 근거만으로 한국어 답변을 쓰고 문장마다 `[n]`을
+답니다. **모델이 실제 수치를 봅니다.** 대신 쓰고 난 뒤에 전부 대조합니다.
+
+| 단계 | 내용 |
+|---|---|
+| 입력 | 서빙된 chunk 최대 8개, 각 1,800자까지 |
+| 요청 | 발췌에 있는 숫자·날짜·이름만 **그대로 복사**할 것, 반올림·환산·재배수 금지, 없는 단위 부여 금지, 비교·증감·순위·손익 단정 금지 |
+| 검증 | 아래 표. 하나라도 걸리면 응답 전체 폐기 |
+| 실패 | 7.3으로 진행 (`answer_synthesis.status`에 거부 사유 기록) |
+
+| 검사 | status |
+|---|---|
+| 빈 응답 · 1,500자 초과 | `empty` · `too_long` |
+| 서빙되지 않은 chunk를 가리키는 인용 | `unknown_citation` |
+| 사실을 쓰면서 인용을 달지 않음 | `no_citation` |
+| 근거의 숫자에 배수(억·조 등)를 새로 붙임 | `rescaled_number:<값>` |
+| 근거에 없는 숫자 | `unsupported_number:<값>` |
+| 투자 권유·전망 표현 | `evaluative_wording:<단어>` |
+| 어느 쪽이 크다는 단정 | `comparison_verdict:<단어>` |
+| 코퍼스에 없는 기업명 | `unsupplied_company` |
+
+숫자 검사는 의미 판단이 아니라 **자릿수 대조**입니다. 근거 텍스트에 그 숫자열이 없으면
+문장이 무엇을 주장하든 근거에서 나온 값이 아닙니다. 배수가 붙은 경우는 배수를 적용한 값만
+주장으로 인정하고, 차이·합·비율처럼 근거 값들로부터 산술적으로 유도되는 값은
+`_accounted_for`가 확인해 허용합니다.
+
+마크다운 울타리처럼 내용이 아닌 흠은 거부 대신 제거합니다.
+
+스위치는 `FESTIVAL_HCX_SYNTHESIS_ENABLED`(기본 `true`)입니다.
+
+### 7.3 답변 나레이션 — 값 마스킹 (7.2가 거부된 경우)
+
+`AnswerNarrator`(`app/generation/answer_narration.py`)는 반대 방향의 안전 장치입니다.
 **모델은 어떤 수치도 보지 못합니다.** 인용 마커·날짜·숫자는 호출 전에 전부 자릿수 없는
 토큰으로 치환되고, 호출 후 원본 문자 그대로 복원됩니다.
-
-### 7.1 답변 나레이션 (모든 질의)
-
-`AnswerNarrator`(`app/generation/answer_narration.py`)가 완성된 결정적 답변을 읽기 쉬운
-한국어로 다시 씁니다. **task_type을 가리지 않으므로 모든 질의에서 HCX가 관여합니다.**
 
 | 단계 | 내용 |
 |---|---|
@@ -200,18 +278,28 @@ HCX는 답을 만들지 않습니다. 이미 검증된 사실을 자연스러운
 | 복원 | `restore_literals`로 원본 값 복귀 후 인용 블록 재부착 |
 | 실패 | 결정적 답변을 그대로 서빙 (`answer_narration.status`에 거부 사유 기록) |
 
+거부 사유는 `empty` · `markdown_fence` · `citation_marker` · placeholder 무결성 사유 ·
+`expanded`(길이 초과) · `digit`(새 숫자) · `evaluative_wording` · `unsupplied_company`입니다.
+
 모델이 바꿀 수 있는 것은 **표현뿐**입니다. 수치·날짜·인용·출처는 바꿀 수 없습니다.
 
 스위치는 `FESTIVAL_HCX_NARRATION_ENABLED`(기본 `true`)로 분리돼 있어, 이 계층만 끄고
-verbalizer·semantic fallback·opening line은 유지할 수 있습니다.
+synthesis·verbalizer·semantic fallback·opening line은 유지할 수 있습니다.
 
 라이브 성공률 측정:
 
 ```bash
 python scripts/measure_answer_narration.py --base-url http://HOST:PORT --show
+python scripts/ask_comparison_set.py --base-url http://HOST:PORT
 ```
 
-### 7.2 Compact claim verbalizer (지분공시 단일 이벤트)
+### 7.4 도입 문장 (7.2·7.3이 모두 거부된 경우)
+
+`AnswerLead`가 답변에 없는 **도입 한 줄만** 씁니다. 본문·표·인용 마커는 전혀 건드리지
+않으며, 마스킹과 검증은 7.3과 같습니다. 나레이션이 성공한 경우에는 두 번 말하게 되므로
+실행하지 않습니다.
+
+### 7.5 Compact claim verbalizer (지분공시 단일 이벤트)
 
 **호출 조건** — 다음을 모두 만족할 때만 호출합니다.
 
@@ -295,6 +383,15 @@ curl -sG http://localhost:8000/answer \
 | `think_trace` | string | 실행 요약을 `key: value` 줄로 이어 붙인 텍스트 (아래 참조) |
 | `answer` | string | 최종 답변. 어떤 경우에도 빈 문자열이 아닙니다 |
 
+`answer` 끝에는 근거 공시 블록이 붙습니다. 평가 기준이 "모든 답변에는 근거 공시를 표시할
+것"을 요구하므로, 식별자만이 아니라 **사람이 확인할 수 있는 공시명과 접수일**을 함께 씁니다.
+
+```text
+[1] doc_id: periodic_20260310002820
+    chunk_id: periodic_20260310002820:ch_70f7b399fe050756e113
+    공시: 삼성전자 · 사업보고서 (2025.12) · 접수일 2026-03-10
+```
+
 **다섯 필드의 값은 모두 string입니다.** 주최측 공지("모든 필드의 값은 문자열(string)타입입니다")를
 따르며, `retrieved_context` 안의 구분 방식은 참가팀 재량이라는 안내에 맞춰 아래 형식을 씁니다.
 직렬화는 `app/api/serialization.py` 한 곳에서만 일어나고, 파이프라인 내부는 계속 구조화된
@@ -319,6 +416,11 @@ provenance: {"table_id":"t7"}
 머리글이고, chunk 원문은 `내용`에 그대로 들어갑니다. 검색 결과가 없으면
 `검색된 공시 근거가 없습니다.`입니다.
 
+chunk 하나의 `내용`은 1,500자에서 끊고 `…(이하 생략)`을 남깁니다. 서빙되는 chunk에는 손익
+계산서 한 장이 통째로 들어오기도 해서 열 건이면 4.8만 자에 달했는데, 필드 전체가 임의의
+지점에서 잘리면 뒤쪽 chunk가 통째로 사라집니다. chunk마다 경계를 두면 열 건이 모두 남고
+잘린 지점이 눈에 보입니다.
+
 `think_trace` — 한 줄에 한 항목. 리스트는 `stages`가 ` > `, `warnings`가 `; `로 이어지고,
 하위 컴포넌트 요약은 compact JSON 한 줄입니다:
 
@@ -330,7 +432,8 @@ retrieval_count: 10
 answerable: true
 warnings: annual_report_source_preferred; periodic_metric_row_preferred
 hcx_status: skipped_no_compact_verified_claim
-query_validation: {"status":"resolved","retrieval_allowed":true}
+answer_synthesis: {"status":"skipped_stated_figure","used":false}
+query_validation: {"status":"resolved","retrieval_allowed":true,"hcx_status":"success"}
 ```
 
 #### think_trace는 chain-of-thought가 아닙니다
@@ -348,7 +451,11 @@ query_validation: {"status":"resolved","retrieval_allowed":true}
 | `selected_evidence_count` | 선택된 근거 수 |
 | `answerable` | 근거로 답변 가능 여부 |
 | `warnings` | 결정적 생성기가 남긴 경고 |
-| `hcx_status` | HCX 사용 결과 (`success` / `skipped_*` / `fallback_*` / `disabled` / `not_configured`) |
+| `hcx_status` | compact claim verbalizer 결과 (`success` / `skipped_*` / `fallback_*` / `disabled` / `not_configured`) |
+| `answer_synthesis` | 7.2 답변 작성 결과와 거부 사유 |
+| `answer_narration` | 7.3 나레이션 결과와 거부 사유 |
+| `answer_lead` | 7.4 도입 문장 결과 |
+| `query_validation` | 결정적 해석 결과와 7.1 HCX 검증 결과 |
 
 ### 오류 응답
 
@@ -433,7 +540,9 @@ OpenAI 호환 엔드포인트로도 적재할 수 있습니다. 다만 계정 ra
 | `FESTIVAL_HCX_TIMEOUT_SECONDS` | `15.0` | |
 | `FESTIVAL_HCX_MAX_TOKENS` | `1024` | |
 | `FESTIVAL_HCX_TEMPERATURE` | `0.0` | |
-| `FESTIVAL_HCX_NARRATION_ENABLED` | `true` | 답변 나레이션만 개별로 끄는 스위치 |
+| `FESTIVAL_HCX_SYNTHESIS_ENABLED` | `true` | 7.2 답변 작성만 개별로 끄는 스위치 |
+| `FESTIVAL_HCX_NARRATION_ENABLED` | `true` | 7.3 나레이션만 개별로 끄는 스위치 |
+| `FESTIVAL_ANSWER_DIRECT_ENABLED` | `true` | 결정적 직답 문장 생성 스위치 |
 
 ### API / 실행
 
@@ -533,6 +642,8 @@ curl -sG http://localhost:8000/answer \
 아래는 **내부 회귀 세트(internal regression set)** 결과입니다. 공식 대회 평가 결과가 아니며,
 개발 중 회귀를 잡기 위해 동결해 둔 자체 질의 60건(Gold40 + Holding20)에 대한 측정치입니다.
 
+### 12.1 Gold60 (2026-08-21 동결 산출물)
+
 | 지표 | 값 |
 |---|---|
 | `question_count` | 60 |
@@ -563,6 +674,27 @@ python scripts/evaluate_postgres_agent_gold60.py \
   --output-dir data/processed/postgres_agent_gold60
 ```
 
+현재 코드로 같은 세트를 다시 돌리면 `end_to_end_success_rate`는 **0.816667**입니다. 위 표는
+동결 시점의 산출물이고 이 값은 그 이후 검색·해석 변경이 누적된 현재 상태입니다.
+`FESTIVAL_ANSWER_DIRECT_ENABLED`를 켠 경우와 끈 경우가 동일하게 0.816667로 나오므로,
+차이는 답변 생성 계층이 아니라 그 앞단에서 발생합니다.
+
+### 12.2 응답 시간 — 두 기업 비교 30문항
+
+서빙 중인 엔드포인트에 실제로 요청해 측정한 값입니다(`scripts/ask_comparison_set.py`).
+
+| 항목 | 값 |
+|---|---|
+| 최소 · 중앙 · 평균 | 0.0초 · 5.2초 · 7.6초 |
+| p90 · 최대 | 13.8초 · 22.0초 |
+| 10초 이하 | 19 / 30 |
+| 20초 이하 | 29 / 30 |
+| 주최측 제한(300초) 대비 최대치 | 7.3% |
+
+가장 느린 22.0초도 제한의 1/13입니다. 0.0초는 코퍼스 범위 밖으로 판정해 검색 이전에 끝난
+경우이고, 가장 느린 구간은 HCX 호출이 두 번 일어난 경우입니다. 언어 모델이 관여하지 않는
+수치 답변은 대체로 2~4초에 끝났습니다.
+
 ## 13. Safety & Fallback
 
 - **답변은 항상 존재합니다.** HCX가 꺼져 있든, 건너뛰든, 거부되든, 결정적 답변이 서빙됩니다.
@@ -571,6 +703,11 @@ python scripts/evaluate_postgres_agent_gold60.py \
   확인이 필요하다는 결정적 문구를 냅니다. 이 경우 HCX는 호출조차 하지 않습니다.
 - **부분 복구를 하지 않습니다.** 검증에 실패한 모델 출력은 고쳐 쓰지 않고 폐기합니다.
   잘못 추정한 값 하나가 결정적 답변 전체보다 위험하기 때문입니다.
+- **숫자는 판단이 아니라 대조로 지킵니다.** 모델이 쓴 모든 숫자는 서빙된 공시 발췌 안에서
+  자릿수 그대로 찾을 수 있어야 하고, 배수가 붙었다면 배수를 적용한 값이 근거에 있거나
+  근거 값들로부터 산술적으로 유도되어야 합니다. 그렇지 않으면 응답 전체가 폐기됩니다.
+- **비교 단정은 모델에게 맡기지 않습니다.** 어느 쪽이 크다는 문장이 모델 출력에 나타나면
+  거부합니다. 비교 결론은 두 값의 단위가 공시 원문에서 확인될 때에만, 결정적 계층이 붙입니다.
 - **비밀값을 노출하지 않습니다.** 오류 응답에 DSN·자격증명·traceback이 포함되지 않으며,
   API 키는 설정 객체의 `repr`에서도 제외됩니다.
 - **투자 자문을 생성하지 않습니다.** 매수·매도·목표주가 등의 표현이 모델 출력에 새로
@@ -587,7 +724,7 @@ python scripts/evaluate_postgres_agent_gold60.py \
 ```text
 .
 ├── app/
-│   ├── api/          # FastAPI 계층 (app, pipeline, schemas, settings)
+│   ├── api/          # FastAPI 계층 (app, pipeline, schemas, settings, serialization)
 │   ├── parsing/      # DART XML 파싱 · 구조 청킹 · 검증
 │   ├── retrieval/    # 임베딩 · lexical/vector 검색 · hybrid 융합
 │   ├── reasoning/    # query understanding · resolver · evidence · composer
