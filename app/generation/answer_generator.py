@@ -132,13 +132,52 @@ def generate_answer(draft: AnswerDraft) -> GeneratedAnswer:
     citations = registry.citations
     return GeneratedAnswer(
         question=draft.question,
-        answer_text=_render_answer_text(sections, citations),
+        answer_text=_render_answer_text(_stated_sections(sections), citations),
         citations=citations,
         sections=tuple(sections),
         warnings=tuple(dict.fromkeys(warnings)),
         confidence=confidence,
         answerable=answerable,
     )
+
+
+#: The section the direct answer is written into.
+DIRECT_ANSWER_TITLE = "답변"
+
+#: Sections whose body is retrieved chunk text, under the titles the composer
+#: writes before presentation renames them.
+_EVIDENCE_TITLE = re.compile(
+    r"^\s*(?:Periodic fact\s+\d+|General evidence|Holding events)\s*$"
+)
+
+
+def _stated_sections(
+    sections: Sequence[GeneratedSection],
+) -> list[GeneratedSection]:
+    """The sections that belong in ``answer``, once the answer has been stated.
+
+    The response contract gives each field a job: ``retrieved_context`` is the
+    documents consulted, and ``answer`` is the answer. While the answer was a
+    dump of those documents the distinction did not matter, but now that a
+    sentence states the figure, repeating every served chunk underneath it
+    buries the answer in its own evidence -- and one live reply pasted a page
+    of IFRS 1118 accounting policy under a one-line answer about investment.
+
+    The chunks are not lost: ``retrieved_context`` carries all of them in full,
+    which is where the criteria look for 근거 완전성. What stays here is what
+    identifies the filings -- the citation block, with 공시명 and 접수일 -- so
+    every answer still shows the disclosure it rests on.
+
+    Without a 답변 section there is no answer to lead with, so nothing is
+    removed and the reply is exactly what it was.
+    """
+
+    sections = list(sections)
+    if not any(section.title == DIRECT_ANSWER_TITLE for section in sections):
+        return sections
+    return [
+        section for section in sections if not _EVIDENCE_TITLE.match(section.title)
+    ]
 
 
 class _CitationRegistry:
@@ -1028,7 +1067,7 @@ def _periodic_sections(
         output.insert(
             0,
             GeneratedSection(
-                title="답변",
+                title=DIRECT_ANSWER_TITLE,
                 content="\n".join(direct_answers[:MAX_DIRECT_ANSWERS]),
                 citations=(),
             ),

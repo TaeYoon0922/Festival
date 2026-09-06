@@ -12,8 +12,10 @@ from __future__ import annotations
 import unittest
 
 from app.generation.answer_generator import (
+    GeneratedSection,
     _direct_answer_line,
     _single_metric_cell,
+    _stated_sections,
     _stated_unit,
     _topic_particle,
 )
@@ -131,6 +133,48 @@ class DirectAnswerLineTests(unittest.TestCase):
         )
 
         self.assertIsNone(line)
+
+
+class StatedSectionsTests(unittest.TestCase):
+    """``answer`` is the answer; the documents are ``retrieved_context``."""
+
+    def _sections(self, *titles: str) -> list[GeneratedSection]:
+        return [
+            GeneratedSection(title=title, content=f"{title} 본문", citations=())
+            for title in titles
+        ]
+
+    def test_evidence_blocks_go_once_the_answer_is_stated(self) -> None:
+        kept = _stated_sections(
+            self._sections("답변", "Periodic fact 1", "Periodic fact 2", "신뢰도")
+        )
+
+        self.assertEqual([section.title for section in kept], ["답변", "신뢰도"])
+
+    def test_general_and_holding_blocks_go_too(self) -> None:
+        kept = _stated_sections(
+            self._sections("답변", "General evidence", "Holding events")
+        )
+
+        self.assertEqual([section.title for section in kept], ["답변"])
+
+    def test_a_limitation_notice_stays(self) -> None:
+        """정보한계 대응 is scored, and it is not evidence."""
+
+        kept = _stated_sections(
+            self._sections("답변", "Periodic fact 1", "주의", "확인 필요")
+        )
+
+        self.assertEqual(
+            [section.title for section in kept], ["답변", "주의", "확인 필요"]
+        )
+
+    def test_nothing_is_removed_without_an_answer(self) -> None:
+        titles = ("Periodic fact 1", "General evidence", "신뢰도")
+
+        kept = _stated_sections(self._sections(*titles))
+
+        self.assertEqual([section.title for section in kept], list(titles))
 
 
 class ParticleTests(unittest.TestCase):

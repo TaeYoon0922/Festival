@@ -476,7 +476,9 @@ class AnswerGeneratorTests(unittest.TestCase):
 
         self.assertIn("44,407,761", generated.answer_text)
         self.assertIn("매출액", generated.answer_text)
-        self.assertIn("재무제표 기준: 연결", generated.answer_text)
+        # The basis used to be a metadata line on the evidence block. It is in
+        # the answer sentence now, which is where a reader was looking for it.
+        self.assertIn("연결기준", generated.answer_text)
         self.assertNotIn("매출원가", generated.answer_text)
         self.assertNotIn("12,076", generated.answer_text)
         self.assertNotIn("unsupported_periodic_claim_removed", " ".join(generated.warnings))
