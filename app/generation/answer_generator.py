@@ -1330,6 +1330,59 @@ class StatedFigure:
         )
 
 
+#: A fiscal term header: "제 56 기". A 손익계산서 states the current term first
+#: and the ones before it after, so a descending run of these names the filing's
+#: own year in the first data column.
+_FISCAL_TERM_HEADER = re.compile(r"^제\s*(\d+)\s*기$")
+
+
+def _current_term_cell(display: str) -> tuple[str, str, str | None] | None:
+    """The current term's figure, when the columns are plain fiscal terms.
+
+    A statement that kept 제 56 기, 제 55 기 and 제 54 기 has not left the figure
+    ambiguous the way 3개월 beside 누적 does: the terms are consecutive and
+    ordered, so the first data column is this filing's own year and the rest are
+    the years before it.
+
+    Reading it is what lets a one-year question be answered at all. Without it
+    the projection returned three columns, no figure was stated, and the
+    comparison layer never ran on a single one of the comparison questions.
+
+    Anything that is not a clean descending run of consecutive fiscal terms
+    returns ``None``, which covers every case where choosing a column would be
+    a guess rather than a reading.
+    """
+
+    rows = [
+        row
+        for row in str(display or "").splitlines()
+        if row.strip().startswith("|") and not set(row.strip()) <= set("|-: ")
+    ]
+    if len(rows) != 2:
+        return None
+    header, data = _table_cells(rows[0]), _table_cells(rows[1])
+    if len(header) != len(data) or len(header) < 3:
+        return None
+
+    terms = [_FISCAL_TERM_HEADER.match(cell) for cell in header[1:]]
+    if not all(terms):
+        return None
+    numbers = [int(match.group(1)) for match in terms]
+    if any(before - after != 1 for before, after in zip(numbers, numbers[1:])):
+        return None
+
+    label, value = data[0], data[1]
+    if not label or not _METRIC_VALUE.match(value):
+        return None
+    row_unit = _ROW_UNIT.search(label)
+    label = _ROW_NUMBERING.sub(
+        "", _ROW_FOOTNOTE.sub("", _ROW_UNIT.sub("", label))
+    ).strip()
+    if not label:
+        return None
+    return label, value, (_text(row_unit.group(1)) if row_unit else None)
+
+
 def _stated_figure(
     fact: Mapping[str, Any],
     source: Mapping[str, Any],
@@ -1359,7 +1412,7 @@ def _stated_figure(
     )
     if not display:
         return None
-    cell = _single_metric_cell(display)
+    cell = _single_metric_cell(display) or _current_term_cell(display)
     if cell is None:
         return None
     label, value, row_unit = cell

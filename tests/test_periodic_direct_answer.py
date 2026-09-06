@@ -132,14 +132,28 @@ class DirectAnswerLineTests(unittest.TestCase):
         self.assertTrue(line.startswith("삼성전자의 2025년 연결기준 매출액은"))
         self.assertTrue(line.endswith("[1]"))
 
-    def test_an_ambiguous_projection_states_nothing(self) -> None:
+    def test_consecutive_fiscal_terms_read_the_current_one(self) -> None:
+        """제 57 기 beside 제 56 기 is this year and last, not an ambiguity."""
+
         line = _line(
             "| 열 1 | 제 57 기 | 제 56 기 |\n"
             "| --- | --- | --- |\n"
             "| 매출액 | 333,605,938 | 300,870,903 |"
         )
 
-        self.assertIsNone(line)
+        self.assertIn("333,605,938", line)
+        self.assertNotIn("300,870,903", line)
+
+    def test_a_duration_split_states_nothing(self) -> None:
+        """3개월 beside 누적 are both true and neither is the answer alone."""
+
+        self.assertIsNone(
+            _line(
+                "| 열 1 | 제 78 기 반기 / 3 개월 | 제 78 기 반기 / 누적 |\n"
+                "| --- | --- | --- |\n"
+                "| 매출액 | 9,212,851 | 16,653,355 |"
+            )
+        )
 
 
 def _figure(

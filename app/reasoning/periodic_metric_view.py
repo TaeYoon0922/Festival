@@ -319,7 +319,19 @@ def _int_value(value: Any) -> int | None:
 
 
 def _strip_footnote_suffix(value: str) -> str:
-    return re.sub(r"\s*[\(\[]\s*주\s*\d+\s*[\)\]]\s*$", "", str(value or "")).strip()
+    """Drop the note reference a statement puts after a row label.
+
+    A filing writes one note as "(주29)" and several as "(주4,24,31)". Only the
+    single form was matched, so 매출액 (주4,24,31) never normalised to 매출액:
+    the row was not recognised as the metric, the projection returned nothing,
+    and the answer fell back to dumping the whole statement.
+    """
+
+    return re.sub(
+        r"\s*[\(\[]\s*주\s*\d+(?:\s*,\s*\d+)*\s*[\)\]]\s*$",
+        "",
+        str(value or ""),
+    ).strip()
 
 
 def _metric_labels(metric: str | None) -> set[str]:
