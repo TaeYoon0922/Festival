@@ -1043,6 +1043,56 @@ def _periodic_source_lines(
     return [f"내용: {display} {marker}"]
 
 
+#: The unit a filing states for a table, either as the chunker's retrieval tag
+#: or as the caption the table itself carries.
+_STATED_UNIT = re.compile(
+    r"\[단위\]\s*([^\n]{1,40})|단위\s*[:：]\s*([^)\n|\]]{1,40})"
+)
+
+#: A grouped figure -- "333,605,938".  A number written like this is an amount,
+#: and an amount without a unit is a number the reader cannot check.
+_GROUPED_AMOUNT = re.compile(r"\d{1,3}(?:,\d{3})+")
+
+
+def _source_text(source: Mapping[str, Any]) -> str:
+    return " ".join(
+        str(source.get(key) or "")
+        for key in ("fact_text", "normalized_fact_text")
+    )
+
+
+def _stated_unit(source: Mapping[str, Any]) -> str | None:
+    """The unit the filing states, or ``None`` when it states none."""
+
+    match = _STATED_UNIT.search(_source_text(source))
+    if match is None:
+        return None
+    return _text(match.group(1) or match.group(2))
+
+
+def _periodic_unit_metadata(
+    source: Mapping[str, Any], source_index: int
+) -> list[str]:
+    """Say what unit the figures are in, or that the filing states none.
+
+    Accuracy is judged on the figures, and a grouped amount with no unit beside
+    it cannot be judged at all: 333,605,938 is a different answer in 원 than in
+    백만원. The unit is never inferred -- the corpus is the only source for it,
+    and a table that states none is reported as stating none, which is the same
+    discipline the growth-rate path already follows.
+    """
+
+    unit = _stated_unit(source)
+    if unit:
+        return [f"근거 {source_index} 단위: {unit}"]
+    if _GROUPED_AMOUNT.search(_source_text(source)):
+        return [
+            f"근거 {source_index} 단위: 해당 표에 단위 표기가 없어 "
+            "공시 원문의 수치를 그대로 표시했습니다."
+        ]
+    return []
+
+
 def _periodic_source_metadata(
     source: Mapping[str, Any],
     source_index: int,
@@ -1060,6 +1110,7 @@ def _periodic_source_metadata(
     basis_label = _basis_label(request, source)
     if basis_label:
         lines.append(f"근거 {source_index} 재무제표 기준: {basis_label}")
+    lines.extend(_periodic_unit_metadata(source, source_index))
     return lines
 
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import unittest
 
 from app.api.pipeline import AnswerPipeline
-from app.api.schemas import AnswerResponse
+from app.api.schemas import StructuredAnswer
 from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
 from app.reasoning.hybrid_evaluation import QueryPlanHybridEvaluator
 from app.reasoning.vector_coverage_policy import (
@@ -210,7 +210,7 @@ class ApiContractTests(unittest.TestCase):
             {k: v for k, v in degraded["think_trace"].items() if k != "warnings"},
             {k: v for k, v in healthy["think_trace"].items() if k != "warnings"},
         )
-        AnswerResponse.model_validate(degraded)
+        StructuredAnswer.model_validate(degraded)
 
     def test_ranking_is_untouched_by_observability(self) -> None:
         healthy = _answer(coverage=_coverage(4, 4))

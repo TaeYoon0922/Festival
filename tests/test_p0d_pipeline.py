@@ -4,7 +4,7 @@ import json
 import unittest
 
 from app.api.pipeline import AnswerPipeline
-from app.api.schemas import AnswerResponse
+from app.api.schemas import StructuredAnswer
 from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
 from app.reasoning.answerability import AnswerabilityGuard
 from app.reasoning.multi_document_planner import MultiDocumentPlanner
@@ -123,7 +123,7 @@ class RetrievalFirewallTests(unittest.TestCase):
         for index, plan in enumerate(cases):
             pipeline, executor = _pipeline(plan)
             payload = pipeline.answer(f"P0D-{index}", plan.raw_query)
-            validated = AnswerResponse.model_validate(payload).model_dump()
+            validated = StructuredAnswer.model_validate(payload).model_dump()
             states.append(validated["think_trace"]["query_understanding"]["status"])
             self.assertEqual(executor.calls, 0)
             self.assertEqual(validated["retrieved_context"], [])
@@ -215,7 +215,7 @@ class RetrievalFirewallTests(unittest.TestCase):
         )
         pipeline, executor = _pipeline(plan, semantic_fallback=fallback)
 
-        payload = AnswerResponse.model_validate(
+        payload = StructuredAnswer.model_validate(
             pipeline.answer("P0D-HCX-SCHEMA", plan.raw_query)
         ).model_dump()
 

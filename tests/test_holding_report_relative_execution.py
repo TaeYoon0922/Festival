@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from app.agent.orchestrator import AgentOrchestrator
 from app.api.pipeline import AnswerPipeline, final_evidence, retrieved_context
-from app.api.schemas import AnswerResponse, RetrievedContextItem
+from app.api.schemas import StructuredAnswer, RetrievedContextItem
 from app.reasoning.holding_correction_finality import (
     STATUS_AMBIGUOUS,
     STATUS_RESOLVED,
@@ -841,7 +841,7 @@ class RepositoryWiringTests(unittest.TestCase):
                 report_relative_execution=adapter(index_of(OLD, NEW))
             ),
         )
-        payload = AnswerResponse.model_validate(
+        payload = StructuredAnswer.model_validate(
             pipeline.answer("PHASE3-E2E", question)
         ).model_dump()
 
@@ -885,7 +885,7 @@ class RepositoryWiringTests(unittest.TestCase):
                 report_relative_execution=adapter(index_of(OLD, NEW))
             ),
         )
-        payload = AnswerResponse.model_validate(
+        payload = StructuredAnswer.model_validate(
             pipeline.answer("PHASE3-E2E-SELECTED", question)
         ).model_dump()
 
@@ -933,7 +933,7 @@ class RepositoryWiringTests(unittest.TestCase):
                         report_relative_execution=adapter(index_of(OLD, NEW))
                     ),
                 )
-                payload = AnswerResponse.model_validate(
+                payload = StructuredAnswer.model_validate(
                     pipeline.answer("PHASE3-DEICTIC", question)
                 ).model_dump()
 

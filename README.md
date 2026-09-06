@@ -5,6 +5,34 @@
 추론으로 근거가 붙은 답변을 생성한 뒤, HyperCLOVA X로 그 답변을 안전하게 자연어로 다듬어
 HTTP API로 제공합니다.
 
+## 0. 평가용 API End-point
+
+제10회 2026 미래에셋증권 AI Festival · 공시 Agent 제출 엔드포인트입니다.
+
+```
+http://101.79.20.171:8000/answer
+```
+
+| 항목 | 값 |
+|---|---|
+| End-point URL | `http://101.79.20.171:8000/answer` |
+| 헬스체크 | `http://101.79.20.171:8000/healthz` |
+| 메서드 · 경로 | `GET /answer` (경로 고정) |
+| 쿼리 파라미터 | `question_id`, `question` |
+| 인증 헤더 | 없음 |
+| 응답 Content-Type | `application/json` |
+| 응답 필드 | `question_id` · `question` · `retrieved_context` · `think_trace` · `answer` (**모두 string**) |
+| 문자 인코딩 | UTF-8 |
+| 가동 기간 | 2026-09-07 ~ 2026-09-20 상시 (systemd `Restart=always`) |
+
+```bash
+curl -sG "http://101.79.20.171:8000/answer" \
+  --data-urlencode "question_id=Q-001" \
+  --data-urlencode "question=삼성전자의 2025년 연결기준 매출액은 얼마인가?"
+```
+
+요청·응답 스키마 전문은 [`docs/EVALUATION_API.md`](docs/EVALUATION_API.md)에 있습니다.
+
 ## 1. Project Overview
 
 | 항목 | 값 |
@@ -223,9 +251,47 @@ curl -sG http://localhost:8000/answer \
 |---|---|---|
 | `question_id` | string | 요청 값 그대로 반환 |
 | `question` | string | 요청 값 그대로 반환 |
-| `retrieved_context` | array | 서빙된 Top-K chunk. rank, chunk_id, doc_id, bm25_score, chunk_type, section_path, report_nm, corp_code, corp_name, rcept_dt, period, content, retrieval_text, source_refs, provenance |
-| `think_trace` | object | 실행 요약 (아래 참조) |
+| `retrieved_context` | string | 서빙된 Top-K chunk를 구분선으로 이어 붙인 텍스트 |
+| `think_trace` | string | 실행 요약을 `key: value` 줄로 이어 붙인 텍스트 (아래 참조) |
 | `answer` | string | 최종 답변. 어떤 경우에도 빈 문자열이 아닙니다 |
+
+**다섯 필드의 값은 모두 string입니다.** 주최측 공지("모든 필드의 값은 문자열(string)타입입니다")를
+따르며, `retrieved_context` 안의 구분 방식은 참가팀 재량이라는 안내에 맞춰 아래 형식을 씁니다.
+직렬화는 `app/api/serialization.py` 한 곳에서만 일어나고, 파이프라인 내부는 계속 구조화된
+형태로 동작합니다.
+
+`retrieved_context` — chunk마다 다음 블록, 블록 사이는 `-` 60자 구분선:
+
+```text
+[1] 삼성전자 · 사업보고서 (2025.12) · 접수일 2026-03-10
+doc_id: periodic_20260310002820
+chunk_id: periodic_20260310002820:ch_70f7b399fe050756e113
+chunk_type: table | bm25_score: 12.34 | corp_code: 00126380 | 기준기간: 2025년 12월
+섹션: III. 재무에 관한 사항 > 2-2. 연결 손익계산서
+내용:
+| 열 1 | 제 57 기 |
+| 매출액 (주30) | 333,605,938 |
+source_refs: [{"row":3,"field":"매출액"}]
+provenance: {"table_id":"t7"}
+```
+
+`retrieval_text`만 따로 싣지 않습니다. 그 고유 정보인 기업명·공시명·섹션 경로가 이미 블록
+머리글이고, chunk 원문은 `내용`에 그대로 들어갑니다. 검색 결과가 없으면
+`검색된 공시 근거가 없습니다.`입니다.
+
+`think_trace` — 한 줄에 한 항목. 리스트는 `stages`가 ` > `, `warnings`가 `; `로 이어지고,
+하위 컴포넌트 요약은 compact JSON 한 줄입니다:
+
+```text
+task_type: periodic_fact
+route: periodic_fact_resolver
+stages: query_understanding > task_router > answer_generator
+retrieval_count: 10
+answerable: true
+warnings: annual_report_source_preferred; periodic_metric_row_preferred
+hcx_status: skipped_no_compact_verified_claim
+query_validation: {"status":"resolved","retrieval_allowed":true}
+```
 
 #### think_trace는 chain-of-thought가 아닙니다
 

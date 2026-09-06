@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.agent.orchestrator import AgentOrchestrator
 from app.api.app import create_app
+from tests.wire_contract import structured as _structured
 from app.api.pipeline import AnswerPipeline
 from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
 from app.reasoning.answerability import AnswerabilityGuard
@@ -1020,7 +1021,7 @@ class ApiTracePropagationTests(ContractDFixture):
             params={"question_id": "trace-fixture", "question": query_plan.raw_query},
         )
         self.assertEqual(response.status_code, 200)
-        return response.json(), orchestrator.result
+        return _structured(response), orchestrator.result
 
     def test_contract_d_mode_reaches_http_trace_without_moving_results(self) -> None:
         payload, result = self.serve()

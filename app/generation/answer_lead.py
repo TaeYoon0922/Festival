@@ -141,22 +141,58 @@ def _elapsed_ms(start: float) -> float:
     return round((perf_counter() - start) * 1000.0, 3)
 
 
-#: Question words that are grammar rather than subject.  Removed so the topic
-#: carries what was asked about and not how it was phrased.
+#: Question words that are grammar rather than subject.  Matched after the tail
+#: below is removed, so an entry here is a bare stem rather than every inflected
+#: form the question might have used.
 _QUESTION_NOISE = frozenset(
     """
-    중 더 큰 작은 가장 제일 어디 어느 무엇 누구 얼마 알려줘 알려 정리해 확인해
-    비교해 인가 인가요 입니까 있나 있는지 해줘 좀 그리고 및 등 의 은 는 이 가
+    중 더 큰 작은 가장 제일 어디 어느 무엇 누구 얼마 알려줘 알려 정리해 정리해줘
+    설명해 설명해줘 비교해 비교해줘 요약해 요약해줘 확인해 확인해줘 인가 인가요
+    입니까 있나 있는지 존재 해줘 해주 좀 그리고 및 등 의 은 는 이 가 기업 회사
+    기준 경우 관련 대해 대한 어떻게 어떤 무슨 각각 모두 전체 비교 설명 요약
+    정리 확인 년에 년도 실시 체결
     """.split()
 )
+
+#: Particles and interrogative endings.  The tokenizer splits on whitespace, so
+#: a content word reaches the noise check with its particle still attached --
+#: "규모가", "기업은", "어디인가" -- and no list of bare stems could ever match it.
+#: Removing the tail first is what makes that list work, and it is why a
+#: comparison question stopped handing its own interrogative half to the model
+#: as though it were the subject.
+_TAIL = re.compile(
+    "(?:이라는|이란|라는|에서의|에서|에게|으로서|으로써|으로|로서|로써|까지|부터"
+    "|보다|처럼|마다|이나|거나|로|인가요|인가|입니까|한가요|하는가|나요|가요|은|는|이"
+    "|가|을|를|의|와|과|도|만|에|들)$"
+)
+
+#: Verb endings the question used to ask with.  "실시한", "체결한", "비교했" name
+#: the asking, not the subject, and the stem underneath is the word worth
+#: framing the answer with.
+_VERB_TAIL = re.compile("(?:했는지|했을|했던|했다|하는|한다|했|한|된|되는)$")
+
+#: A stem shorter than this is not a word, so a tail is only removed while what
+#: remains still reads as one.  "증가" keeps its "가"; "규모가" does not.
+MIN_STEM_CHARS = 2
+
+
+def _stem(token: str) -> str:
+    """Strip trailing particles and asking-verb endings, while a word remains."""
+
+    while True:
+        stripped = _VERB_TAIL.sub("", _TAIL.sub("", token))
+        if stripped == token or len(stripped) < MIN_STEM_CHARS:
+            return token
+        token = stripped
 
 
 def question_topic(query: str) -> tuple[str, ...]:
     """Content words from the question, in order, without its interrogative half."""
 
-    words = []
+    words: list[str] = []
     for token in re.findall(r"[가-힣A-Za-z][가-힣A-Za-z0-9]*", str(query or "")):
-        if len(token) < 2 or token in _QUESTION_NOISE or token in words:
+        token = _stem(token)
+        if len(token) < MIN_STEM_CHARS or token in _QUESTION_NOISE or token in words:
             continue
         words.append(token)
     return tuple(words[:6])

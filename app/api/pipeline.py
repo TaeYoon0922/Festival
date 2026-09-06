@@ -27,7 +27,7 @@ from app.generation.answer_lead import (
     question_topic,
     with_lead,
 )
-from app.generation.answer_presentation import readable_answer
+from app.generation.answer_presentation import annotate_citations, readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
     GeneratedAnswer,
@@ -531,7 +531,9 @@ class AnswerPipeline:
         # line the answer lacks. Body text, tables and citation markers pass
         # through untouched in both steps, and either one failing leaves the
         # answer exactly as it was built.
-        presented = readable_answer(public_answer)
+        presented = annotate_citations(
+            readable_answer(public_answer), public_context
+        )
         lead = self.lead_writer.write(
             lead_request(
                 presented,

@@ -8,6 +8,10 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
+from tests.wire_contract import (
+    structured as _structured,
+    without_filing_labels as _plain,
+)
 from app.api.pipeline import (
     EMPTY_ANSWER_FALLBACK,
     AnswerPipeline,
@@ -259,24 +263,24 @@ class AnswerResponseContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            set(response.json()),
+            set(_structured(response)),
             {"question_id", "question", "retrieved_context", "think_trace", "answer"},
         )
 
     def test_echoes_the_request(self) -> None:
-        payload = _ask(self.client).json()
+        payload = _structured(_ask(self.client))
 
         self.assertEqual(payload["question_id"], QUESTION_ID)
         self.assertEqual(payload["question"], QUESTION)
 
     def test_answer_is_non_empty_text(self) -> None:
-        payload = _ask(self.client).json()
+        payload = _structured(_ask(self.client))
 
         self.assertIsInstance(payload["answer"], str)
         self.assertTrue(payload["answer"].strip())
 
     def test_retrieved_context_reports_the_served_ranking(self) -> None:
-        context = _ask(self.client).json()["retrieved_context"]
+        context = _structured(_ask(self.client))["retrieved_context"]
 
         self.assertEqual([row["rank"] for row in context], [1, 2])
         self.assertEqual(
@@ -286,7 +290,7 @@ class AnswerResponseContractTests(unittest.TestCase):
         self.assertTrue(context[0]["source_refs"])
 
     def test_retrieved_context_omits_gold_only_fields(self) -> None:
-        context = _ask(self.client).json()["retrieved_context"]
+        context = _structured(_ask(self.client))["retrieved_context"]
 
         for row in context:
             self.assertNotIn("is_gold_relevant", row)
@@ -295,7 +299,7 @@ class AnswerResponseContractTests(unittest.TestCase):
 
 class ThinkTraceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.trace = _ask(_client()).json()["think_trace"]
+        self.trace = _structured(_ask(_client()))["think_trace"]
 
     def test_exposes_only_the_execution_summary(self) -> None:
         self.assertEqual(set(self.trace), THINK_TRACE_KEYS)
@@ -322,7 +326,7 @@ class CorrectionTraceTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.payload = _ask(_client(_correction_pipeline)).json()
+        self.payload = _structured(_ask(_client(_correction_pipeline)))
         self.trace = self.payload["think_trace"]
 
     def test_the_correction_block_reaches_the_response(self) -> None:
@@ -371,7 +375,7 @@ class CorrectionTraceTests(unittest.TestCase):
         self.assertEqual(set(self.trace), THINK_TRACE_KEYS)
 
     def test_an_ordinary_response_reports_no_correction(self) -> None:
-        ordinary = _ask(_client()).json()
+        ordinary = _structured(_ask(_client()))
 
         self.assertIsNone(ordinary["think_trace"]["correction"])
         self.assertNotIn("correction_expansion", ordinary["think_trace"]["stages"])
@@ -393,7 +397,7 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        payload = response.json()
+        payload = _structured(response)
         self.assertEqual(
             set(payload),
             {"question_id", "question", "retrieved_context", "think_trace", "answer"},
@@ -428,11 +432,11 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
         self.assertGreater(trace["evidence_count"], 0)
 
     def test_p0c_trace_contains_no_document_or_event_identifiers(self) -> None:
-        payload = _ask(
+        payload = _structured(_ask(
             _client(_p0c_unresolved_pipeline),
             question_id="P0C-HTTP-ID",
             question=P0C_LIFECYCLE_Q,
-        ).json()
+        ))
         serialized = json.dumps(
             payload["think_trace"]["multi_document_planner"],
             ensure_ascii=False,
@@ -457,11 +461,11 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
 
     def test_family_resolution_survives_but_never_reaches_answer(self) -> None:
         question = "삼성중공업이 2025년에 체결한 주요 계약은 모두 몇 건인가?"
-        payload = _ask(
+        payload = _structured(_ask(
             _client(_p0c_bare_contract_pipeline),
             question_id="P0C-HTTP-FAMILY",
             question=question,
-        ).json()
+        ))
 
         trace = payload["think_trace"]["multi_document_planner"]
         self.assertEqual(trace["family_resolution"], "bare_contract_fallback")
@@ -482,7 +486,7 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
             self.assertNotIn(internal, payload["answer"], internal)
 
     def test_non_engagement_omits_the_optional_block(self) -> None:
-        payload = _ask(_client()).json()
+        payload = _structured(_ask(_client()))
 
         self.assertNotIn("multi_document_planner", payload["think_trace"])
         self.assertEqual(set(payload["think_trace"]), THINK_TRACE_KEYS)
@@ -491,7 +495,7 @@ class MultiDocumentHttpTraceTests(unittest.TestCase):
 
 class HcxIntegrationTests(unittest.TestCase):
     def test_disabled_hcx_serves_the_deterministic_answer(self) -> None:
-        payload = _ask(_client()).json()
+        payload = _structured(_ask(_client()))
 
         self.assertEqual(payload["think_trace"]["hcx_status"], "disabled")
         self.assertNotIn("hcx_verbalizer", payload["think_trace"]["stages"])
@@ -499,7 +503,7 @@ class HcxIntegrationTests(unittest.TestCase):
     def test_faithful_hcx_text_is_served(self) -> None:
         detached, expected_final, _ = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
+        payload = _structured(_ask(_client(_hcx_factory(detached.protection.masked))))
 
         self.assertEqual(payload["think_trace"]["hcx_status"], "success")
         self.assertEqual(payload["answer"], expected_final)
@@ -508,21 +512,21 @@ class HcxIntegrationTests(unittest.TestCase):
     def test_served_answer_is_shorter_than_the_full_report(self) -> None:
         detached, _, deterministic = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
+        payload = _structured(_ask(_client(_hcx_factory(detached.protection.masked))))
 
         self.assertLess(len(payload["answer"]), len(deterministic))
 
     def test_served_answer_carries_its_deterministic_citation(self) -> None:
         detached, _, _ = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
+        payload = _structured(_ask(_client(_hcx_factory(detached.protection.masked))))
 
         self.assertIn("[1]", payload["answer"])
 
     def test_served_answer_never_leaks_a_placeholder(self) -> None:
         detached, _, _ = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(detached.protection.masked))).json()
+        payload = _structured(_ask(_client(_hcx_factory(detached.protection.masked))))
 
         self.assertIsNone(PLACEHOLDER_PATTERN.search(payload["answer"]))
         self.assertNotIn("__FESTIVAL_", json.dumps(payload, ensure_ascii=False))
@@ -530,17 +534,17 @@ class HcxIntegrationTests(unittest.TestCase):
     def test_a_multi_event_claim_skips_hcx(self) -> None:
         """The two-event fixture is served deterministically, unchanged."""
 
-        deterministic = _ask(_client()).json()["answer"]
+        deterministic = _plain(_structured(_ask(_client()))["answer"])
 
-        payload = _ask(
+        payload = _structured(_ask(
             _client(_hcx_factory("무엇이든", single_event=False))
-        ).json()
+        ))
 
         self.assertEqual(
             payload["think_trace"]["hcx_status"],
             "skipped_multi_event_compact_claim",
         )
-        self.assertEqual(payload["answer"], deterministic)
+        self.assertEqual(_plain(payload["answer"]), deterministic)
         self.assertNotIn("hcx_verbalizer", payload["think_trace"]["stages"])
 
     def test_a_redundant_unit_never_reaches_the_client(self) -> None:
@@ -552,12 +556,12 @@ class HcxIntegrationTests(unittest.TestCase):
             placeholder, placeholder + "주", 1
         )
 
-        payload = _ask(_client(_hcx_factory(reply))).json()
+        payload = _structured(_ask(_client(_hcx_factory(reply))))
 
         self.assertEqual(
             payload["think_trace"]["hcx_status"], "fallback_redundant_unit_suffix"
         )
-        self.assertEqual(payload["answer"], deterministic)
+        self.assertEqual(_plain(payload["answer"]), deterministic)
         self.assertTrue(payload["answer"].strip())
         self.assertNotIn("%%", payload["answer"])
         self.assertNotIn("주주", payload["answer"])
@@ -572,27 +576,27 @@ class HcxIntegrationTests(unittest.TestCase):
 
         _, _, deterministic = _claim_detachment()
 
-        payload = _ask(_client(_hcx_factory(deterministic))).json()
+        payload = _structured(_ask(_client(_hcx_factory(deterministic))))
 
         self.assertEqual(
             payload["think_trace"]["hcx_status"],
             "fallback_placeholder_integrity_failed",
         )
-        self.assertEqual(payload["answer"], deterministic)
+        self.assertEqual(_plain(payload["answer"]), deterministic)
 
     def test_hallucinating_hcx_falls_back_to_the_deterministic_answer(self) -> None:
         detached, _, deterministic = _claim_detachment()
 
-        payload = _ask(
+        payload = _structured(_ask(
             _client(
                 _hcx_factory(detached.protection.masked + " 총 12,345주 늘었습니다.")
             )
-        ).json()
+        ))
 
         self.assertEqual(
             payload["think_trace"]["hcx_status"], "fallback_validation_failed"
         )
-        self.assertEqual(payload["answer"], deterministic)
+        self.assertEqual(_plain(payload["answer"]), deterministic)
 
 
 class NonEmptyAnswerTests(unittest.TestCase):
@@ -602,7 +606,7 @@ class NonEmptyAnswerTests(unittest.TestCase):
         def factory() -> AnswerPipeline:
             return _pipeline(verbalizer=verbalizer)
 
-        payload = _ask(_client(factory)).json()
+        payload = _structured(_ask(_client(factory)))
         return payload["answer"]
 
     def test_blank_hcx_reply_still_yields_text(self) -> None:
@@ -621,7 +625,7 @@ class NonEmptyAnswerTests(unittest.TestCase):
                 del generated, kwargs
                 return VerbalizationOutcome("", "fallback_error", "blank")
 
-        deterministic = _ask(_client()).json()["answer"]
+        deterministic = _structured(_ask(_client()))["answer"]
 
         self.assertEqual(self._answer(_BlankVerbalizer()), deterministic)
 
@@ -669,7 +673,7 @@ class FailureHandlingTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["reason"], "database_unavailable")
+        self.assertEqual(_structured(response)["reason"], "database_unavailable")
 
     def test_database_outage_never_leaks_connection_details(self) -> None:
         response = self._failure(
@@ -689,13 +693,13 @@ class FailureHandlingTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["reason"], "embedding_unavailable")
+        self.assertEqual(_structured(response)["reason"], "embedding_unavailable")
 
     def test_unexpected_failure_is_sanitized(self) -> None:
         response = self._failure(ValueError("internal detail: secret-token-42"))
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["reason"], "internal_error")
+        self.assertEqual(_structured(response)["reason"], "internal_error")
         self.assertNotIn("secret-token-42", response.text)
 
     def test_pipeline_construction_failure_is_reported(self) -> None:
@@ -705,7 +709,7 @@ class FailureHandlingTests(unittest.TestCase):
         response = _ask(_client(factory))
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["reason"], "embedding_unavailable")
+        self.assertEqual(_structured(response)["reason"], "embedding_unavailable")
 
     def test_unexpected_construction_failure_is_sanitized(self) -> None:
         def factory() -> AnswerPipeline:
@@ -714,7 +718,7 @@ class FailureHandlingTests(unittest.TestCase):
         response = _ask(_client(factory, raise_server_exceptions=False))
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["reason"], "internal_error")
+        self.assertEqual(_structured(response)["reason"], "internal_error")
         self.assertNotIn("postgresql://", response.text)
 
 
@@ -726,7 +730,7 @@ class HealthTests(unittest.TestCase):
         response = _client(factory).get("/healthz")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(_structured(response), {"status": "ok"})
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.api.pipeline import AnswerPipeline
-from app.api.schemas import AnswerResponse
+from app.api.schemas import StructuredAnswer
 from app.api.settings import ApiSettings
 from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
 from app.reasoning.answerability import AnswerabilityGuard
@@ -228,7 +228,7 @@ class ClarificationPipelineTests(unittest.TestCase):
             set(payload),
             {"question_id", "question", "retrieved_context", "think_trace", "answer"},
         )
-        AnswerResponse.model_validate(payload)
+        StructuredAnswer.model_validate(payload)
 
     def test_no_evidence_remains_insufficient_and_not_clarification(self) -> None:
         plan = QueryPlan(
@@ -512,7 +512,7 @@ class ClarificationPipelineTests(unittest.TestCase):
         for internal in ("00126380", "99999999"):
             self.assertNotIn(internal, payload["answer"])
             self.assertNotIn(internal, serialized)
-        AnswerResponse.model_validate(payload)
+        StructuredAnswer.model_validate(payload)
 
     def test_locked_task_type_conflict_keeps_the_validator_question(self) -> None:
         plan = QueryPlan(
@@ -567,7 +567,7 @@ class ClarificationPipelineTests(unittest.TestCase):
         self.assertNotIn(
             "holding_change", json.dumps(payload, ensure_ascii=False, default=str)
         )
-        AnswerResponse.model_validate(payload)
+        StructuredAnswer.model_validate(payload)
 
 #: Two corpus companies in a proven issuer/reporter relation.  Named for the
 #: role each one plays, so no real filer or filing date is encoded here.
@@ -672,7 +672,7 @@ class HoldingAcquisitionFirewallTests(unittest.TestCase):
                 )
                 for label in ("보유주식수", "보유비율"):
                     self.assertNotIn(label, payload["answer"])
-                AnswerResponse.model_validate(payload)
+                StructuredAnswer.model_validate(payload)
 
     def test_bare_ownership_resolves_to_the_current_state_pair(self) -> None:
         """A possession question without acquisition wording still resolves."""

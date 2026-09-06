@@ -262,11 +262,34 @@ class ThinkTrace(BaseModel):
     )
 
 
-class AnswerResponse(BaseModel):
+class StructuredAnswer(BaseModel):
+    """The payload as the pipeline builds it, validated before it is rendered.
+
+    Keeping this model is what makes the string contract safe: the trace key
+    set, the ``exclude_if`` rules and the served-chunk fields are still checked
+    here, and only then flattened to text.  Internal consumers -- the Gold60
+    evaluator, the diagnostics -- keep reading this shape.
+    """
+
     question_id: str
     question: str
     retrieved_context: list[RetrievedContextItem] = Field(default_factory=list)
     think_trace: ThinkTrace
+    answer: str
+
+
+class AnswerResponse(BaseModel):
+    """The wire contract: five top-level fields, every value a string.
+
+    The organiser's notice fixes this -- "모든 필드의 값은 문자열(string)타입입니다"
+    -- and leaves the delimiters inside ``retrieved_context`` to us.  The
+    rendering lives in ``app.api.serialization``.
+    """
+
+    question_id: str
+    question: str
+    retrieved_context: str
+    think_trace: str
     answer: str
 
 

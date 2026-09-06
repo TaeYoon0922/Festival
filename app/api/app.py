@@ -20,7 +20,8 @@ from app.api.pipeline import (
     AnswerPipeline,
     AnswerPipelineError,
 )
-from app.api.schemas import AnswerResponse, ErrorResponse
+from app.api.schemas import AnswerResponse, ErrorResponse, StructuredAnswer
+from app.api.serialization import render_retrieved_context, render_think_trace
 
 
 SERVICE_UNAVAILABLE = 503
@@ -78,7 +79,21 @@ def create_app(
         question: Annotated[NonBlank, Query(min_length=1)],
     ) -> AnswerResponse:
         payload = holder.get().answer(question_id, question)
-        return AnswerResponse.model_validate(payload)
+        # Validate the structure first, then flatten.  The trace contract is
+        # still enforced by the model; the evaluator is handed strings because
+        # its response schema says every field is one.
+        structured = StructuredAnswer.model_validate(payload)
+        return AnswerResponse(
+            question_id=structured.question_id,
+            question=structured.question,
+            retrieved_context=render_retrieved_context(
+                [row.model_dump(mode="json") for row in structured.retrieved_context]
+            ),
+            think_trace=render_think_trace(
+                structured.think_trace.model_dump(mode="json")
+            ),
+            answer=structured.answer,
+        )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

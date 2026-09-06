@@ -66,13 +66,18 @@ result = response.json()
 |---|---|---|
 | `question_id` | string | 요청 값 그대로 |
 | `question` | string | 요청 값 그대로 |
-| `retrieved_context` | array | 답변 생성에 참고한 검색 문서 |
-| `think_trace` | object | 실행 요약 |
+| `retrieved_context` | string | 답변 생성에 참고한 검색 문서 |
+| `think_trace` | string | 실행 요약 |
 | `answer` | string | 최종 답변. **어떤 경우에도 빈 문자열이 아닙니다** |
 
-### `retrieved_context` 항목
+**다섯 필드의 값은 모두 string입니다.** 공지의 "모든 필드의 값은 문자열(string)타입입니다"를
+따르며, `retrieved_context`의 구분 방식은 참가팀 재량이라는 안내에 맞춰 아래 형식을 씁니다.
 
-| 필드 | 타입 | 설명 |
+### `retrieved_context` — chunk당 한 블록, 블록 사이는 `-` 60자 구분선
+
+한 블록에 담기는 값입니다.
+
+| 필드 | 표기 | 설명 |
 |---|---|---|
 | `rank` | integer | 서빙 순위 (1부터) |
 | `chunk_id` | string | 결정적 청크 식별자 |
@@ -90,7 +95,7 @@ result = response.json()
 | `source_refs` | array | 표 행·필드 단위 출처 |
 | `provenance` | object | 문서·섹션·표 추적 정보 |
 
-### `think_trace`
+### `think_trace` — 한 줄에 한 항목 (`key: value`)
 
 **chain-of-thought가 아닙니다.** 어떤 컴포넌트가 실행되었고 무엇으로 결론 났는지에 대한
 실행 요약이며, 모델의 내부 추론 텍스트는 포함되지 않습니다.
@@ -124,41 +129,9 @@ result = response.json()
 {
   "question_id": "Q-001",
   "question": "삼성전자의 2025년 연결기준 매출액은 얼마인가?",
-  "retrieved_context": [
-    {
-      "rank": 1,
-      "chunk_id": "periodic_20260310002820:ch_70f7b399fe050756e113",
-      "doc_id": "periodic_20260310002820",
-      "bm25_score": 12.34,
-      "chunk_type": "table",
-      "section_path": ["III. 재무에 관한 사항", "2-2. 연결 손익계산서"],
-      "report_nm": "사업보고서 (2025.12)",
-      "corp_code": "00126380",
-      "corp_name": "삼성전자",
-      "rcept_dt": "2026-03-10",
-      "period": {"base_year": 2025, "base_month": 12},
-      "content": "| 열 1 | 제 57 기 |\n| --- | --- |\n| 매출액 (주30) | 333,605,938 |",
-      "retrieval_text": "[기업명] 삼성전자\n[공시명] 사업보고서 (2025.12)\n…",
-      "source_refs": [],
-      "provenance": {}
-    }
-  ],
-  "think_trace": {
-    "task_type": "periodic_fact",
-    "route": "periodic_fact_resolver",
-    "stages": [
-      "query_understanding", "query_validation", "task_router",
-      "evidence_builder", "periodic_fact_resolver",
-      "periodic_evidence_selector", "answer_composer",
-      "answer_generator", "answerability_guard"
-    ],
-    "retrieval_count": 10,
-    "selected_evidence_count": 10,
-    "answerable": true,
-    "warnings": ["annual_report_source_preferred"],
-    "hcx_status": "skipped_no_compact_verified_claim"
-  },
-  "answer": "Periodic fact 1\n근거 1 보고 기간: 2025년\n…\n인용\n[1]\ndoc_id: …"
+  "retrieved_context": "[1] 삼성전자 · 사업보고서 (2025.12) · 접수일 2026-03-10\ndoc_id: periodic_20260310002820\nchunk_id: periodic_20260310002820:ch_70f7b399fe050756e113\nchunk_type: table | bm25_score: 12.34 | corp_code: 00126380 | 기준기간: 2025년 12월\n섹션: III. 재무에 관한 사항 > 2-2. 연결 손익계산서\n내용:\n| 열 1 | 제 57 기 |\n| --- | --- |\n| 매출액 (주30) | 333,605,938 |",
+  "think_trace": "task_type: periodic_fact\nroute: periodic_fact_resolver\nstages: query_understanding > query_validation > task_router > evidence_builder > periodic_fact_resolver > periodic_evidence_selector > answer_composer > answer_generator > answerability_guard\nretrieval_count: 10\nselected_evidence_count: 10\nanswerable: true\nwarnings: annual_report_source_preferred\nhcx_status: skipped_no_compact_verified_claim",
+  "answer": "삼성전자의 연결기준 매출액 관련 공시 근거입니다.\n\n정기공시 근거 1\n근거 1 보고 기간: 2025년\n근거 1 보고서: 사업보고서 (2025.12)\n근거 1 재무제표 기준: 연결\n근거 1 단위: 해당 표에 단위 표기가 없어 공시 원문의 수치를 그대로 표시했습니다.\n확인된 사업 또는 공시 내용:\n1.\n내용: | 매출액 (주30) | 333,605,938 | [1]\n\n인용\n[1]\ndoc_id: periodic_20260310002820\nchunk_id: periodic_20260310002820:ch_70f7b399fe050756e113\n공시: 삼성전자 · 사업보고서 (2025.12) · 접수일 2026-03-10"
 }
 ```
 

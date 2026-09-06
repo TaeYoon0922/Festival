@@ -17,7 +17,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.api.pipeline import AnswerPipeline, _clarification_candidate_evidence
-from app.api.schemas import AnswerResponse
+from app.api.schemas import StructuredAnswer
 from app.api.settings import ApiSettings
 from app.generation.hcx_verbalizer import HcxSettings, HcxVerbalizer
 from app.reasoning.answerability import AnswerabilityGuard
@@ -378,7 +378,7 @@ class ThePublicQuestionCitesTheFilingsThatProveIt(unittest.TestCase):
     def test_the_route_is_still_clarification(self) -> None:
         self.assertEqual(self.payload["think_trace"]["route"], "clarification")
         self.assertFalse(self.payload["think_trace"]["answerable"])
-        AnswerResponse.model_validate(self.payload)
+        StructuredAnswer.model_validate(self.payload)
 
     def test_the_text_still_names_the_dimension_to_answer_with(self) -> None:
         self.assertIn("공시일", self.payload["answer"])
@@ -730,7 +730,7 @@ class TheServedEvidenceIsTheRootFilings(unittest.TestCase):
     def test_the_route_is_still_clarification(self) -> None:
         self.assertEqual(self.payload["think_trace"]["route"], "clarification")
         self.assertFalse(self.payload["think_trace"]["answerable"])
-        AnswerResponse.model_validate(self.payload)
+        StructuredAnswer.model_validate(self.payload)
 
     def test_the_two_dates_offered_are_the_two_contracts(self) -> None:
         self.assertIn("2023-03-02", self.payload["answer"])
