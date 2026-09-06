@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import unittest
 
+from decimal import Decimal
+
 from app.generation.answer_generator import (
     GeneratedSection,
-    _direct_answer_line,
+    StatedFigure,
+    _comparison_line,
+    _decimal_amount,
     _single_metric_cell,
+    _stated_figure,
     _stated_sections,
     _stated_unit,
+    _subject_particle,
     _topic_particle,
 )
 
@@ -47,12 +53,13 @@ def _source(fact_text: str) -> dict:
 
 
 def _line(fact_text: str, metric: str = "매출액") -> str | None:
-    return _direct_answer_line(
+    figure = _stated_figure(
         {"corp_name": "삼성전자"},
         _source(fact_text),
         "[1]",
         request={"metric": metric, "basis": "consolidated"},
     )
+    return None if figure is None else figure.sentence
 
 
 class StatedUnitTests(unittest.TestCase):
@@ -133,6 +140,146 @@ class DirectAnswerLineTests(unittest.TestCase):
         )
 
         self.assertIsNone(line)
+
+
+def _figure(
+    company: str,
+    value: str,
+    *,
+    unit: str | None = "백만원",
+    label: str = "당기순이익",
+    period: str = "2024년",
+    basis: str | None = "연결",
+    marker: str = "[1]",
+) -> StatedFigure:
+    return StatedFigure(
+        company=company,
+        period=period,
+        basis=basis,
+        label=label,
+        value=value,
+        unit=unit,
+        marker=marker,
+        amount=_decimal_amount(value),
+    )
+
+
+class AmountTests(unittest.TestCase):
+    def test_thousands_separators_come_off(self) -> None:
+        self.assertEqual(_decimal_amount("5,028,606"), Decimal("5028606"))
+
+    def test_parentheses_are_a_negative(self) -> None:
+        self.assertEqual(_decimal_amount("(1,234)"), Decimal("-1234"))
+
+    def test_a_ratio_keeps_its_magnitude(self) -> None:
+        self.assertEqual(_decimal_amount("42.5%"), Decimal("42.5"))
+
+    def test_prose_is_not_an_amount(self) -> None:
+        self.assertIsNone(_decimal_amount("해당사항 없음"))
+
+
+class ComparisonTests(unittest.TestCase):
+    """The question asks which is larger, so the answer works it out in code."""
+
+    def test_the_larger_side_and_the_gap_are_stated(self) -> None:
+        line = _comparison_line(
+            [
+                _figure("KB금융", "5,028,606"),
+                _figure("신한지주", "4,558,170", marker="[2]"),
+            ]
+        )
+
+        self.assertIn("KB금융이 신한지주보다", line)
+        self.assertIn("470,436백만원 더 큽니다", line)
+        self.assertIn("[1] [2]", line)
+
+    def test_the_order_of_the_two_does_not_change_the_winner(self) -> None:
+        pair = [
+            _figure("신한지주", "4,558,170"),
+            _figure("KB금융", "5,028,606", marker="[2]"),
+        ]
+
+        self.assertIn("KB금융이 신한지주보다", _comparison_line(pair))
+
+    def test_equal_figures_are_reported_equal(self) -> None:
+        line = _comparison_line(
+            [_figure("A전자", "100"), _figure("B전자", "100", marker="[2]")]
+        )
+
+        self.assertIn("같습니다", line)
+        self.assertNotIn("큽니다", line)
+
+    def test_different_units_are_not_compared(self) -> None:
+        """매출액 in 원 against 매출액 in 백만원 is not a comparison."""
+
+        self.assertIsNone(
+            _comparison_line(
+                [
+                    _figure("A전자", "100", unit="원"),
+                    _figure("B전자", "100", unit="백만원", marker="[2]"),
+                ]
+            )
+        )
+
+    def test_different_periods_are_not_compared(self) -> None:
+        self.assertIsNone(
+            _comparison_line(
+                [
+                    _figure("A전자", "100", period="2023년"),
+                    _figure("B전자", "200", period="2024년", marker="[2]"),
+                ]
+            )
+        )
+
+    def test_different_measures_are_not_compared(self) -> None:
+        self.assertIsNone(
+            _comparison_line(
+                [
+                    _figure("A전자", "100", label="매출액"),
+                    _figure("B전자", "200", label="영업이익", marker="[2]"),
+                ]
+            )
+        )
+
+    def test_one_company_is_not_a_comparison(self) -> None:
+        self.assertIsNone(_comparison_line([_figure("A전자", "100")]))
+
+    def test_the_same_company_twice_is_not_a_comparison(self) -> None:
+        self.assertIsNone(
+            _comparison_line(
+                [_figure("A전자", "100"), _figure("A전자", "200", marker="[2]")]
+            )
+        )
+
+    def test_a_negative_compares_below_a_positive(self) -> None:
+        line = _comparison_line(
+            [
+                _figure("흑자사", "1,000"),
+                _figure("적자사", "(2,000)", marker="[2]"),
+            ]
+        )
+
+        self.assertIn("흑자사가 적자사보다", line)
+        self.assertIn("3,000백만원", line)
+
+    def test_a_stated_unit_is_carried_into_the_gap(self) -> None:
+        line = _comparison_line(
+            [
+                _figure("A전자", "300", unit=None),
+                _figure("B전자", "100", unit=None, marker="[2]"),
+            ]
+        )
+
+        self.assertIn("200 더 큽니다", line)
+        self.assertIn("단위 표기 없음", line)
+
+
+class SubjectParticleTests(unittest.TestCase):
+    def test_a_closed_syllable_takes_i(self) -> None:
+        self.assertEqual(_subject_particle("KB금융"), "이")
+
+    def test_an_open_syllable_takes_ga(self) -> None:
+        self.assertEqual(_subject_particle("삼성전자"), "가")
 
 
 class StatedSectionsTests(unittest.TestCase):

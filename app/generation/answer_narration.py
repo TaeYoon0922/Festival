@@ -104,8 +104,10 @@ Never do any of these:
 - Write your own bracketed number; the citation tag already stands for one.
 - Name a company, a period or a measure the lines do not name.
 - Explain, interpret or comment on what a figure means.
-- Conclude, compare, rank, estimate, recommend or predict anything, and do not
-  say which value is larger even when several are given.
+- Decide for yourself which value is larger, or by how much. You cannot see the
+  figures. If one of the lines already states a comparison, restate that line
+  and change nothing about which side it names.
+- Estimate, recommend or predict anything.
 - Mention how confident the answer is.
 - Add a heading, a bullet list, a table, a quotation mark or a Markdown fence.
 

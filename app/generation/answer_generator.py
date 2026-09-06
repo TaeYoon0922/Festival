@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from app.reasoning.answer_composer import AnswerDraft
@@ -940,6 +941,7 @@ def _periodic_sections(
     output: list[GeneratedSection] = []
     warnings: list[str] = []
     direct_answers: list[str] = []
+    stated_figures: list[StatedFigure] = []
     narrative_sources: list[tuple[Mapping[str, Any], str]] = []
     facts_seen = 0
     calculations_seen = 0
@@ -1000,9 +1002,10 @@ def _periodic_sections(
                     supported = False
                     continue
                 marker = " ".join(source_ids)
-                direct = _direct_answer_line(fact, source, marker, request=request)
-                if direct is not None and direct not in direct_answers:
-                    direct_answers.append(direct)
+                figure = _stated_figure(fact, source, marker, request=request)
+                if figure is not None and figure.sentence not in direct_answers:
+                    stated_figures.append(figure)
+                    direct_answers.append(figure.sentence)
                 narrative_sources.append((source, marker))
                 source_lines = _periodic_source_lines(source, marker, request=request)
                 if not source_lines:
@@ -1078,6 +1081,12 @@ def _periodic_sections(
             narrative = _narrative_answer_line(fact, source, marker)
             if narrative is not None and narrative not in direct_answers:
                 direct_answers.append(narrative)
+    # The question asked which is larger; the two values are established and
+    # cited, so the answer says so. Computed here rather than by the model,
+    # which is never shown a figure.
+    comparison = _comparison_line(stated_figures)
+    if comparison is not None:
+        direct_answers.append(comparison)
     if direct_answers:
         # First, because it is the answer. Everything below it is the evidence
         # for it, and a reader who stops after one sentence has still been told
@@ -1241,13 +1250,71 @@ def _single_metric_cell(display: str) -> tuple[str, str, str | None] | None:
     return label, value, (_text(row_unit.group(1)) if row_unit else None)
 
 
-def _direct_answer_line(
+@dataclass(frozen=True)
+class StatedFigure:
+    """One figure this answer states, kept as parts so it can be compared.
+
+    A comparison question is answered by comparing two of these in code. The
+    values are the ones already projected from the cited row, so the comparison
+    rests on the same evidence the sentence does.
+    """
+
+    company: str | None
+    period: str | None
+    basis: str | None
+    label: str
+    value: str
+    unit: str | None
+    marker: str
+    amount: Decimal | None
+
+    @property
+    def sentence(self) -> str:
+        subject = "".join(
+            part
+            for part in (
+                f"{self.company}의 " if self.company else "",
+                f"{self.period} " if self.period else "",
+                f"{self.basis}기준 " if self.basis else "",
+                self.label,
+            )
+        )
+        written = f"{self.value}{self.unit}" if self.unit else self.value
+        tail = "" if self.unit else f" {UNIT_ABSENT_NOTICE}"
+        particle = _topic_particle(self.label)
+        return (
+            f"{subject}{particle} {written}입니다.{tail} {self.marker}"
+        ).replace("  ", " ")
+
+    def comparable_with(self, other: "StatedFigure") -> bool:
+        """Whether the two figures are the same measurement of two companies.
+
+        Everything has to line up: two different issuers, the same measure, the
+        same period, the same basis, the same unit, and a parsed amount on both
+        sides. 매출액 in 백만원 against 매출액 in 원 is not a comparison, and
+        neither is this year against last.
+        """
+
+        return bool(
+            self.amount is not None
+            and other.amount is not None
+            and self.company
+            and other.company
+            and self.company != other.company
+            and self.label == other.label
+            and self.period == other.period
+            and self.basis == other.basis
+            and self.unit == other.unit
+        )
+
+
+def _stated_figure(
     fact: Mapping[str, Any],
     source: Mapping[str, Any],
     marker: str,
     *,
     request: Mapping[str, Any] | None = None,
-) -> str | None:
+) -> StatedFigure | None:
     """One sentence stating what was asked, before any evidence is shown.
 
     The evaluation asks for a 자연어 답변, and an answer that opens with a
@@ -1284,19 +1351,81 @@ def _direct_answer_line(
     # figure when the table's unit was assumed to cover every row.
     unit = row_unit or _stated_unit(source)
 
-    subject = "".join(
-        part
-        for part in (
-            f"{company}의 " if company else "",
-            f"{period_label} " if period_label else "",
-            f"{basis}기준 " if basis else "",
-            label,
-        )
+    return StatedFigure(
+        company=company,
+        period=period_label,
+        basis=basis,
+        label=label,
+        value=value,
+        unit=unit,
+        marker=marker,
+        amount=_decimal_amount(value),
     )
-    amount = f"{value}{unit}" if unit else value
-    tail = "" if unit else f" {UNIT_ABSENT_NOTICE}"
-    particle = _topic_particle(label)
-    return f"{subject}{particle} {amount}입니다.{tail} {marker}".replace("  ", " ")
+
+
+def _decimal_amount(value: str) -> Decimal | None:
+    """The figure as a number, or ``None`` when it is not one to compare.
+
+    Parentheses are how a filing writes a negative, and the thousands
+    separators come off. A percentage keeps its magnitude: two ratios compare
+    against each other, and the unit check keeps a ratio away from an amount.
+    """
+
+    text = str(value or "").strip()
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.strip("()").rstrip("%").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return None
+    return -amount if negative else amount
+
+
+def _grouped(amount: Decimal) -> str:
+    """A difference written the way the filing writes its figures."""
+
+    quantised = amount.normalize()
+    if quantised == quantised.to_integral_value():
+        return f"{int(quantised):,}"
+    return f"{quantised:,f}"
+
+
+def _comparison_line(figures: Sequence[StatedFigure]) -> str | None:
+    """State which of two figures is larger, and by how much.
+
+    The question asks it -- "어느 쪽이 더 크고 차이는" -- and the two values are
+    already established and cited, so the comparison is arithmetic on verified
+    evidence rather than a judgement. It is computed here, in code, and handed
+    to the model as a fact like any other: the model is never shown the figures
+    and so could not have compared them itself.
+
+    ``None`` unless exactly two figures were stated and they measure the same
+    thing over the same period in the same unit.
+    """
+
+    if len(figures) != 2:
+        return None
+    first, second = figures
+    if not first.comparable_with(second):
+        return None
+
+    markers = f"{first.marker} {second.marker}"
+    if first.amount == second.amount:
+        particle = _topic_particle(first.label)
+        return f"두 회사의 {first.label}{particle} 같습니다. {markers}"
+
+    larger, smaller = (
+        (first, second) if first.amount > second.amount else (second, first)
+    )
+    gap = _grouped(abs(larger.amount - smaller.amount))
+    unit = larger.unit or ""
+    tail = "" if larger.unit else f" {UNIT_ABSENT_NOTICE}"
+    return (
+        f"{larger.label} 기준으로는 {larger.company}{_subject_particle(larger.company)} "
+        f"{smaller.company}보다 {gap}{unit} 더 큽니다.{tail} {markers}"
+    ).replace("  ", " ")
 
 
 #: A narrative answer is prose, so the table rows in the same chunk are not it.
@@ -1358,6 +1487,15 @@ def _narrative_answer_line(
     )
     prose = prose.strip()
     return f"{context} 기준: {prose} {marker}" if context else f"{prose} {marker}"
+
+
+def _subject_particle(word: str) -> str:
+    """``이`` after a closed syllable, ``가`` after an open one."""
+
+    last = (str(word or "").strip() or " ")[-1]
+    if "가" <= last <= "힣":
+        return "이" if (ord(last) - 0xAC00) % 28 else "가"
+    return "가"
 
 
 def _topic_particle(word: str) -> str:
