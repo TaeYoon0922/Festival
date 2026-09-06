@@ -340,11 +340,15 @@ def _accounted_for(
     and cost more.
     """
 
-    candidates = [amount for amount in (_amount(written),) if amount is not None]
-    if scale and candidates:
-        candidates.append(candidates[0] * _SCALES[scale])
-    if not candidates:
+    amount = _amount(written)
+    if amount is None:
         return False
+    # A scale word makes the claim the scaled value and nothing else. Keeping
+    # the bare value as a candidate too would defeat the whole check: the bare
+    # value is the figure whose digits were found in the evidence, so
+    # 300,870,903십억 would pass on the strength of 300,870,903 being printed
+    # somewhere -- which is exactly the fabrication this refuses.
+    candidates = [amount * _SCALES[scale]] if scale else [amount]
 
     available = set(operands)
     # The figure itself, scaled: 383십억 is the 383,000,000,000 the filing
@@ -387,8 +391,11 @@ def _digit_scales(compact: str) -> set[str]:
 #: unit at all, and another wrote 천 원 while comparing 백만원 against 원 and
 #: naming the smaller company the larger.
 _UNIT_AFTER_NUMBER = re.compile(
-    r"\d[\d,.]*\s*(십억\s*원|백만\s*원|천\s*원|억\s*원|조\s*원|만\s*원|원|십억|백만|천|억|조|주)"
+    r"\d[\d,.]*\s*(원|주)(?![가-힣])"
 )
+#: Scale words are not handled here. A figure said at a scale is judged by the
+#: arithmetic above -- 383십억 has to equal a figure the filings print -- and
+#: stripping the 십억 off a verified restatement would turn it into 383.
 #: ``%`` and ``배`` are not scale claims about a filing's figures -- they are
 #: what a computed share or ratio is written in, and the arithmetic behind it
 #: is checked separately. Only the monetary and count scales are guarded here.
