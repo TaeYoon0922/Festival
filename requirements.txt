@@ -1,8 +1,18 @@
-# Data loading dependencies.
-pandas
-openpyxl
-psycopg[binary]
+# Runtime dependencies for the evaluation API, pinned.
+#
+# Exact versions because the submission asks for a reproducible environment and
+# because this project depends on behaviour that moved recently: the response
+# schema uses pydantic's Field(exclude_if=...), which arrived in 2.12, so an
+# unpinned rebuild could silently produce a different think_trace contract.
+#
+# Verified together against the served endpoint on 2026-09-06.
+
+# Data loading.
+pandas==3.0.5
+openpyxl==3.1.5
+psycopg[binary]==3.3.4
 
 # Answer API.
-fastapi>=0.115
-uvicorn[standard]>=0.30
+fastapi==0.141.1
+pydantic==2.13.4
+uvicorn[standard]==0.52.4

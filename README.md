@@ -42,7 +42,7 @@ curl -sG "http://101.79.20.171:8000/answer" \
 | 공시 문서 | **4,204건** / 원본 파일 4,619개 (XML 4,616 + HTML 3) |
 | 청크 | 1,363,336개 (text 229,725 / table 1,071,368 / projection 62,243) |
 | 저장소 | PostgreSQL 16 + pgvector (HNSW, cosine) |
-| 임베딩 | CLOVA Studio OpenAI 호환 엔드포인트, `bge-m3`, 1024차원 |
+| 임베딩 | 로컬 BGE-M3 추론(`bge_m3_local`), `BAAI/bge-m3`, 1024차원 |
 | 검색 | lexical + vector → RRF → deterministic rerank |
 | 생성 | 결정적 answer generator + HyperCLOVA X(HCX-005) verbalizer |
 | API | FastAPI + uvicorn, `GET /healthz`, `GET /answer` |
@@ -146,9 +146,20 @@ API Response                   question_id · question · retrieved_context
 | `rerank_mode` | `legacy` |
 | `rerank_window_size` | 2 |
 
-벡터 검색이 실패하면 lexical 결과로 계속 진행합니다(`fallback_on_vector_error`). 임베딩은
-CLOVA Studio의 OpenAI 호환 `/v1/openai/embeddings` 엔드포인트로 `bge-m3` 1024차원을 얻으며,
-입력이 길어 `40003`이 반환되면 안전하게 분할해 평균 풀링한 뒤 정규화합니다.
+벡터 검색이 실패하면 lexical 결과로 계속 진행합니다(`fallback_on_vector_error`).
+
+임베딩은 **제출 서버에서 로컬 BGE-M3 추론(`bge_m3_local`, `BAAI/bge-m3`, 1024차원)** 으로
+얻습니다. 적재된 청크 임베딩과 질의 임베딩이 같은 모델·버전이어야 하므로 운영 설정도
+이 값으로 고정되어 있습니다([9. Environment Variables](#9-environment-variables)).
+
+CLOVA Studio의 OpenAI 호환 `/v1/openai/embeddings` 경로(`clova_studio`)도 구현되어 있고
+`FESTIVAL_EMBEDDING_PROVIDER`로 선택합니다. 이 경로에서는 입력이 길어 `40003`이 반환되면
+안전하게 분할해 평균 풀링한 뒤 정규화합니다. 임베딩 모델은 답변을 생성하지 않으므로
+LLM 제한(HyperCLOVA X) 대상이 아닙니다.
+
+벡터 커버리지는 코퍼스 전체가 아니라 부분입니다. 후보 청크에 임베딩이 없으면 하이브리드가
+아니라 lexical 단독으로 동작하며, 그 사실을 숨기지 않고 `think_trace.warnings`에
+`vector_coverage_absent:provider=…,candidates=…,embedded=…,ratio=…`로 남깁니다.
 
 ## 6. Agent / Reasoning Pipeline
 
