@@ -347,6 +347,11 @@ def _accounted_for(
         return False
 
     available = set(operands)
+    # The figure itself, scaled: 383십억 is the 383,000,000,000 the filing
+    # prints. Only sums and differences were searched, so an exact match at a
+    # scale fell through to a refusal.
+    if any(value in available for value in candidates):
+        return True
     for value in candidates:
         for operand in operands:
             if operand - value in available or value - operand in available:
@@ -565,7 +570,12 @@ def accept_synthesis(
             # it that way too: 333,605,938 백만원 restated as 333조 is a
             # different number wearing the same digits.
             if scale and f"{digits}{scale}" not in _digit_scales(compact_evidence):
-                raise SynthesisRejected(f"rescaled_number:{written}{scale}")
+                # 383십억 is 383,000,000,000, which is the figure the filing
+                # prints. Restating a number at a scale is only wrong when the
+                # arithmetic is wrong, and that is checkable: refusing it
+                # outright refused four correct answers in one run.
+                if not _accounted_for(written, scale, operands):
+                    raise SynthesisRejected(f"rescaled_number:{written}{scale}")
             continue
         # A comparison question asks for the gap, and the gap is in no filing.
         # It is still checkable: it has to be the difference between two figures

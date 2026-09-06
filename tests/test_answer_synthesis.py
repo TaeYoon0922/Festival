@@ -256,6 +256,35 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertIn("우수한", self._accept(reply))
 
+    def test_a_correct_rescale_is_allowed(self) -> None:
+        """383십억 is the 383,000,000,000 the filing prints, said differently."""
+
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "LG이노텍",
+                 "report_nm": "신규시설투자등", "rcept_dt": "2024-02-20",
+                 "section_path": [],
+                 "content": "| 투자금액(원) | 383,000,000,000 |"},
+            ]
+        )
+        reply = "LG이노텍의 투자금액은 383십억원입니다. [1]"
+
+        self.assertIn("383십억", accept_synthesis(reply, extracts))
+
+    def test_a_rescale_the_arithmetic_does_not_support_is_refused(self) -> None:
+        extracts = evidence_extracts(
+            [
+                {"chunk_id": "a", "doc_id": "a", "corp_name": "LG이노텍",
+                 "report_nm": "신규시설투자등", "rcept_dt": "2024-02-20",
+                 "section_path": [],
+                 "content": "| 투자금액(원) | 383,000,000,000 |"},
+            ]
+        )
+
+        with self.assertRaises(SynthesisRejected) as raised:
+            accept_synthesis("투자금액은 383조원입니다. [1]", extracts)
+        self.assertTrue(raised.exception.reason.startswith("rescaled_number"))
+
     def test_a_share_worked_out_from_the_figures_is_allowed(self) -> None:
         reply = "SK하이닉스 매출액은 삼성전자의 19.8% 수준입니다. [1] [2]"
 
