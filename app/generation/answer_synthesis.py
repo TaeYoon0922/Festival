@@ -121,6 +121,9 @@ _CITATION = re.compile(r"\[(\d+)\]")
 _NUMBER = re.compile(r"\d[\d,.]*")
 _WORD = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9]*")
 _FENCE = re.compile(r"```")
+#: Emphasis and bullets. The prompt asks for plain sentences and a live reply
+#: came back in bold with a bulleted calculation under it.
+_MARKUP = re.compile(r"\*\*|^\s*[-*+]\s+", re.MULTILINE)
 
 #: Its own switch. This is the layer that shows the model real figures, so it
 #: can be turned off on its own without giving up anything else HCX does here.
@@ -322,6 +325,44 @@ def _derivable_amounts(evidence: str) -> set[Decimal]:
     return derived
 
 
+#: A unit written straight after a figure. The scale is the whole meaning of a
+#: disclosure number, so one the filings never printed is not a formatting
+#: choice: a live reply put 십억 원 after four figures whose filings state no
+#: unit at all, and another wrote 천 원 while comparing 백만원 against 원 and
+#: naming the smaller company the larger.
+_UNIT_AFTER_NUMBER = re.compile(
+    r"\d[\d,.]*\s*(십억\s*원|백만\s*원|천\s*원|억\s*원|조\s*원|만\s*원|원|십억|백만|천|억|조|주)"
+)
+#: ``%`` and ``배`` are not scale claims about a filing's figures -- they are
+#: what a computed share or ratio is written in, and the arithmetic behind it
+#: is checked separately. Only the monetary and count scales are guarded here.
+
+
+def _units_after_numbers(text: str) -> set[str]:
+    return {
+        re.sub(r"\s+", "", match) for match in _UNIT_AFTER_NUMBER.findall(text)
+    }
+
+
+def _unit_words(evidence: str) -> set[str]:
+    """Units the filings themselves wrote, in any position.
+
+    Read from the whole extract rather than only from beside a figure: a table
+    states its unit in a caption or a header, and a reply is entitled to use
+    the unit its source printed there.
+    """
+
+    compact = re.sub(r"\s+", "", evidence)
+    return {
+        unit
+        for unit in (
+            "십억원", "백만원", "천원", "억원", "조원", "만원", "원",
+            "십억", "백만", "천", "억", "조", "주",
+        )
+        if unit in compact
+    }
+
+
 def _evidence_text(extracts: Sequence[Mapping[str, Any]]) -> str:
     """Everything the model was shown, which is what it may draw on.
 
@@ -367,7 +408,7 @@ def accept_synthesis(
     text = _text(reply).strip('"').strip("'")
     if not text:
         raise SynthesisRejected("empty")
-    if _FENCE.search(text):
+    if _FENCE.search(text) or _MARKUP.search(text):
         raise SynthesisRejected("markdown_fence")
     if len(text) > MAX_ANSWER_CHARS:
         raise SynthesisRejected("too_long")
@@ -403,6 +444,10 @@ def accept_synthesis(
 
     if _scaled_forms(without_markers) - _scaled_forms(evidence):
         raise SynthesisRejected("rescaled_number")
+
+    invented = _units_after_numbers(without_markers) - _unit_words(evidence)
+    if invented:
+        raise SynthesisRejected("invented_unit")
 
     for word in _BANNED:
         if word in text and word not in evidence:

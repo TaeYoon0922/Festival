@@ -1332,6 +1332,13 @@ class StatedFigure:
             and self.label == other.label
             and self.period == other.period
             and self.basis == other.basis
+            # Both units stated, and the same one. Two unknown units are not a
+            # match, they are two unknowns: 삼성전기 wrote 10,294,102,976,435 in
+            # 원 and LG이노텍 wrote 21,200,755 in 백만원, and comparing the
+            # digits made the smaller company the larger one by a factor of a
+            # million. A comparison needs a scale, and this pipeline only knows
+            # the scale when the filing prints it.
+            and self.unit is not None
             and self.unit == other.unit
         )
 
@@ -1501,6 +1508,30 @@ def _one_figure_per_company(
     return list(kept.values())
 
 
+def _uncomparable_notice(
+    first: StatedFigure, second: StatedFigure
+) -> str | None:
+    """Say why two figures were not compared, when the reason is the unit.
+
+    Answering "어느 쪽이 더 큰가" with silence reads as having missed the
+    question. Saying that the filings state no unit for these figures answers
+    it honestly: the figures are both here, and what is missing is the scale
+    that would let them be put side by side.
+    """
+
+    if first.unit is not None and second.unit is not None:
+        return None
+    if first.label != second.label or first.period != second.period:
+        return None
+    joiner = "과" if _has_final_consonant(first.company) else "와"
+    return (
+        f"{first.company}{joiner} {second.company}의 {first.label}"
+        f"{_topic_particle(first.label)} 공시 원문에 단위 표기가 없어 "
+        "어느 쪽이 큰지 직접 비교하지 않았습니다. "
+        f"{first.marker} {second.marker}"
+    )
+
+
 def _comparison_line(figures: Sequence[StatedFigure]) -> str | None:
     """State which of two figures is larger, and by how much.
 
@@ -1519,7 +1550,7 @@ def _comparison_line(figures: Sequence[StatedFigure]) -> str | None:
         return None
     first, second = figures
     if not first.comparable_with(second):
-        return None
+        return _uncomparable_notice(first, second)
 
     markers = f"{first.marker} {second.marker}"
     if first.amount == second.amount:
@@ -1599,13 +1630,21 @@ def _narrative_answer_line(
     return f"{context} 기준: {prose} {marker}" if context else f"{prose} {marker}"
 
 
+def _has_final_consonant(word: str) -> bool:
+    """Whether the word ends in a closed Korean syllable.
+
+    Every Korean particle in this module picks its form from this, so the
+    answer reads as a sentence rather than as a form with 은(는) in it.
+    """
+
+    last = (str(word or "").strip() or " ")[-1]
+    return "가" <= last <= "힣" and bool((ord(last) - 0xAC00) % 28)
+
+
 def _subject_particle(word: str) -> str:
     """``이`` after a closed syllable, ``가`` after an open one."""
 
-    last = (str(word or "").strip() or " ")[-1]
-    if "가" <= last <= "힣":
-        return "이" if (ord(last) - 0xAC00) % 28 else "가"
-    return "가"
+    return "이" if _has_final_consonant(word) else "가"
 
 
 def _topic_particle(word: str) -> str:
@@ -1617,10 +1656,7 @@ def _topic_particle(word: str) -> str:
     Latin word or a digit.
     """
 
-    last = (str(word or "").strip() or " ")[-1]
-    if "가" <= last <= "힣":
-        return "은" if (ord(last) - 0xAC00) % 28 else "는"
-    return "는"
+    return "은" if _has_final_consonant(word) else "는"
 
 
 def _periodic_source_metadata(

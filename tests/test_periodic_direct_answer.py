@@ -276,16 +276,33 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("흑자사가 적자사보다", line)
         self.assertIn("3,000백만원", line)
 
-    def test_a_stated_unit_is_carried_into_the_gap(self) -> None:
+    def test_unknown_units_are_not_compared(self) -> None:
+        """삼성전기 wrote 원 and LG이노텍 wrote 백만원, and neither said so.
+
+        Comparing the digits made the smaller company the larger one by a
+        factor of a million. Two unknown units are two unknowns, not a match.
+        """
+
         line = _comparison_line(
             [
-                _figure("A전자", "300", unit=None),
-                _figure("B전자", "100", unit=None, marker="[2]"),
+                _figure("A전자", "10,294,102,976,435", unit=None),
+                _figure("B전자", "21,200,755", unit=None, marker="[2]"),
             ]
         )
 
-        self.assertIn("200 더 큽니다", line)
-        self.assertIn("단위 표기 없음", line)
+        self.assertNotIn("더 큽니다", line)
+        self.assertIn("단위 표기가 없어", line)
+        self.assertIn("[1] [2]", line)
+
+    def test_a_stated_unit_is_carried_into_the_gap(self) -> None:
+        line = _comparison_line(
+            [
+                _figure("A전자", "300", unit="백만원"),
+                _figure("B전자", "100", unit="백만원", marker="[2]"),
+            ]
+        )
+
+        self.assertIn("200백만원 더 큽니다", line)
 
 
 class SubjectParticleTests(unittest.TestCase):
