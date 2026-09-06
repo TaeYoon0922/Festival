@@ -30,6 +30,7 @@ from app.generation.answer_lead import (
     with_lead,
 )
 from app.generation.answer_narration import AnswerNarrator
+from app.generation.answer_synthesis import AnswerSynthesizer
 from app.generation.answer_presentation import annotate_citations, readable_answer
 from app.generation.answer_generator import (
     CitationAwareAnswerGenerator,
@@ -190,6 +191,7 @@ class AnswerPipeline:
         verbalizer: HcxVerbalizer | None = None,
         lead_writer: AnswerLeadWriter | None = None,
         narrator: AnswerNarrator | None = None,
+        synthesizer: AnswerSynthesizer | None = None,
         multi_document_planner: MultiDocumentPlanner | None = None,
         multi_document_executor: MultiDocumentExecutor | None = None,
         multi_document_evidence: MultiDocumentEvidenceBuilder | None = None,
@@ -206,6 +208,7 @@ class AnswerPipeline:
         self.verbalizer = verbalizer or HcxVerbalizer()
         self.lead_writer = lead_writer or AnswerLeadWriter()
         self.narrator = narrator or AnswerNarrator()
+        self.synthesizer = synthesizer or AnswerSynthesizer()
         self._lead_corpus_companies: tuple[str, ...] | None = None
         # P0-C is additive and opt-in. Without an executor wired the pipeline
         # behaves exactly as it did before, which is what the frozen Gold60
@@ -304,6 +307,7 @@ class AnswerPipeline:
             verbalizer=HcxVerbalizer(hcx_settings),
             lead_writer=AnswerLeadWriter(hcx_settings),
             narrator=AnswerNarrator(hcx_settings),
+            synthesizer=AnswerSynthesizer(hcx_settings),
             multi_document_planner=multi_document_planner,
             multi_document_executor=MultiDocumentExecutor(
                 event_repository=event_repository,
@@ -544,6 +548,31 @@ class AnswerPipeline:
         presented = annotate_citations(
             readable_answer(public_answer), public_context
         )
+        # First, the ordinary thing: HyperCLOVA X reads the served filings and
+        # writes the answer. It is checked afterwards rather than blindfolded
+        # beforehand -- every figure it wrote must be in those filings, every
+        # citation must point at one of them, and no issuer may appear that
+        # they do not name. A refusal returns nothing and the deterministic
+        # answer continues below, so this is tried on every question.
+        synthesis, synthesis_citations = self.synthesizer.synthesize(
+            question, public_context, corpus_companies=self._corpus_companies()
+        )
+        if synthesis.status != "not_eligible":
+            trace["answer_synthesis"] = synthesis.to_public_dict()
+        if synthesis.succeeded:
+            stages = list(trace.get("stages") or ())
+            trace["stages"] = [*stages, "answer_synthesis"]
+            answer = synthesis.text
+            if synthesis_citations:
+                answer = f"{answer}\n\n{synthesis_citations}"
+            return {
+                "question_id": question_id,
+                "question": question,
+                "retrieved_context": public_context,
+                "think_trace": trace,
+                "answer": _non_empty(answer),
+            }
+
         # HyperCLOVA X rewrites the answer into prose it can read but cannot
         # alter: every figure, date and citation is a digit-free token before
         # the call and is restored byte for byte after it. A refused rewrite

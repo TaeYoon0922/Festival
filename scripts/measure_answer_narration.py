@@ -60,6 +60,18 @@ def trace_value(think_trace: object, key: str) -> str:
     return ""
 
 
+def synthesis_status(think_trace: object) -> str:
+    """``answer_synthesis`` is a JSON object on one line; read its status."""
+
+    raw = trace_value(think_trace, "answer_synthesis")
+    if not raw:
+        return "-"
+    try:
+        return str(json.loads(raw).get("status") or "-")
+    except (ValueError, AttributeError):
+        return "unparsed"
+
+
 def narration_status(think_trace: object) -> str:
     """``answer_narration`` is a JSON object on one line; read its status."""
 
@@ -103,8 +115,8 @@ def main(argv: list[str] | None = None) -> int:
         status = narration_status(trace)
         statuses[status] += 1
         print(
-            f"{question_id}  narration={status:<28}"
-            f"hcx={trace_value(trace, 'hcx_status')}"
+            f"{question_id}  synthesis={synthesis_status(trace):<26}"
+            f"narration={status:<28}"
         )
         if arguments.show and status not in shown:
             shown.add(status)

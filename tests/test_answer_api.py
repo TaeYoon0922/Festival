@@ -62,8 +62,10 @@ THINK_TRACE_KEYS = {
     "warnings",
     "hcx_status",
     "correction",
-    # HCX rewrites every answer long enough to be worth rewriting, so the
-    # narration's outcome is reported on every response that reaches it.
+    # HCX is asked for the answer on every response that served filings, and
+    # rewrites the deterministic one when that was refused, so both outcomes
+    # are reported.
+    "answer_synthesis",
     "answer_narration",
 }
 

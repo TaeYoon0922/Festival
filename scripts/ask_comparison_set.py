@@ -84,6 +84,18 @@ def trace_value(think_trace: object, key: str) -> str:
     return ""
 
 
+def synthesis_status(think_trace: object) -> str:
+    """``answer_synthesis`` is a JSON object on one line; read its status."""
+
+    raw = trace_value(think_trace, "answer_synthesis")
+    if not raw:
+        return "-"
+    try:
+        return str(json.loads(raw).get("status") or "-")
+    except (ValueError, AttributeError):
+        return "unparsed"
+
+
 def narration_status(think_trace: object) -> str:
     raw = trace_value(think_trace, "answer_narration")
     if not raw:
@@ -122,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     routes: Counter[str] = Counter()
+    syntheses: Counter[str] = Counter()
     narrations: Counter[str] = Counter()
     answerable = 0
     failures = 0
@@ -146,12 +159,14 @@ def main(argv: list[str] | None = None) -> int:
         route = trace_value(trace, "route") or "-"
         supported = trace_value(trace, "answerable") == "true"
         routes[route] += 1
+        syntheses[synthesis_status(trace)] += 1
         narrations[narration_status(trace)] += 1
         answerable += int(supported)
 
         print(
-            f"{question_id}  {elapsed:5.1f}s  route={route:<26}"
-            f"answerable={str(supported):<5} narration={narration_status(trace)}"
+            f"{question_id}  {elapsed:5.1f}s  route={route:<24}"
+            f"ans={str(supported):<5} syn={synthesis_status(trace):<24}"
+            f"nar={narration_status(trace)}"
         )
         if arguments.show:
             print("-" * 74)
